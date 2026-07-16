@@ -8,7 +8,12 @@ import {
   ClipOp,
   BlurStyle,
 } from '@shopify/react-native-skia';
-import type { SkCanvas, SkFont, SkPaint } from '@shopify/react-native-skia';
+import type {
+  SkCanvas,
+  SkFont,
+  SkPaint,
+  SkPath,
+} from '@shopify/react-native-skia';
 import type { LivelineFonts } from '../types';
 
 /**
@@ -64,6 +69,8 @@ export interface Ctx2D {
   save(): void;
   restore(): void;
   beginPath(): void;
+  /** Adopt an existing SkPath as the current path (Skia extension, no Canvas2D equivalent) */
+  beginPathFrom(path: SkPath): void;
   closePath(): void;
   moveTo(x: number, y: number): void;
   lineTo(x: number, y: number): void;
@@ -230,6 +237,10 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
 
     beginPath() {
       path = Skia.Path.Make();
+    },
+
+    beginPathFrom(p) {
+      path = p;
     },
 
     closePath() {

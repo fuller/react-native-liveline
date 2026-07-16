@@ -6,6 +6,7 @@ import type {
   ReferenceLine,
   OrderbookData,
   DegenOptions,
+  CandlePoint,
 } from '../types';
 import type { Ctx2D } from './canvas2d';
 import { drawGrid, type GridState } from './grid';
@@ -17,6 +18,13 @@ import { drawReferenceLine } from './referenceLine';
 import { drawTimeAxis, type TimeAxisState } from './timeAxis';
 import { drawOrderbook, type OrderbookState } from './orderbook';
 import { drawParticles, spawnOnSwing, type ParticleState } from './particles';
+import {
+  drawCandlesticks,
+  drawClosePrice,
+  drawCandleCrosshair,
+  drawLineModeCrosshair,
+} from './candlestick';
+import { drawEmpty } from './empty';
 
 // Constants
 const SHAKE_DECAY_RATE = 0.002;
@@ -550,6 +558,353 @@ export function drawMultiFrame(
         opts.tooltipY,
         opts.tooltipOutline,
         maxLiveDotX
+      );
+    }
+  }
+}
+
+// ─── Candlestick draw orchestration ───────────────────────────────────────
+
+export interface CandleDrawOptions {
+  candles: CandlePoint[];
+  displayCandleWidth: number;
+  oldCandles: CandlePoint[];
+  oldWidth: number;
+  morphT: number; // candle width transition progress (-1 = none)
+  liveCandle?: CandlePoint;
+  /** Pre-blend live candle for the dashed close-price line (unaffected by line mode morph) */
+  closePriceCandle?: CandlePoint;
+  liveTime: number;
+  liveBirthAlpha: number;
+  liveBullBlend: number;
+  lineModeProg: number;
+  chartReveal: number;
+  now_ms: number;
+  now: number;
+  pauseProgress: number;
+  showGrid: boolean;
+  scrubAmount: number;
+  hoverX: number | null;
+  hoverValue: number | null;
+  hoverTime: number | null;
+  hoveredCandle: CandlePoint | null;
+  formatValue: (v: number) => string;
+  formatTime: (t: number) => string;
+  gridState: GridState;
+  timeAxisState: TimeAxisState;
+  dt: number;
+  targetWindowSecs: number;
+  tooltipY: number;
+  tooltipOutline: boolean;
+  // Line data — drawLine handles morphY, alpha, color, dot position
+  lineVisible: LivelinePoint[];
+  lineSmoothValue: number;
+  emptyText?: string;
+  loadingAlpha: number;
+  showEmptyOverlay: boolean; // true only when collapsing to empty (not loading, not forward morph)
+}
+
+/**
+ * Candlestick draw orchestrator — calls each draw module in the correct
+ * order for candle mode. Pure drawing function, no state management.
+ */
+export function drawCandleFrame(
+  ctx: Ctx2D,
+  layout: ChartLayout,
+  palette: LivelinePalette,
+  opts: CandleDrawOptions
+): void {
+  'worklet';
+  const { w, h, pad, chartW, chartH } = layout;
+  const reveal = opts.chartReveal;
+
+  // When fully in line mode, delegate entirely to drawLine (same path as
+  // drawFrame) so transitions are visually identical to line mode.
+  const fullLineMode = opts.lineModeProg >= 0.99;
+
+  // Line presence (lp): during the reveal, the morph line smoothly
+  // transforms from the loading squiggly into data positions. In candle
+  // mode it fades much faster (cubed) so candles become dominant early
+  // and the morphing line never looks like a "line chart."
+  const revealLine = fullLineMode
+    ? 1 - reveal
+    : (1 - reveal) * (1 - reveal) * (1 - reveal);
+  const lp = Math.max(opts.lineModeProg, revealLine);
+
+  // colorBlend: when reveal drives lp, force grey (loading squiggly color).
+  // When the user's lineModeProg drives lp, use accent color.
+  const colorBlend = lp > 0.001 ? opts.lineModeProg / lp : 1;
+
+  // Smoothstep helper for staggered reveal
+  const revealRamp = (start: number, end: number) => {
+    const t = Math.max(0, Math.min(1, (reveal - start) / (end - start)));
+    return t * t * (3 - 2 * t);
+  };
+
+  // 1. Grid — fades in (25%–60% of reveal)
+  const gridAlpha = revealRamp(0.25, 0.6);
+  if (opts.showGrid && gridAlpha > 0.01) {
+    ctx.save();
+    if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+    drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+    ctx.restore();
+  }
+
+  // 2. Line — morph line that transforms from loading squiggly into data.
+  //    Returns pts for dot position.
+  let linePts: [number, number][] | undefined;
+  if (lp > 0.01 && opts.lineVisible.length >= 2) {
+    const scrubX = opts.scrubAmount > 0.05 ? opts.hoverX : null;
+    ctx.save();
+    ctx.globalAlpha = lp;
+    linePts = drawLine(
+      ctx,
+      layout,
+      palette,
+      opts.lineVisible,
+      opts.lineSmoothValue,
+      opts.now,
+      opts.lineModeProg > 0.01,
+      scrubX,
+      opts.scrubAmount,
+      opts.chartReveal,
+      opts.now_ms,
+      colorBlend,
+      !fullLineMode,
+      opts.lineModeProg // fillScale — fill fades smoothly with line mode transition
+    );
+    ctx.restore();
+  }
+
+  // 3. Close price line — fades in (40%–80% of reveal)
+  //    Uses closePriceCandle (pre-blend) so the dashed line isn't affected
+  //    by line mode morph or OHLC collapse.
+  const closeAlpha = revealRamp(0.4, 0.8);
+  const closeSource = opts.closePriceCandle ?? opts.liveCandle;
+  if (closeSource && closeAlpha > 0.01) {
+    // Candle-colored close line (fades out with lineModeProg)
+    if (lp < 0.99) {
+      ctx.save();
+      ctx.globalAlpha = closeAlpha * (1 - lp);
+      drawClosePrice(
+        ctx,
+        layout,
+        palette,
+        closeSource,
+        opts.scrubAmount,
+        opts.liveBullBlend
+      );
+      ctx.restore();
+    }
+    // Accent-colored dash line (fades in with lineModeProg)
+    // Skip when fully in line mode — drawLine draws its own morphing dash
+    if (lp > 0.01 && !fullLineMode) {
+      const dashY = layout.toY(closeSource.close);
+      if (dashY >= pad.top && dashY <= h - pad.bottom) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = palette.dashLine;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = closeAlpha * lp * (1 - opts.scrubAmount * 0.2);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, dashY);
+        ctx.lineTo(w - pad.right, dashY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+  }
+
+  // 4. Candles — alpha = chartReveal * (1 - lp)
+  //    During reveal, OHLC collapses toward close so candle bodies shrink
+  //    into thin lines before fading out (or grow from thin lines on appear).
+  const candleAlpha = opts.chartReveal * (1 - lp);
+  if (candleAlpha > 0.01) {
+    // OHLC expansion uses smoothstep on reveal — this keeps shape and alpha
+    // in sync (at 50% visible, candles are ~50% expanded rather than flat).
+    const ohlcScale = reveal * reveal * (3 - 2 * reveal);
+    const collapseC = (c: CandlePoint): CandlePoint =>
+      ohlcScale >= 0.99
+        ? c
+        : {
+            time: c.time,
+            open: c.close + (c.open - c.close) * ohlcScale,
+            high: c.close + (c.high - c.close) * ohlcScale,
+            low: c.close + (c.low - c.close) * ohlcScale,
+            close: c.close,
+          };
+    const revealCandles =
+      ohlcScale < 0.99 ? opts.candles.map(collapseC) : opts.candles;
+    const revealOld =
+      ohlcScale < 0.99 && opts.oldCandles.length > 0
+        ? opts.oldCandles.map(collapseC)
+        : opts.oldCandles;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pad.left - 1, pad.top, chartW + 2, chartH);
+    ctx.clip();
+    const accentCol = lp > 0.01 ? palette.line : undefined;
+    if (opts.morphT >= 0 && revealOld.length > 0) {
+      ctx.globalAlpha = (1 - opts.morphT) * candleAlpha;
+      drawCandlesticks(
+        ctx,
+        layout,
+        revealOld,
+        opts.oldWidth,
+        -1,
+        opts.now_ms,
+        opts.hoverX ?? 0,
+        opts.scrubAmount,
+        1,
+        -1,
+        accentCol,
+        lp
+      );
+      ctx.globalAlpha = opts.morphT * candleAlpha;
+      drawCandlesticks(
+        ctx,
+        layout,
+        revealCandles,
+        opts.displayCandleWidth,
+        opts.liveCandle?.time ?? -1,
+        opts.now_ms,
+        opts.hoverX ?? 0,
+        opts.scrubAmount,
+        opts.liveBirthAlpha,
+        opts.liveBullBlend,
+        accentCol,
+        lp
+      );
+      ctx.globalAlpha = 1;
+    } else {
+      if (candleAlpha < 1) ctx.globalAlpha = candleAlpha;
+      drawCandlesticks(
+        ctx,
+        layout,
+        revealCandles,
+        opts.displayCandleWidth,
+        opts.liveCandle?.time ?? -1,
+        opts.now_ms,
+        opts.hoverX ?? 0,
+        opts.scrubAmount,
+        opts.liveBirthAlpha,
+        opts.liveBullBlend,
+        accentCol,
+        lp
+      );
+    }
+    ctx.restore();
+  }
+
+  // 5. Live dot — position from drawLine's returned pts (same as drawFrame).
+  if (lp > 0.5 && linePts && linePts.length > 0 && reveal > 0.3) {
+    const lastPt = linePts[linePts.length - 1]!;
+    const dotAlpha = (lp - 0.5) * 2 * ((reveal - 0.3) / 0.7);
+    const showPulse = lp > 0.8 && reveal > 0.6;
+    if (dotAlpha > 0.01) {
+      ctx.save();
+      ctx.globalAlpha = dotAlpha;
+      drawDot(
+        ctx,
+        lastPt[0],
+        lastPt[1],
+        palette,
+        showPulse,
+        opts.scrubAmount,
+        opts.now_ms
+      );
+      ctx.restore();
+    }
+  }
+
+  // 6. Time axis — fades in (25%–60% of reveal)
+  const timeAlpha = revealRamp(0.25, 0.6);
+  if (timeAlpha > 0.01) {
+    ctx.save();
+    if (timeAlpha < 1) ctx.globalAlpha = timeAlpha;
+    drawTimeAxis(
+      ctx,
+      layout,
+      palette,
+      opts.targetWindowSecs,
+      opts.targetWindowSecs,
+      opts.formatTime,
+      opts.timeAxisState,
+      opts.dt
+    );
+    ctx.restore();
+  }
+
+  // 7. Left edge fade — gradient erase
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  const fadeGrad = ctx.createLinearGradient(
+    pad.left,
+    0,
+    pad.left + FADE_EDGE_WIDTH,
+    0
+  );
+  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = fadeGrad;
+  ctx.fillRect(0, 0, pad.left + FADE_EDGE_WIDTH, h);
+  ctx.restore();
+
+  // 8. Reverse morph empty overlay — only when collapsing to empty state
+  //    (not during forward morph or loading), matching line mode's
+  //    `revealTarget === 0 && !cfg.loading` guard.
+  if (opts.showEmptyOverlay) {
+    const bgAlpha = 1 - opts.chartReveal;
+    if (bgAlpha > 0.01) {
+      const bgEmptyAlpha = (1 - opts.loadingAlpha) * bgAlpha;
+      if (bgEmptyAlpha > 0.01) {
+        drawEmpty(
+          ctx,
+          w,
+          h,
+          pad,
+          palette,
+          bgEmptyAlpha,
+          opts.now_ms,
+          true,
+          opts.emptyText
+        );
+      }
+    }
+  }
+
+  // 9. Crosshair — only when mostly revealed (70%+)
+  if (
+    opts.chartReveal > 0.7 &&
+    opts.hoveredCandle &&
+    opts.hoverX !== null &&
+    opts.scrubAmount > 0.01
+  ) {
+    if (opts.lineModeProg > 0.5) {
+      drawLineModeCrosshair(
+        ctx,
+        layout,
+        palette,
+        opts.hoverX,
+        opts.hoveredCandle.close,
+        opts.hoverTime ?? 0,
+        opts.formatValue,
+        opts.formatTime,
+        opts.scrubAmount
+      );
+    } else {
+      drawCandleCrosshair(
+        ctx,
+        layout,
+        palette,
+        opts.hoverX,
+        opts.hoveredCandle,
+        opts.hoverTime ?? 0,
+        opts.formatValue,
+        opts.formatTime,
+        opts.scrubAmount
       );
     }
   }
