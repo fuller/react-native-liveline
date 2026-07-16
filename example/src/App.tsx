@@ -1,12 +1,9 @@
 import { Text, View, StyleSheet } from 'react-native';
-import { multiply } from 'react-native-liveline';
-
-const result = multiply(3, 7);
 
 export default function App() {
   return (
     <View style={styles.container}>
-      <Text>Result: {result}</Text>
+      <Text style={styles.text}>react-native-liveline example</Text>
     </View>
   );
 }
@@ -16,5 +13,9 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#0a0a0a',
+  },
+  text: {
+    color: 'rgba(255,255,255,0.85)',
   },
 });
