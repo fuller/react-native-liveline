@@ -9,7 +9,10 @@ import {
   type SharedValue,
 } from 'react-native-reanimated';
 import { Gesture } from 'react-native-gesture-handler';
-import type { ComposedGesture, GestureType } from 'react-native-gesture-handler';
+import type {
+  ComposedGesture,
+  GestureType,
+} from 'react-native-gesture-handler';
 import { createCanvas2D } from './draw/canvas2d';
 import { engineStep } from './engine/step';
 import { createEngineState, type EngineState } from './engine/state';
