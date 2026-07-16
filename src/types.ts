@@ -61,12 +61,22 @@ export interface LivelineSeries {
  * SF Mono / Menlo stack.
  */
 export interface LivelineFonts {
-  /** Grid/time-axis/crosshair labels — regular weight */
+  /** Grid/time-axis labels — mono 11 regular */
   label: SkFont;
-  /** Emphasized values (crosshair value segment) — semibold */
+  /** Emphasized values — mono 11 semibold */
   value: SkFont;
-  /** Badge pill text — medium */
+  /** Badge pill text — mono 11 medium */
   badge: SkFont;
+  /** Crosshair tooltip text — mono 13 regular */
+  crosshair: SkFont;
+  /** Orderbook stream labels — mono 13 semibold */
+  orderbook: SkFont;
+  /** Empty-state text — sans 12 regular */
+  empty: SkFont;
+  /** Reference-line label — sans 11 medium */
+  refLabel: SkFont;
+  /** Multi-series endpoint labels — sans 10 semibold */
+  seriesLabel: SkFont;
 }
 
 export interface LivelineProps {
