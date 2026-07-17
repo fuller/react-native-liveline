@@ -41,6 +41,10 @@ project.xcworkspace
 local.properties
 android.iml
 
+# Expo prebuild output (regenerated via `expo prebuild`; not committed)
+example/ios/
+example/android/
+
 # Cocoapods
 #
 example/ios/Pods
