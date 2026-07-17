@@ -99,6 +99,17 @@ export const CANDLE_WIDTHS = [
   { label: '10s', secs: 10 },
 ];
 
+/**
+ * Fixed pixel sizes for the "Size variants" gallery row, ported verbatim from
+ * dev/main.tsx (lines 288-292) and dev/demo.tsx (lines 389-393).
+ */
+export const SIZE_VARIANTS: { w: number; h: number; label: string }[] = [
+  { w: 320, h: 180, label: '320×180' },
+  { w: 240, h: 120, label: '240×120' },
+  { w: 160, h: 100, label: '160×100' },
+  { w: 120, h: 80, label: '120×80' },
+];
+
 export const MULTI_COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b'];
 export const MULTI_LABELS = ['Yes', 'No', 'Maybe', 'Other'];
 export const MULTI_BIASES = [0.51, 0.49, 0.5, 0.48];
@@ -113,6 +124,12 @@ export const MULTI_WINDOWS = [
  * $-formatted crypto value, e.g. `$65,432.10`. Must be Hermes/worklet-safe —
  * `toLocaleString` is not available on the UI-thread worklet runtime, so the
  * comma-grouping is done by hand.
+ *
+ * Web-parity sign order: web is
+ * `'$' + v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})`,
+ * and `toLocaleString` puts the minus sign *after* the leading text is
+ * prepended by string concat — i.e. the `-` lands between `$` and the digits
+ * (e.g. `-1234.5` → `"$-1,234.50"`), not before the `$`. Match that exactly.
  */
 export const formatCrypto = (v: number) => {
   'worklet';
@@ -129,7 +146,7 @@ export const formatCrypto = (v: number) => {
     count++;
     if (count % 3 === 0 && i !== 0) grouped = ',' + grouped;
   }
-  return sign + '$' + grouped + decPart;
+  return '$' + sign + grouped + decPart;
 };
 
 /** Percent formatter for the multi-series demo (e.g. `52.3%`). */

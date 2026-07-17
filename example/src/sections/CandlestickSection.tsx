@@ -1,12 +1,13 @@
 /* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived, mirrors upstream web demo controls */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View } from 'react-native';
+import { Text, View } from 'react-native';
 import { Liveline } from 'react-native-liveline';
 import type { CandlePoint, LivelinePoint } from 'react-native-liveline';
 import { useAppTheme } from '../AppTheme';
 import {
   CANDLE_WIDTHS,
   CRYPTO_WINDOWS,
+  SIZE_VARIANTS,
   TICK_RATES,
   TIME_WINDOWS,
   VOLATILITIES,
@@ -18,6 +19,7 @@ import {
 import {
   Btn,
   ChartFrame,
+  fg,
   Label,
   ScreenTitle,
   Section,
@@ -270,6 +272,12 @@ export function CandlestickSection() {
     setScenario('loading');
   }, [preset]);
 
+  // Deliberate correction of an upstream demo bug: web dev/demo.tsx's Window
+  // control panel always maps over TIME_WINDOWS regardless of preset, so in
+  // crypto mode it shows 10s/30s/1m/5m buttons that don't match the
+  // 300/900/3600s window values actually in play. We switch the panel's
+  // window buttons by preset here; the in-chart pills (below) still follow
+  // web exactly (crypto-only, via the chart's own `windows` prop).
   const windows = preset === 'crypto' ? CRYPTO_WINDOWS : TIME_WINDOWS;
   const color = preset === 'crypto' ? CRYPTO_COLOR : accent;
   const formatValue = preset === 'crypto' ? formatCrypto : undefined;
@@ -402,8 +410,7 @@ export function CandlestickSection() {
           theme={theme}
           color={color}
           window={windowSecs}
-          windows={windows}
-          onWindowChange={setWindowSecs}
+          windows={preset === 'crypto' ? CRYPTO_WINDOWS : undefined}
           formatValue={formatValue}
           onModeChange={(m) => setChartType(m)}
           grid={grid}
@@ -411,6 +418,66 @@ export function CandlestickSection() {
           style={{ flex: 1 }}
         />
       </ChartFrame>
+
+      {/* Size variants — ported from dev/demo.tsx lines 386-429. Web gates
+          only `grid` by size here, and never passes `windows` to the minis. */}
+      <Text
+        style={{
+          fontSize: 12,
+          color: fg(isDark, 0.3),
+          marginTop: 24,
+          marginBottom: 8,
+        }}
+      >
+        Size variants
+      </Text>
+      <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>
+        {SIZE_VARIANTS.map((size) => (
+          <View key={size.label}>
+            <Text
+              style={{
+                fontSize: 10,
+                color: fg(isDark, 0.25),
+                marginBottom: 4,
+              }}
+            >
+              {size.label}
+            </Text>
+            <View
+              style={{
+                width: size.w,
+                height: size.h,
+                backgroundColor: fg(isDark, 0.02),
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: fg(isDark, 0.06),
+                overflow: 'hidden',
+              }}
+            >
+              <Liveline
+                mode="candle"
+                data={data}
+                value={value}
+                candles={candles}
+                candleWidth={candleSecs}
+                liveCandle={liveCandle ?? undefined}
+                lineMode={chartType === 'line'}
+                lineData={data}
+                lineValue={value}
+                loading={loading}
+                paused={paused}
+                theme={theme}
+                color={color}
+                window={windowSecs}
+                formatValue={formatValue}
+                grid={grid && size.w >= 200}
+                scrub={scrub}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        ))}
+      </View>
 
       <StatusBar
         items={[

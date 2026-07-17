@@ -1,6 +1,6 @@
 /* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived, mirrors upstream web demo controls */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View } from 'react-native';
+import { Text, View } from 'react-native';
 import { Liveline } from 'react-native-liveline';
 import type {
   LivelinePoint,
@@ -10,6 +10,7 @@ import type {
 import { useAppTheme } from '../AppTheme';
 import {
   generatePoint,
+  SIZE_VARIANTS,
   TIME_WINDOWS,
   TICK_RATES,
   VOLATILITIES,
@@ -18,6 +19,7 @@ import {
 import {
   Btn,
   ChartFrame,
+  fg,
   Label,
   ScreenTitle,
   Section,
@@ -53,6 +55,7 @@ export function BasicLineSection() {
   const [scrub, setScrub] = useState(true);
   const [exaggerate, setExaggerate] = useState(false);
   const [windowStyle, setWindowStyle] = useState<WindowStyle>('default');
+  const [lineMode, setLineMode] = useState(true);
 
   const [volatility, setVolatility] = useState<Volatility>('normal');
   const [tickRate, setTickRate] = useState(300);
@@ -310,9 +313,69 @@ export function BasicLineSection() {
           windows={TIME_WINDOWS}
           onWindowChange={setWindowSecs}
           windowStyle={windowStyle}
+          lineMode={lineMode}
+          onModeChange={(m) => setLineMode(m === 'line')}
           style={{ flex: 1 }}
         />
       </ChartFrame>
+
+      {/* Size variants — ported from dev/main.tsx lines 285-326 */}
+      <Text
+        style={{
+          fontSize: 12,
+          color: fg(isDark, 0.3),
+          marginTop: 24,
+          marginBottom: 8,
+        }}
+      >
+        Size variants
+      </Text>
+      <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>
+        {SIZE_VARIANTS.map((size) => (
+          <View key={size.label}>
+            <Text
+              style={{
+                fontSize: 10,
+                color: fg(isDark, 0.25),
+                marginBottom: 4,
+              }}
+            >
+              {size.label}
+            </Text>
+            <View
+              style={{
+                width: size.w,
+                height: size.h,
+                backgroundColor: fg(isDark, 0.02),
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: fg(isDark, 0.06),
+                overflow: 'hidden',
+              }}
+            >
+              <Liveline
+                data={data}
+                value={value}
+                theme={theme}
+                color={accent}
+                window={windowSecs}
+                loading={loading}
+                paused={paused}
+                badge={badge && size.w >= 200}
+                badgeVariant={badgeVariant}
+                momentum={momentum && size.w >= 200}
+                fill={fill}
+                grid={grid && size.w >= 200}
+                scrub={scrub}
+                pulse={pulse}
+                exaggerate={exaggerate}
+                degen={degenOpts}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        ))}
+      </View>
 
       <StatusBar
         items={[

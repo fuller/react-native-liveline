@@ -5,7 +5,7 @@ import { useAppTheme } from './AppTheme';
 
 const ACCENT = '#3b82f6';
 
-function fg(isDark: boolean, alpha: number): string {
+export function fg(isDark: boolean, alpha: number): string {
   const base = isDark ? '255,255,255' : '0,0,0';
   return `rgba(${base},${alpha})`;
 }

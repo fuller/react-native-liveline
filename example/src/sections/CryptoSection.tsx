@@ -45,6 +45,7 @@ export function CryptoSection() {
   const [exaggerate, setExaggerate] = useState(true);
   const [degen, setDegen] = useState(true);
   const [showValue, setShowValue] = useState(true);
+  const [valueMomentumColor, setValueMomentumColor] = useState(true);
   const [grid, setGrid] = useState(true);
 
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
@@ -59,7 +60,9 @@ export function CryptoSection() {
     const now = Date.now() / 1000;
     const seed: LivelinePoint[] = [];
     let v = BASE_VALUE;
-    for (let i = 300; i >= 0; i--) {
+    // Matches dev/demo.tsx's crypto preset: 3800 ticks at 1s intervals so the
+    // 15m/1h CRYPTO_WINDOWS are already covered by seed data on mount.
+    for (let i = 3800; i >= 0; i--) {
       const pt = generatePoint(v, now - i, volatilityRef.current, BASE_VALUE);
       seed.push(pt);
       v = pt.value;
@@ -132,8 +135,6 @@ export function CryptoSection() {
     }, tickRate);
     return () => clearInterval(intervalRef.current);
   }, [tickRate, scenario]);
-
-  const degenOpts = degen ? { scale: 1.5 } : undefined;
 
   return (
     <View>
@@ -218,6 +219,9 @@ export function CryptoSection() {
         <Toggle on={showValue} onToggle={setShowValue}>
           Show value
         </Toggle>
+        <Toggle on={valueMomentumColor} onToggle={setValueMomentumColor}>
+          Value momentum color
+        </Toggle>
       </Section>
 
       <ChartFrame height={320}>
@@ -233,8 +237,9 @@ export function CryptoSection() {
           paused={paused}
           grid={grid}
           exaggerate={exaggerate}
-          degen={degenOpts}
+          degen={degen}
           showValue={showValue}
+          valueMomentumColor={valueMomentumColor}
           formatValue={formatCrypto}
           style={{ flex: 1 }}
         />

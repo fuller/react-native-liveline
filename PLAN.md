@@ -71,6 +71,27 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
 | 7a | README (prop tables verified against src/types.ts, RN deltas, fonts examples) + CHANGELOG 0.1.0 | ✅ |
 | 7b | Runtime verification on iOS sim (iPhone 17 Pro): all 6 sections work; JS-block stress test PASSED 3× (chart animates through blocked JS); no memory leak (RSS flat over 3 min, no picture dispose needed); ReText/showValue, worklet font metrics, PictureRecorder-in-worklet all confirmed. Fixes: 555df6e, 672ce2c, 7c6a717 | ✅ |
 
+**Intentional divergences from the web demos (Phase 6/7 fidelity pass, deliberate — not gaps):**
+- `CryptoSection` and `OrderbookSection` are RN-only additions: crypto follows
+  the README "Crypto-style" recipe (`degen`, `valueMomentumColor`, `showValue`),
+  not a port of any web `dev/*.tsx` demo — there is no crypto/orderbook demo
+  upstream to port.
+- `DashboardSection` is the PLAN-specified RN-only screen (windows + no badge);
+  it does not map to a web demo either. The web's *actual* size-variant
+  galleries (`dev/main.tsx` lines 285–326, `dev/demo.tsx` lines 386–429) now
+  live where they belong: inside `BasicLineSection` and `CandlestickSection`
+  respectively, alongside each section's main chart.
+- `CandlestickSection`'s control panel deliberately fixes an upstream demo bug:
+  web `dev/demo.tsx`'s Window section always renders `TIME_WINDOWS` buttons
+  regardless of preset, so in crypto mode it shows 10s/30s/1m/5m labels that
+  don't match the 300/900/3600s values actually driving the chart. Our panel
+  switches to `CRYPTO_WINDOWS` buttons in crypto preset instead; the in-chart
+  window pills still match web exactly (crypto-only, via the chart's `windows`
+  prop, no `onWindowChange` on the chart).
+- Global accent context (`useAppTheme().accent`, picker in `App.tsx`) replaces
+  the web demos' fixed per-demo colors for the non-crypto sections; crypto
+  preset keeps the fixed `#f7931a` (bitcoin-orange) color as upstream does.
+
 ### iOS dev loop (verified working — use these)
 - One-time: `example/package.json` needs `react-native-worklets` (Reanimated 4 peer,
   supplies the worklet babel plugin); `CI=1 npx expo prebuild --platform ios` from example/.
@@ -97,9 +118,7 @@ typecheck + lint + unit tests.
    both themes. All four open items (window-pill windows[0] init, 120×80
    window-pill crowding, orderbook light-theme fade, LogBox banner) adjudicated
    as verbatim-upstream behavior / dev-only chrome — no code changes needed.
-   Pairs saved as parity-*-{web,sim}.png in phase7-screenshots/. Noted for
-   later polish: example BasicLineSection doesn't wire onModeChange (web demo
-   does), so the morph-toggle icon only appears in the Candles section.
+   Pairs saved as parity-*-{web,sim}.png in phase7-screenshots/.
 2. **Manual (user):** finger-scrub a chart to confirm crosshair lands under
    the finger (RNGH Pan can't be automated on this sim; forced-hover injection
    verified the full crosshair draw path already).
