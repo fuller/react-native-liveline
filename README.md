@@ -1,5 +1,8 @@
 # react-native-liveline
 
+[![npm version](https://img.shields.io/npm/v/@ajfuller/react-native-liveline.svg)](https://www.npmjs.com/package/@ajfuller/react-native-liveline)
+[![license](https://img.shields.io/npm/l/@ajfuller/react-native-liveline.svg)](./LICENSE)
+
 A React Native port of [liveline](https://github.com/benjitaylor/liveline) by
 [Benji Taylor](https://github.com/benjitaylor) — real-time animated charts
 (line, multi-series, candlestick) with the same SDK shape as the web version.
@@ -13,6 +16,8 @@ morph — is Benji's. This package adapts it to run natively via Reanimated
 worklets and Skia; see [Credits](#credits) below.
 
 ## Installation
+
+Published on npm: [`@ajfuller/react-native-liveline`](https://www.npmjs.com/package/@ajfuller/react-native-liveline).
 
 ```sh
 npm install @ajfuller/react-native-liveline
