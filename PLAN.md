@@ -47,6 +47,11 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
    (defaults are); `style` is ViewStyle; `className`/`cursor` dropped; new
    optional `fonts` prop; scrub = touch-drag via gesture-handler Pan;
    `showValue` renders an animated TextInput (ReText pattern).
+8. **Public exports match upstream's surface exactly** (audited 2026-07-17:
+   props/defaults/types/constants/draw literals all verified identical), plus
+   only `LivelineFonts` (required to type the `fonts` prop). Engine internals
+   (`useLivelineEngine`, `resolveTheme`, `SERIES_COLORS`, `makeDefaultFonts`)
+   stay unexported, same as upstream — don't re-add them to index.tsx.
 
 ## Porting conventions
 
