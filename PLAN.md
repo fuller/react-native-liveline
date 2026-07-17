@@ -69,22 +69,46 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
 | 5 | Multi-series + candles + orderbook + degen particles — all ported as part of phases 2–4 | ✅ (code-complete, unverified at runtime) |
 | 6 | Example app demo screens (`example/src/`): tabbed sections — basic line, crypto, dashboard, candlestick, multi-series, orderbook; theme+accent switcher; "Block JS 2s" stress button | ✅ |
 | 7a | README (prop tables verified against src/types.ts, RN deltas, fonts examples) + CHANGELOG 0.1.0 | ✅ |
+| 7b | Runtime verification on iOS sim (iPhone 17 Pro): all 6 sections work; JS-block stress test PASSED 3× (chart animates through blocked JS); no memory leak (RSS flat over 3 min, no picture dispose needed); ReText/showValue, worklet font metrics, PictureRecorder-in-worklet all confirmed. Fixes: 555df6e, 672ce2c, 7c6a717 | ✅ |
+
+### iOS dev loop (verified working — use these)
+- One-time: `example/package.json` needs `react-native-worklets` (Reanimated 4 peer,
+  supplies the worklet babel plugin); `CI=1 npx expo prebuild --platform ios` from example/.
+- Build: `RCT_METRO_PORT=8082 npx expo run:ios --port 8082 --device <UDID>` (~15 min).
+- **Port 8081 is off-limits** (often occupied by ~/dev/predict Metro; a foreign bundler
+  causes "Cannot find native module" redboxes). Use 8082:
+  `npx expo start --dev-client --port 8082` (background) and pin the app once via
+  `xcrun simctl spawn booted defaults write liveline.example RCT_jsLocation "localhost:8082"`.
+- Reload after src changes: `xcrun simctl terminate booted liveline.example && xcrun simctl launch booted liveline.example`.
+- Automation: agent-device for snapshot/press only; launch via simctl; screenshots via
+  `xcrun simctl io booted screenshot`. agent-device synthetic drags do NOT reach RNGH
+  Pan gestures on this sim — scrub needs a manual finger check.
+- **Worklet gotcha (bit us twice):** module-scope helpers/consts referenced by a worklet
+  factory must be declared ABOVE the factory, else they're captured as `undefined` at
+  module eval (555df6e, 672ce2c). Whole src/ scanned clean as of 7c6a717.
 
 **Nothing has run on a device/simulator yet.** All verification so far is
 typecheck + lint + unit tests.
 
 ## Remaining work
 
-### Phase 7 — Runtime verification, release
-1. Run example on iOS simulator (`node .yarn/releases/yarn-4.11.0.cjs example ios`
-   — Expo; may need `npx expo prebuild`/dev-client since Skia+Reanimated are
-   native). Use the `agent-device` skill to drive/screenshot each screen.
-2. Verify against the runtime-assumption checklist below; fix what breaks.
-3. Compare visuals side-by-side with the web demo (`dev/` via vite in source clone).
-4. npm publish (bob config already set); drop "not runtime-verified" caveat
-   from CHANGELOG once verified.
+### Phase 7 — remaining
+1. Visual parity pass: compare sim screenshots (scratchpad phase7-screenshots/)
+   side-by-side with the web demo (`dev/` via vite in source clone). Open items
+   from the runtime pass: window-pill initializes to windows[0] ignoring `window`
+   prop (verbatim upstream behavior — decide whether to diverge); 120×80 mini
+   time-axis crowding; orderbook label fade intensity in light theme; LogBox
+   warning banner content at launch.
+2. **Manual (user):** finger-scrub a chart to confirm crosshair lands under
+   the finger (RNGH Pan can't be automated on this sim; forced-hover injection
+   verified the full crosshair draw path already).
+3. Release: `gh auth login` (token invalid), push repo, npm publish (bob config
+   ready); drop "not runtime-verified" caveat from CHANGELOG.
 
-### Runtime assumptions to verify on first launch (most likely breakage points)
+### Runtime assumptions — ALL VERIFIED on sim 2026-07-17 (kept for reference)
+Scrub e.x container-relative: verified by API contract + forced-hover draw-path
+test only; needs one manual finger check. Stale-fonts and published-package
+Metro transform: consumer-side, deferred as planned.
 - `Skia.PictureRecorder()` usable inside a Reanimated worklet; `<Picture>`
   accepting a `SharedValue<SkPicture>` that's reassigned every frame.
 - `font.measureText().width` + `getMetrics()` in worklets; `matchFont` weights
