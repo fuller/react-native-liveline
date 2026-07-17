@@ -1,5 +1,5 @@
 {
-  "name": "react-native-liveline",
+  "name": "@ajfuller/react-native-liveline",
   "version": "0.1.0",
   "description": "Real-time animated charts for React Native. Line, multi-series, and candlestick modes, Skia-rendered, 60fps.",
   "main": "./lib/module/index.js",
@@ -65,7 +65,8 @@
   },
   "homepage": "https://github.com/fuller/react-native-liveline#readme",
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "devDependencies": {
     "@eslint/compat": "^2.1.0",

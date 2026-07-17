@@ -1,12 +1,12 @@
 /* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived, mirrors upstream web demo controls */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
-import { Liveline } from 'react-native-liveline';
+import { Liveline } from '@ajfuller/react-native-liveline';
 import type {
   LivelinePoint,
   LivelineSeries,
   WindowStyle,
-} from 'react-native-liveline';
+} from '@ajfuller/react-native-liveline';
 import { useAppTheme } from '../AppTheme';
 import {
   MULTI_BIASES,

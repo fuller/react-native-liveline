@@ -15,7 +15,7 @@ worklets and Skia; see [Credits](#credits) below.
 ## Installation
 
 ```sh
-npm install react-native-liveline
+npm install @ajfuller/react-native-liveline
 ```
 
 Peer dependencies (install alongside):
@@ -73,8 +73,8 @@ gesture-handler), it does **not** work in Expo Go. Use a
 ```tsx
 import { useEffect, useState } from 'react';
 import { View } from 'react-native';
-import { Liveline } from 'react-native-liveline';
-import type { LivelinePoint } from 'react-native-liveline';
+import { Liveline } from '@ajfuller/react-native-liveline';
+import type { LivelinePoint } from '@ajfuller/react-native-liveline';
 
 function Chart() {
   const [data, setData] = useState<LivelinePoint[]>([]);
@@ -371,7 +371,7 @@ but a few props differ because of the native/worklet environment:
 
   ```tsx
   import { matchFont } from '@shopify/react-native-skia';
-  import { Liveline } from 'react-native-liveline';
+  import { Liveline } from '@ajfuller/react-native-liveline';
 
   const valueFont = matchFont({
     fontFamily: 'Menlo',
