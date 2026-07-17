@@ -131,6 +131,10 @@ typecheck + lint + unit tests.
    verified the full crosshair draw path already).
 3. ~~Push repo~~ ✅ 2026-07-17 — https://github.com/fuller/react-native-liveline
 4. **npm publish (user-gated):** bob config ready; run when user says go.
+   Package renamed to **`@ajfuller/react-native-liveline`** (scoped) —
+   unscoped `react-native-liveline` is already taken by an unrelated package
+   (ukcw/react-native-liveline). `publishConfig.access: "public"` is set since
+   scoped packages default private. GitHub repo name is unaffected.
 
 ### Runtime assumptions — ALL VERIFIED on sim 2026-07-17 (kept for reference)
 Scrub e.x container-relative: verified by API contract + forced-hover draw-path
