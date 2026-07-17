@@ -1,6 +1,13 @@
 MIT License
 
-Copyright (c) 2026 Andrew Fuller
+This project is a React Native port of liveline
+(https://github.com/benjitaylor/liveline) by Benji Taylor. Substantial
+portions of this codebase — draw routines, animation/easing math, and engine
+logic — are adapted from that original work.
+
+Copyright (c) 2025-2026 Benji Taylor (original liveline)
+Copyright (c) 2026 Andrew Fuller (React Native port)
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

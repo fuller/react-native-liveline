@@ -56,6 +56,9 @@
     "url": "git+https://github.com/fuller/react-native-liveline.git"
   },
   "author": "Andrew Fuller <andrew_fuller@outlook.com> (https://github.com/fuller)",
+  "contributors": [
+    "Benji Taylor (https://github.com/benjitaylor) - original liveline design, animation, and engine logic"
+  ],
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/fuller/react-native-liveline/issues"

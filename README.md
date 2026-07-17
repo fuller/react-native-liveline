@@ -1,11 +1,16 @@
 # react-native-liveline
 
-A React Native port of [liveline](https://github.com/benjitaylor/liveline) —
-real-time animated charts (line, multi-series, candlestick) with the same SDK
-shape as the web version. The chart keeps animating even when your JS thread
-is blocked: the render engine runs entirely on the UI thread as a Reanimated
-worklet, painting into a Skia picture every frame, independent of React
-renders and JS-thread work.
+A React Native port of [liveline](https://github.com/benjitaylor/liveline) by
+[Benji Taylor](https://github.com/benjitaylor) — real-time animated charts
+(line, multi-series, candlestick) with the same SDK shape as the web version.
+The chart keeps animating even when your JS thread is blocked: the render
+engine runs entirely on the UI thread as a Reanimated worklet, painting into a
+Skia picture every frame, independent of React renders and JS-thread work.
+
+All the hard design and animation work here — the curve fitting, the
+momentum/degen feel, the badge and crosshair interactions, the candlestick
+morph — is Benji's. This package adapts it to run natively via Reanimated
+worklets and Skia; see [Credits](#credits) below.
 
 ## Installation
 
@@ -402,6 +407,22 @@ but a few props differ because of the native/worklet environment:
   `SkCanvas`, preserving the original curve-fitting, layout, and animation
   logic almost verbatim.
 
+## Credits
+
+This library is a React Native port of
+[**liveline**](https://github.com/benjitaylor/liveline), created by
+[**Benji Taylor**](https://github.com/benjitaylor). The original web library
+did the hard work: the chart design, the curve fitting and layout math, the
+momentum/degen animation feel, the badge and crosshair interactions, and the
+candlestick line-morph. This port keeps that design and behavior intact —
+most of the draw and engine code here is adapted near-verbatim from Benji's
+implementation, retargeted from Canvas2D/DOM to Reanimated worklets and Skia
+so it can run on the UI thread natively.
+
+If you find this useful, go star the
+[original project](https://github.com/benjitaylor/liveline).
+
 ## License
 
-MIT © 2026 Andrew Fuller
+MIT. Original work © 2025-2026 Benji Taylor; React Native port © 2026 Andrew
+Fuller. See [LICENSE](./LICENSE).
