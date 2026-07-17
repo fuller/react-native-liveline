@@ -18,8 +18,10 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
   Example app: `node .yarn/releases/yarn-4.11.0.cjs example ios` (or `start`).
 - Commit as `Andrew Fuller <andrew_fuller@outlook.com>` with
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` trailer.
-- GitHub: repo not pushed yet; `gh` token is invalid (`gh auth login` needed
-  before creating github.com/fuller/react-native-liveline).
+- GitHub: pushed 2026-07-17 to https://github.com/fuller/react-native-liveline
+  (public, `main`). `origin` remote is HTTPS, not SSH — no SSH key configured
+  on this machine for git push; `gh`'s default ssh protocol failed, switched
+  remote to https so the gh token could push.
 
 ## Architecture decisions (locked in, don't relitigate)
 
@@ -127,9 +129,8 @@ typecheck + lint + unit tests.
 2. **Manual (user):** finger-scrub a chart to confirm crosshair lands under
    the finger (RNGH Pan can't be automated on this sim; forced-hover injection
    verified the full crosshair draw path already).
-3. **Release (user-gated):** `gh auth login` (token invalid), push repo,
-   npm publish (bob config ready). CHANGELOG caveat already updated to
-   verified status.
+3. ~~Push repo~~ ✅ 2026-07-17 — https://github.com/fuller/react-native-liveline
+4. **npm publish (user-gated):** bob config ready; run when user says go.
 
 ### Runtime assumptions — ALL VERIFIED on sim 2026-07-17 (kept for reference)
 Scrub e.x container-relative: verified by API contract + forced-hover draw-path
