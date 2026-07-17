@@ -115,22 +115,17 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
   factory must be declared ABOVE the factory, else they're captured as `undefined` at
   module eval (555df6e, 672ce2c). Whole src/ scanned clean as of 7c6a717.
 
-**Nothing has run on a device/simulator yet.** All verification so far is
-typecheck + lint + unit tests.
+## Release checklist — ALL DONE as of 2026-07-17
 
-## Remaining work
-
-### Phase 7 — remaining
-1. ~~Visual parity pass~~ ✅ 2026-07-17: full structural match across all areas,
+1. ~~Visual parity pass~~ ✅ full structural match across all areas,
    both themes. All four open items (window-pill windows[0] init, 120×80
    window-pill crowding, orderbook light-theme fade, LogBox banner) adjudicated
    as verbatim-upstream behavior / dev-only chrome — no code changes needed.
    Pairs saved as parity-*-{web,sim}.png in phase7-screenshots/.
-2. **Manual (user):** finger-scrub a chart to confirm crosshair lands under
-   the finger (RNGH Pan can't be automated on this sim; forced-hover injection
-   verified the full crosshair draw path already).
-3. ~~Push repo~~ ✅ 2026-07-17 — https://github.com/fuller/react-native-liveline
-4. ~~npm publish~~ ✅ 2026-07-17 — **`@ajfuller/react-native-liveline@0.1.0`**
+2. ~~Manual (user): finger-scrub check~~ ✅ confirmed crosshair
+   tracks the finger correctly on-device.
+3. ~~Push repo~~ ✅ https://github.com/fuller/react-native-liveline
+4. ~~npm publish~~ ✅ **`@ajfuller/react-native-liveline@0.1.0`**
    live at https://www.npmjs.com/package/@ajfuller/react-native-liveline
    (scoped under the personal npm account `ajfuller`, the actual logged-in
    npm identity) — unscoped `react-native-liveline` is already taken by an
@@ -140,6 +135,9 @@ typecheck + lint + unit tests.
    `github.com/fuller` doesn't grant rights to `@fuller` on npm), so publish
    under that scope 404'd. `publishConfig.access: "public"` is set since
    scoped packages default private. GitHub repo name is unaffected.
+
+v0.1.0 is shipped end-to-end. Remaining items below are post-v0.1 nice-to-haves,
+not release blockers.
 
 ### Runtime assumptions — ALL VERIFIED on sim 2026-07-17 (kept for reference)
 Scrub e.x container-relative: verified by API contract + forced-hover draw-path
