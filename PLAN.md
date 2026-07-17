@@ -93,17 +93,19 @@ typecheck + lint + unit tests.
 ## Remaining work
 
 ### Phase 7 — remaining
-1. Visual parity pass: compare sim screenshots (scratchpad phase7-screenshots/)
-   side-by-side with the web demo (`dev/` via vite in source clone). Open items
-   from the runtime pass: window-pill initializes to windows[0] ignoring `window`
-   prop (verbatim upstream behavior — decide whether to diverge); 120×80 mini
-   time-axis crowding; orderbook label fade intensity in light theme; LogBox
-   warning banner content at launch.
+1. ~~Visual parity pass~~ ✅ 2026-07-17: full structural match across all areas,
+   both themes. All four open items (window-pill windows[0] init, 120×80
+   window-pill crowding, orderbook light-theme fade, LogBox banner) adjudicated
+   as verbatim-upstream behavior / dev-only chrome — no code changes needed.
+   Pairs saved as parity-*-{web,sim}.png in phase7-screenshots/. Noted for
+   later polish: example BasicLineSection doesn't wire onModeChange (web demo
+   does), so the morph-toggle icon only appears in the Candles section.
 2. **Manual (user):** finger-scrub a chart to confirm crosshair lands under
    the finger (RNGH Pan can't be automated on this sim; forced-hover injection
    verified the full crosshair draw path already).
-3. Release: `gh auth login` (token invalid), push repo, npm publish (bob config
-   ready); drop "not runtime-verified" caveat from CHANGELOG.
+3. **Release (user-gated):** `gh auth login` (token invalid), push repo,
+   npm publish (bob config ready). CHANGELOG caveat already updated to
+   verified status.
 
 ### Runtime assumptions — ALL VERIFIED on sim 2026-07-17 (kept for reference)
 Scrub e.x container-relative: verified by API contract + forced-hover draw-path

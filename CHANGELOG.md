@@ -53,10 +53,14 @@ rendered on the UI thread via Reanimated + Skia.
 - New optional `fonts` prop with no web counterpart.
 - `scrub` is touch-drag instead of mouse hover.
 
-### Known limitations
+### Verification
 
-- Initial release: the full pipeline (line, multi-series, candlestick,
-  orderbook, degen particles) is code-complete and passes typecheck, lint,
-  and unit tests, but has **not yet been runtime-verified on a device or
-  simulator**. Treat this version as pre-verification; visual and
-  performance parity with the web version is expected but unconfirmed.
+- Runtime-verified on the iOS simulator: all chart modes render at 60fps,
+  the chart keeps animating through a fully blocked JS thread, and memory
+  stays flat under sustained 50ms-tick streaming.
+- Visual parity with the web version confirmed side-by-side across line,
+  candle, multi-series, orderbook, loading/empty/paused states, and small
+  sizes in both themes.
+- Not yet verified on a physical device or Android; scrub touch handling
+  verified by rendering-path injection (gesture automation is unavailable
+  on simulators).
