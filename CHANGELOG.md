@@ -55,12 +55,15 @@ rendered on the UI thread via Reanimated + Skia.
 
 ### Verification
 
-- Runtime-verified on the iOS simulator: all chart modes render at 60fps,
-  the chart keeps animating through a fully blocked JS thread, and memory
-  stays flat under sustained 50ms-tick streaming.
+- Runtime-verified on the iOS simulator and an Android emulator (Pixel 7,
+  API 34): all chart modes render, the chart keeps animating through a
+  fully blocked JS thread on both platforms, and memory stays flat/settles
+  under sustained streaming (Android's cache warm-up takes a bit longer to
+  plateau than iOS's, not a leak).
 - Visual parity with the web version confirmed side-by-side across line,
   candle, multi-series, orderbook, loading/empty/paused states, and small
   sizes in both themes.
-- Not yet verified on a physical device or Android; scrub touch handling
-  verified by rendering-path injection (gesture automation is unavailable
-  on simulators).
+- Scrub/crosshair-follows-finger confirmed by manual touch on iOS; not yet
+  manually checked on Android (automated gesture injection doesn't reach
+  the underlying Pan recognizer on either simulator/emulator, so this step
+  is manual-only on both platforms). Not yet verified on a physical device.

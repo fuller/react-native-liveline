@@ -77,6 +77,7 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
 | 6 | Example app demo screens (`example/src/`): tabbed sections — basic line, crypto, dashboard, candlestick, multi-series, orderbook; theme+accent switcher; "Block JS 2s" stress button | ✅ |
 | 7a | README (prop tables verified against src/types.ts, RN deltas, fonts examples) + CHANGELOG 0.1.0 | ✅ |
 | 7b | Runtime verification on iOS sim (iPhone 17 Pro): all 6 sections work; JS-block stress test PASSED 3× (chart animates through blocked JS); no memory leak (RSS flat over 3 min, no picture dispose needed); ReText/showValue, worklet font metrics, PictureRecorder-in-worklet all confirmed. Fixes: 555df6e, 672ce2c, 7c6a717 | ✅ |
+| 7c | Runtime verification on Android emulator (Pixel 7, API 34, arm64): all 6 sections, theme/accent switcher, "Block JS 2s" stress test (chart kept advancing through the block, no freeze/crash), fonts (no tofu/fallback issues — resolves the matchFont Android weight-fallback assumption below), No Data state, state transitions all PASS. No source changes needed. Native Heap PSS grew ~33MB over ~7min live but the growth rate decelerated to ~flat (cache warm-up, not a leak) — takes longer to settle than iOS's flat-RSS result, footnoted as a platform difference, not a blocker. | ✅ |
 
 **Intentional divergences from the web demos (Phase 6/7 fidelity pass, deliberate — not gaps):**
 - `CryptoSection` and `OrderbookSection` are RN-only additions: crypto follows
@@ -115,6 +116,35 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
   factory must be declared ABOVE the factory, else they're captured as `undefined` at
   module eval (555df6e, 672ce2c). Whole src/ scanned clean as of 7c6a717.
 
+### Android dev loop (set up + verified working 2026-07-17)
+- This machine had no Android tooling at all going in. One-time install (no sudo needed
+  if you use the formula, not the cask, for the JDK — the JDK cask's `.pkg` installer
+  requires an interactive sudo password and fails non-interactively):
+  `brew install openjdk@17 && brew install --cask android-commandlinetools`.
+- `ANDROID_HOME=/opt/homebrew/share/android-commandlinetools` (cask installs here, NOT
+  `~/Library/Android/sdk` like Android Studio would). `JAVA_HOME=/opt/homebrew/opt/openjdk@17`.
+  Both need to be on `PATH`/exported for `adb`, `sdkmanager`, `avdmanager`, `emulator`, and
+  Gradle to find them.
+- SDK components: `sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+  "emulator" "system-images;android-34;google_apis;arm64-v8a"` (arm64 image — this is
+  Apple Silicon) after accepting licenses (`yes | sdkmanager --licenses`).
+- AVD: `avdmanager create avd -n liveline_test -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_7`.
+  Boot: `emulator -avd liveline_test -no-snapshot -no-boot-anim`.
+- One-time in example/: `CI=1 npx expo prebuild --platform android`, then write
+  `android/local.properties` with `sdk.dir=<ANDROID_HOME>` (prebuild doesn't do this itself).
+- Build + install: `RCT_METRO_PORT=8082 npx expo run:android --port 8082` from example/
+  (~14 min cold — first Gradle run downloads Gradle 9 + NDK + extra build-tools versions
+  on top of the SDK components above). This command keeps Metro attached in the foreground
+  indefinitely, so if you run it as a backgrounded/timed task it'll get killed by the
+  timeout once the build+install succeeds — that's expected, not a failure; check the log
+  for `BUILD SUCCESSFUL` before assuming it broke.
+- Reload after src changes: run Metro standalone (`npx expo start --dev-client --port 8082`,
+  backgrounded) then `adb shell am force-stop liveline.example && adb shell am start -n liveline.example/.MainActivity`.
+  Same port-8082 rule as iOS applies — 8081 is still off-limits.
+- Screenshots: `adb shell screencap -p /sdcard/screen.png && adb pull /sdcard/screen.png <path>`.
+- Automation: agent-device android support wasn't reliably needed — adb screencap +
+  `adb shell input tap x y` was fast enough for a full section-by-section pass.
+
 ## Release checklist — ALL DONE as of 2026-07-17
 
 1. ~~Visual parity pass~~ ✅ full structural match across all areas,
@@ -139,14 +169,16 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
 v0.1.0 is shipped end-to-end. Remaining items below are post-v0.1 nice-to-haves,
 not release blockers.
 
-### Runtime assumptions — ALL VERIFIED on sim 2026-07-17 (kept for reference)
+### Runtime assumptions — ALL VERIFIED on iOS sim + Android emulator 2026-07-17 (kept for reference)
 Scrub e.x container-relative: verified by API contract + forced-hover draw-path
-test only; needs one manual finger check. Stale-fonts and published-package
-Metro transform: consumer-side, deferred as planned.
+test only on both platforms; needs one manual finger check per platform (iOS
+confirmed by user 2026-07-17; Android not yet manually checked). Stale-fonts
+and published-package Metro transform: consumer-side, deferred as planned.
 - `Skia.PictureRecorder()` usable inside a Reanimated worklet; `<Picture>`
   accepting a `SharedValue<SkPicture>` that's reassigned every frame.
 - `font.measureText().width` + `getMetrics()` in worklets; `matchFont` weights
-  on Android (`monospace` + fontWeight '500'/'600' may need fallback).
+  on Android (`monospace` + fontWeight '500'/'600') — verified clean on the
+  Pixel 7 emulator, no tofu/fallback issues at any weight used.
 - Old-picture disposal: if memory climbs, call `.dispose()` on the previous
   picture after replacing it.
 - `useFrameCallback` closure captures `fonts` (memoized) — if fonts prop
