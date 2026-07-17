@@ -22,9 +22,16 @@ import type { HoverPoint, LivelineFonts } from './types';
 
 export type { EngineConfig } from './engine/types';
 
+/** A 0×0 picture used before the first frame is recorded. */
+function makeEmptyPicture(): SkPicture {
+  const recorder = Skia.PictureRecorder();
+  recorder.beginRecording(Skia.XYWHRect(0, 0, 1, 1));
+  return recorder.finishRecordingAsPicture();
+}
+
 export interface LivelineEngine {
   /** Re-recorded every frame on the UI thread — render via Skia's <Picture> */
-  picture: SharedValue<SkPicture | null>;
+  picture: SharedValue<SkPicture>;
   /** Pan gesture driving crosshair scrub — attach with <GestureDetector> */
   gesture: ComposedGesture | GestureType;
   /** Attach to the chart container to feed the engine its size */
@@ -67,7 +74,7 @@ export function useLivelineEngine(
   const state = useSharedValue<EngineState | null>(null);
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
-  const picture = useSharedValue<SkPicture | null>(null);
+  const picture = useSharedValue<SkPicture>(makeEmptyPicture());
   const valueText = useSharedValue('');
   const valueColor = useSharedValue('');
 

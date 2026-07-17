@@ -1,3 +1,10 @@
+export { Liveline } from './Liveline';
+export { LivelineTransition } from './LivelineTransition';
+export type { LivelineTransitionProps } from './LivelineTransition';
+export { useLivelineEngine } from './useLivelineEngine';
+export type { LivelineEngine, EngineConfig } from './useLivelineEngine';
+export { makeDefaultFonts } from './draw/fonts';
+export { resolveTheme, SERIES_COLORS } from './theme';
 export type {
   LivelineProps,
   LivelinePoint,
@@ -15,4 +22,3 @@ export type {
   WindowStyle,
   BadgeVariant,
 } from './types';
-export { resolveTheme, SERIES_COLORS } from './theme';
