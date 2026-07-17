@@ -67,33 +67,22 @@ shape. Full original plan: `~/.claude/plans/i-want-to-create-staged-locket.md`
 | 3 | Engine: `src/engine/{constants,types,helpers,candleHelpers,state,step,badge}.ts` — line + multi + candle pipelines, loading/empty/reveal, pause time-debt, window transitions, hover/scrub; `src/useLivelineEngine.ts` (frame callback, Pan gesture, AppState, reduced motion, onHover runOnJS) | ✅ |
 | 4 | `src/Liveline.tsx` (controls, sliding indicators, Skia mini-icons, ReText value), `src/LivelineTransition.tsx`, `src/index.tsx` exports | ✅ |
 | 5 | Multi-series + candles + orderbook + degen particles — all ported as part of phases 2–4 | ✅ (code-complete, unverified at runtime) |
+| 6 | Example app demo screens (`example/src/`): tabbed sections — basic line, crypto, dashboard, candlestick, multi-series, orderbook; theme+accent switcher; "Block JS 2s" stress button | ✅ |
+| 7a | README (prop tables verified against src/types.ts, RN deltas, fonts examples) + CHANGELOG 0.1.0 | ✅ |
 
 **Nothing has run on a device/simulator yet.** All verification so far is
 typecheck + lint + unit tests.
 
 ## Remaining work
 
-### Phase 6 — Example app demo screens (`example/`)
-`example/src/App.tsx` is a placeholder. Mirror the web repo's `dev/demo.tsx`
-(read it in the source clone):
-- Streaming fake-data generators (random walk ticks; OHLC aggregation for candles).
-- Screens/sections: basic line, crypto-style (exaggerate+degen+showValue),
-  dashboard (windows + no badge), candlestick (+ line-morph toggle + windows),
-  multi-series (+ toggle chips), loading/empty/paused states, orderbook.
-- Theme (light/dark) + accent color switcher.
-- **JS-thread stress button**: `while` loop blocking JS ~2s — chart must keep
-  animating (proves the UI-thread engine).
-- Wrap app in `GestureHandlerRootView`.
-
-### Phase 7 — Runtime verification, docs, release
+### Phase 7 — Runtime verification, release
 1. Run example on iOS simulator (`node .yarn/releases/yarn-4.11.0.cjs example ios`
    — Expo; may need `npx expo prebuild`/dev-client since Skia+Reanimated are
    native). Use the `agent-device` skill to drive/screenshot each screen.
 2. Verify against the runtime-assumption checklist below; fix what breaks.
 3. Compare visuals side-by-side with the web demo (`dev/` via vite in source clone).
-4. README: mirror upstream prop tables + RN notes (worklet formatters, peer
-   deps, Expo setup, `fonts` prop). CHANGELOG. Then npm publish config is
-   already set (bob).
+4. npm publish (bob config already set); drop "not runtime-verified" caveat
+   from CHANGELOG once verified.
 
 ### Runtime assumptions to verify on first launch (most likely breakage points)
 - `Skia.PictureRecorder()` usable inside a Reanimated worklet; `<Picture>`
