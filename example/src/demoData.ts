@@ -1,7 +1,4 @@
-import type {
-  LivelinePoint,
-  CandlePoint,
-} from '@ajfuller/react-native-liveline';
+import type { LivelinePoint, CandlePoint } from '@fuller/react-native-liveline';
 
 // --- Data generators (ported verbatim from the web dev playgrounds) ---
 

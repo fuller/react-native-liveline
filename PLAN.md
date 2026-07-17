@@ -130,8 +130,8 @@ typecheck + lint + unit tests.
    the finger (RNGH Pan can't be automated on this sim; forced-hover injection
    verified the full crosshair draw path already).
 3. ~~Push repo~~ ✅ 2026-07-17 — https://github.com/fuller/react-native-liveline
-4. **npm publish (user-gated):** bob config ready; run when user says go.
-   Package renamed to **`@ajfuller/react-native-liveline`** (scoped) —
+4. npm publish. Package renamed to **`@fuller/react-native-liveline`**
+   (scoped, published under the `fuller` org — npm user `ajfuller` is owner) —
    unscoped `react-native-liveline` is already taken by an unrelated package
    (ukcw/react-native-liveline). `publishConfig.access: "public"` is set since
    scoped packages default private. GitHub repo name is unaffected.

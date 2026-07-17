@@ -2,7 +2,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "@ajfuller/react-native-liveline": ["./src/index"]
+      "@fuller/react-native-liveline": ["./src/index"]
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,
