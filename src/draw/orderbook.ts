@@ -24,6 +24,18 @@ export interface OrderbookState {
   churnRate: number; // smoothed 0-1, how much the book is changing
 }
 
+// NOTE: these consts MUST be declared above createOrderbookState. The
+// worklets babel plugin captures a worklet's closure at module evaluation,
+// so consts declared below a worklet that references them are captured as
+// `undefined` (hoisting is lost in the transform) — BASE_SPEED would become
+// undefined, poisoning smoothSpeed/label.y with NaN on the UI thread.
+const MAX_LABELS = 50;
+const LABEL_LIFETIME = 6; // seconds
+const SPAWN_INTERVAL = 40; // ms
+const MIN_LABEL_GAP = 22; // px
+const BASE_SPEED = 60; // px/s calm
+const MAX_SPEED = 160; // px/s during big activity
+
 export function createOrderbookState(): OrderbookState {
   'worklet';
   return {
@@ -35,13 +47,6 @@ export function createOrderbookState(): OrderbookState {
     churnRate: 0,
   };
 }
-
-const MAX_LABELS = 50;
-const LABEL_LIFETIME = 6; // seconds
-const SPAWN_INTERVAL = 40; // ms
-const MIN_LABEL_GAP = 22; // px
-const BASE_SPEED = 60; // px/s calm
-const MAX_SPEED = 160; // px/s during big activity
 
 function mixColor(
   from: [number, number, number],
