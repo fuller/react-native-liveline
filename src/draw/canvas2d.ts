@@ -133,6 +133,26 @@ interface StyleSnapshot {
   lineDash: number[];
 }
 
+// NOTE: these module-scope worklet helpers MUST be defined above
+// createCanvas2D. The worklets babel plugin rewrites 'worklet' function
+// declarations into const-assigned worklet objects (hoisting is lost) and
+// captures createCanvas2D's closure at module evaluation — helpers defined
+// below it would be captured as `undefined` and crash on the UI thread.
+function alignDx(font: SkFont, text: string, align: TextAlign2D): number {
+  'worklet';
+  if (align === 'left') return 0;
+  const w = font.measureText(text).width;
+  return align === 'center' ? -w / 2 : -w;
+}
+
+function baselineDy(font: SkFont, baseline: TextBaseline2D): number {
+  'worklet';
+  if (baseline === 'alphabetic') return 0;
+  const m = font.getMetrics(); // ascent is negative in Skia
+  if (baseline === 'middle') return -(m.ascent + m.descent) / 2;
+  return -m.ascent; // 'top'
+}
+
 export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
   'worklet';
   let path = Skia.Path.Make();
@@ -406,19 +426,4 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
   };
 
   return ctx;
-}
-
-function alignDx(font: SkFont, text: string, align: TextAlign2D): number {
-  'worklet';
-  if (align === 'left') return 0;
-  const w = font.measureText(text).width;
-  return align === 'center' ? -w / 2 : -w;
-}
-
-function baselineDy(font: SkFont, baseline: TextBaseline2D): number {
-  'worklet';
-  if (baseline === 'alphabetic') return 0;
-  const m = font.getMetrics(); // ascent is negative in Skia
-  if (baseline === 'middle') return -(m.ascent + m.descent) / 2;
-  return -m.ascent; // 'top'
 }
