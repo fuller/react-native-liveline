@@ -130,7 +130,8 @@ typecheck + lint + unit tests.
    the finger (RNGH Pan can't be automated on this sim; forced-hover injection
    verified the full crosshair draw path already).
 3. ~~Push repo~~ ✅ 2026-07-17 — https://github.com/fuller/react-native-liveline
-4. npm publish. Package renamed to **`@ajfuller/react-native-liveline`**
+4. ~~npm publish~~ ✅ 2026-07-17 — **`@ajfuller/react-native-liveline@0.1.0`**
+   live at https://www.npmjs.com/package/@ajfuller/react-native-liveline
    (scoped under the personal npm account `ajfuller`, the actual logged-in
    npm identity) — unscoped `react-native-liveline` is already taken by an
    unrelated package (ukcw/react-native-liveline). The `fuller` npm org name
