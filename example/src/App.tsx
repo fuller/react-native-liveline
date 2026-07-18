@@ -4,7 +4,7 @@ import { Pressable, SafeAreaView, ScrollView, Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { ACCENT_COLORS, AppThemeProvider, useAppTheme } from './AppTheme';
 import { StressButton } from './StressButton';
-import { PageBg } from './ui';
+import { Btn, fg, PageBg, Pill } from './ui';
 import { BasicLineSection } from './sections/BasicLineSection';
 import { CandlestickSection } from './sections/CandlestickSection';
 import { CryptoSection } from './sections/CryptoSection';
@@ -23,11 +23,6 @@ const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: 'multi', label: 'Multi' },
   { key: 'orderbook', label: 'Orderbook' },
 ];
-
-function fg(isDark: boolean, alpha: number): string {
-  const base = isDark ? '255,255,255' : '0,0,0';
-  return `rgba(${base},${alpha})`;
-}
 
 function TopBar() {
   const { isDark, setIsDark, accent, setAccent } = useAppTheme();
@@ -70,48 +65,12 @@ function TopBar() {
         }}
       >
         <View style={{ flexDirection: 'row', gap: 4 }}>
-          <Pressable
-            onPress={() => setIsDark(true)}
-            style={{
-              paddingVertical: 4,
-              paddingHorizontal: 10,
-              borderRadius: 5,
-              borderWidth: 1,
-              borderColor: isDark ? 'rgba(59,130,246,0.5)' : fg(isDark, 0.08),
-              backgroundColor: isDark ? 'rgba(59,130,246,0.12)' : 'transparent',
-            }}
-          >
-            <Text
-              style={{
-                fontSize: 11,
-                color: isDark ? '#3b82f6' : fg(isDark, 0.45),
-              }}
-            >
-              Dark
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setIsDark(false)}
-            style={{
-              paddingVertical: 4,
-              paddingHorizontal: 10,
-              borderRadius: 5,
-              borderWidth: 1,
-              borderColor: !isDark ? 'rgba(59,130,246,0.5)' : fg(isDark, 0.08),
-              backgroundColor: !isDark
-                ? 'rgba(59,130,246,0.12)'
-                : 'transparent',
-            }}
-          >
-            <Text
-              style={{
-                fontSize: 11,
-                color: !isDark ? '#3b82f6' : fg(isDark, 0.45),
-              }}
-            >
-              Light
-            </Text>
-          </Pressable>
+          <Btn active={isDark} onPress={() => setIsDark(true)}>
+            Dark
+          </Btn>
+          <Btn active={!isDark} onPress={() => setIsDark(false)}>
+            Light
+          </Btn>
         </View>
 
         <View
@@ -161,35 +120,15 @@ function SectionTabs({
         gap: 6,
       }}
     >
-      {SECTIONS.map((s) => {
-        const isActive = s.key === active;
-        return (
-          <Pressable
-            key={s.key}
-            onPress={() => onChange(s.key)}
-            style={{
-              paddingVertical: 5,
-              paddingHorizontal: 12,
-              borderRadius: 999,
-              borderWidth: 1,
-              borderColor: isActive ? 'rgba(59,130,246,0.5)' : fg(isDark, 0.08),
-              backgroundColor: isActive
-                ? 'rgba(59,130,246,0.12)'
-                : fg(isDark, 0.02),
-            }}
-          >
-            <Text
-              style={{
-                fontSize: 12,
-                fontWeight: isActive ? '600' : '400',
-                color: isActive ? '#3b82f6' : fg(isDark, 0.45),
-              }}
-            >
-              {s.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+      {SECTIONS.map((s) => (
+        <Pill
+          key={s.key}
+          active={s.key === active}
+          onPress={() => onChange(s.key)}
+        >
+          {s.label}
+        </Pill>
+      ))}
     </ScrollView>
   );
 }

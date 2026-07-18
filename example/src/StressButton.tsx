@@ -2,6 +2,7 @@
 import { useCallback, useState } from 'react';
 import { Pressable, Text } from 'react-native';
 import { useAppTheme } from './AppTheme';
+import { CONTROL_HEIGHT, CONTROL_RADIUS } from './ui';
 
 /**
  * Blocks the JS thread synchronously for ~2s. The chart engine runs entirely
@@ -29,9 +30,10 @@ export function StressButton() {
     <Pressable
       onPress={handlePress}
       style={{
-        paddingVertical: 6,
+        height: CONTROL_HEIGHT,
+        justifyContent: 'center',
         paddingHorizontal: 12,
-        borderRadius: 6,
+        borderRadius: CONTROL_RADIUS,
         borderWidth: 1,
         borderColor: 'rgba(239,68,68,0.5)',
         backgroundColor: 'rgba(239,68,68,0.12)',

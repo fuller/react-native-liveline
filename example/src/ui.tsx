@@ -5,6 +5,10 @@ import { useAppTheme } from './AppTheme';
 
 const ACCENT = '#3b82f6';
 
+export const CONTROL_HEIGHT = 24;
+export const CONTROL_RADIUS = 5;
+export const PILL_HEIGHT = 28;
+
 export function fg(isDark: boolean, alpha: number): string {
   const base = isDark ? '255,255,255' : '0,0,0';
   return `rgba(${base},${alpha})`;
@@ -126,9 +130,10 @@ export function Btn({
     <Pressable
       onPress={onPress}
       style={{
-        paddingVertical: 4,
+        height: CONTROL_HEIGHT,
+        justifyContent: 'center',
         paddingHorizontal: 10,
-        borderRadius: 5,
+        borderRadius: CONTROL_RADIUS,
         borderWidth: 1,
         borderColor: active ? 'rgba(59,130,246,0.5)' : fg(isDark, 0.08),
         backgroundColor: active ? 'rgba(59,130,246,0.12)' : fg(isDark, 0.02),
@@ -161,9 +166,10 @@ export function Toggle({
     <Pressable
       onPress={() => onToggle(!on)}
       style={{
-        paddingVertical: 4,
+        height: CONTROL_HEIGHT,
+        justifyContent: 'center',
         paddingHorizontal: 10,
-        borderRadius: 5,
+        borderRadius: CONTROL_RADIUS,
         borderWidth: 1,
         borderColor: on ? 'rgba(59,130,246,0.4)' : fg(isDark, 0.06),
         backgroundColor: on ? 'rgba(59,130,246,0.1)' : 'transparent',
@@ -174,6 +180,42 @@ export function Toggle({
           fontSize: 11,
           lineHeight: 15,
           color: on ? ACCENT : fg(isDark, 0.35),
+        }}
+      >
+        {children}
+      </Text>
+    </Pressable>
+  );
+}
+
+export function Pill({
+  children,
+  active,
+  onPress,
+}: {
+  children: ReactNode;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const { isDark } = useAppTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        height: PILL_HEIGHT,
+        justifyContent: 'center',
+        paddingHorizontal: 12,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: active ? 'rgba(59,130,246,0.5)' : fg(isDark, 0.08),
+        backgroundColor: active ? 'rgba(59,130,246,0.12)' : fg(isDark, 0.02),
+      }}
+    >
+      <Text
+        style={{
+          fontSize: 12,
+          fontWeight: active ? '600' : '400',
+          color: active ? ACCENT : fg(isDark, 0.45),
         }}
       >
         {children}
