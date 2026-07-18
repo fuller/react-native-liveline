@@ -14,11 +14,16 @@ All notable changes to this project will be documented in this file.
   Reanimated 4 itself requires) — previously undeclared, which meant a
   fresh install on Reanimated 4 could silently break the same way our own
   example app build did before we added it there.
-- `react-native-gesture-handler` and `@shopify/react-native-skia` peer
-  ranges are unchanged (`>=2.16.0` / `>=2.0.0`) — verified accurate as-is.
-  Note: gesture-handler 3.x replaced the `Gesture.Pan()` builder API this
-  library uses with a hook-based API; that's a real migration, not a range
-  bump, and hasn't been done.
+- **`react-native-gesture-handler` bumped to `>=3.0.0`** (was `>=2.16.0`).
+  Gesture-handler 3.x renamed what `ComposedGesture` refers to (it now means
+  the new v3 declarative gesture model) and exposes the old builder API's
+  composed-gesture type under `LegacyComposedGesture` instead — this library
+  still uses the classic `Gesture.Pan().onBegin/.onUpdate/.onFinalize()`
+  builder API unchanged (deprecated in 3.x but not removed), just with the
+  corrected type import. No gesture logic changed. A migration to the new
+  hook-based `usePanGesture()` API is deferred to a future release.
+- `@shopify/react-native-skia` peer range is unchanged (`>=2.0.0`) —
+  verified accurate as-is against its own published peerDependencies.
 
 ## [0.1.0] - 2026-07-17
 

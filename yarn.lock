@@ -11,7 +11,7 @@ __metadata:
   dependencies:
     "@eslint/compat": "npm:^2.1.0"
     "@eslint/eslintrc": "npm:^3.3.5"
-    "@eslint/js": "npm:^10.0.1"
+    "@eslint/js": "npm:^9.39.5"
     "@react-native/babel-preset": "npm:0.85.0"
     "@react-native/eslint-config": "npm:0.85.0"
     "@shopify/react-native-skia": "npm:2.4.18"
@@ -20,14 +20,13 @@ __metadata:
     del-cli: "npm:^7.0.0"
     eslint: "npm:^9.39.4"
     eslint-config-prettier: "npm:^10.1.8"
-    eslint-plugin-ft-flow: "npm:^3.0.11"
     eslint-plugin-prettier: "npm:^5.5.6"
     jest: "npm:^29.7.0"
     prettier: "npm:^3.8.3"
     react: "npm:19.2.0"
     react-native: "npm:0.83.10"
     react-native-builder-bob: "npm:^0.43.0"
-    react-native-gesture-handler: "npm:~2.30.0"
+    react-native-gesture-handler: "npm:3.1.0"
     react-native-reanimated: "npm:4.2.1"
     turbo: "npm:^2.9.16"
     typescript: "npm:^6.0.3"
@@ -35,8 +34,9 @@ __metadata:
     "@shopify/react-native-skia": ">=2.0.0"
     react: "*"
     react-native: "*"
-    react-native-gesture-handler: ">=2.16.0"
-    react-native-reanimated: ">=3.16.0"
+    react-native-gesture-handler: ">=3.0.0"
+    react-native-reanimated: ">=4.0.0"
+    react-native-worklets: ">=0.3.0"
   languageName: unknown
   linkType: soft
 
@@ -1727,15 +1727,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@egjs/hammerjs@npm:^2.0.17":
-  version: 2.0.17
-  resolution: "@egjs/hammerjs@npm:2.0.17"
-  dependencies:
-    "@types/hammerjs": "npm:^2.0.36"
-  checksum: 10c0/dbedc15a0e633f887c08394bd636faf6a3abd05726dc0909a0e01209d5860a752d9eca5e512da623aecfabe665f49f1d035de3103eb2f9022c5cea692f9cc9be
-  languageName: node
-  linkType: hard
-
 "@eslint-community/eslint-utils@npm:^4.8.0, @eslint-community/eslint-utils@npm:^4.9.1":
   version: 4.9.1
   resolution: "@eslint-community/eslint-utils@npm:4.9.1"
@@ -1823,22 +1814,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@eslint/js@npm:9.39.5":
+"@eslint/js@npm:9.39.5, @eslint/js@npm:^9.39.5":
   version: 9.39.5
   resolution: "@eslint/js@npm:9.39.5"
   checksum: 10c0/49894e98ba313a7d3bfb1b20d55c0f9826be45a7db876fd84e533ac7f101b1d95b51cd22c6a6db3a45066b9c0d068c31b4a22fa0db8a6cc8744a25540efdb824
-  languageName: node
-  linkType: hard
-
-"@eslint/js@npm:^10.0.1":
-  version: 10.0.1
-  resolution: "@eslint/js@npm:10.0.1"
-  peerDependencies:
-    eslint: ^10.0.0
-  peerDependenciesMeta:
-    eslint:
-      optional: true
-  checksum: 10c0/9f3fcaf71ba7fdf65d82e8faad6ecfe97e11801cc3c362b306a88ea1ed1344ae0d35330dddb0e8ad18f010f6687a70b75491b9e01c8af57acd7987cee6b3ec6c
   languageName: node
   linkType: hard
 
@@ -3299,13 +3278,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/hammerjs@npm:^2.0.36":
-  version: 2.0.46
-  resolution: "@types/hammerjs@npm:2.0.46"
-  checksum: 10c0/f3c1cb20dc2f0523f7b8c76065078544d50d8ae9b0edc1f62fed657210ed814266ff2dfa835d2c157a075991001eec3b64c88bf92e3e6e895c0db78d05711d06
-  languageName: node
-  linkType: hard
-
 "@types/istanbul-lib-coverage@npm:*, @types/istanbul-lib-coverage@npm:^2.0.0, @types/istanbul-lib-coverage@npm:^2.0.1, @types/istanbul-lib-coverage@npm:^2.0.6":
   version: 2.0.6
   resolution: "@types/istanbul-lib-coverage@npm:2.0.6"
@@ -3357,7 +3329,16 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/react@npm:^19.2.0":
+"@types/react-test-renderer@npm:^19.1.0":
+  version: 19.1.0
+  resolution: "@types/react-test-renderer@npm:19.1.0"
+  dependencies:
+    "@types/react": "npm:*"
+  checksum: 10c0/799654e430df10aeaf267d71507fb64ec151359ead7e3774111bfd4abce7e0911dba461811195c06c22a6d17496ea92537d3185320ff4112fe29954cad1b9152
+  languageName: node
+  linkType: hard
+
+"@types/react@npm:*, @types/react@npm:^19.2.0":
   version: 19.2.17
   resolution: "@types/react@npm:19.2.17"
   dependencies:
@@ -5160,19 +5141,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"eslint-plugin-ft-flow@npm:^3.0.11":
-  version: 3.0.11
-  resolution: "eslint-plugin-ft-flow@npm:3.0.11"
-  dependencies:
-    lodash: "npm:^4.17.21"
-    string-natural-compare: "npm:^3.0.1"
-  peerDependencies:
-    eslint: ^8.56.0 || ^9.0.0
-    hermes-eslint: ">=0.15.0"
-  checksum: 10c0/025b3736d99d2831c6d493421fbfa880b0aeef9752d3b677972c7100e5ba424368525bc15b34604f02d18807bfa7b1bcaa2c3f37552381f2ce45283faa5989d5
-  languageName: node
-  linkType: hard
-
 "eslint-plugin-jest@npm:^29.0.1":
   version: 29.15.4
   resolution: "eslint-plugin-jest@npm:29.15.4"
@@ -6280,15 +6248,6 @@ __metadata:
   dependencies:
     hermes-estree: "npm:0.25.1"
   checksum: 10c0/3abaa4c6f1bcc25273f267297a89a4904963ea29af19b8e4f6eabe04f1c2c7e9abd7bfc4730ddb1d58f2ea04b6fee74053d8bddb5656ec6ebf6c79cc8d14202c
-  languageName: node
-  linkType: hard
-
-"hoist-non-react-statics@npm:^3.3.0":
-  version: 3.3.2
-  resolution: "hoist-non-react-statics@npm:3.3.2"
-  dependencies:
-    react-is: "npm:^16.7.0"
-  checksum: 10c0/fe0889169e845d738b59b64badf5e55fa3cf20454f9203d1eb088df322d49d4318df774828e789898dcb280e8a5521bb59b3203385662ca5e9218a6ca5820e74
   languageName: node
   linkType: hard
 
@@ -8911,7 +8870,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react-is@npm:^16.13.1, react-is@npm:^16.7.0":
+"react-is@npm:^16.13.1":
   version: 16.13.1
   resolution: "react-is@npm:16.13.1"
   checksum: 10c0/33977da7a5f1a287936a0c85639fec6ca74f4f15ef1e59a6bc20338fc73dc69555381e211f7a3529b8150a1f71e4225525b41b60b52965bda53ce7d47377ada1
@@ -8950,17 +8909,16 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react-native-gesture-handler@npm:~2.30.0":
-  version: 2.30.1
-  resolution: "react-native-gesture-handler@npm:2.30.1"
+"react-native-gesture-handler@npm:3.1.0":
+  version: 3.1.0
+  resolution: "react-native-gesture-handler@npm:3.1.0"
   dependencies:
-    "@egjs/hammerjs": "npm:^2.0.17"
-    hoist-non-react-statics: "npm:^3.3.0"
+    "@types/react-test-renderer": "npm:^19.1.0"
     invariant: "npm:^2.2.4"
   peerDependencies:
     react: "*"
     react-native: "*"
-  checksum: 10c0/6fdace725cfc08a8f2ab4b307d8d7f11438ebe38038443f7057bb1fd10554fcec8ce2816e8da131ae9b850c9be5e3bbef752b90240f5c91595ab20fd03ad6876
+  checksum: 10c0/3d5e93b7f490abb6eecfa7b292c15f14fcb89103f6adfb9a9f7a2216924ee3e860d9e68ee9973df5b42a53229174043a50b679443ff13a7bbd2bf1077c44258d
   languageName: node
   linkType: hard
 
@@ -8996,7 +8954,7 @@ __metadata:
     react-dom: "npm:19.2.0"
     react-native: "npm:0.83.10"
     react-native-builder-bob: "npm:^0.43.0"
-    react-native-gesture-handler: "npm:~2.30.0"
+    react-native-gesture-handler: "npm:3.1.0"
     react-native-monorepo-config: "npm:^0.4.0"
     react-native-reanimated: "npm:4.2.1"
     react-native-web: "npm:~0.21.0"

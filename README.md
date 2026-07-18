@@ -34,14 +34,16 @@ npm install @shopify/react-native-skia react-native-reanimated react-native-work
 | `@shopify/react-native-skia` | `>=2.0.0` |
 | `react-native-reanimated` | `>=4.0.0` |
 | `react-native-worklets` | `>=0.3.0` |
-| `react-native-gesture-handler` | `>=2.16.0` |
+| `react-native-gesture-handler` | `>=3.0.0` |
 
 Reanimated 4 split its worklets runtime out into the separate
 `react-native-worklets` package (Reanimated itself declares this as its own
 peer dependency as of 4.0.0), so it's required alongside Reanimated here too.
-This library hasn't been tested against Reanimated 3.x or gesture-handler 3.x
-(the latter replaced the `Gesture.Pan()` builder API this library uses with a
-hook-based API) — stick to the ranges above.
+This library hasn't been tested against Reanimated 3.x. It's also not tested
+against gesture-handler 2.x anymore — this library still uses the classic
+`Gesture.Pan()` builder API (unchanged since v2), which gesture-handler 3.x
+keeps working but marks deprecated in favor of a new hook-based API; a
+migration to the new API is deferred to a future release.
 
 ### Reanimated Babel plugin
 

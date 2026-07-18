@@ -9,8 +9,12 @@ import {
   type SharedValue,
 } from 'react-native-reanimated';
 import { Gesture } from 'react-native-gesture-handler';
+// `Gesture.Pan()` is the classic (pre-v3) builder API, whose composed-gesture
+// result type the package now exposes as `LegacyComposedGesture` — the plain
+// `ComposedGesture` name was reassigned to the new v3 declarative gesture
+// model, which this classic API doesn't produce.
 import type {
-  ComposedGesture,
+  LegacyComposedGesture as ComposedGesture,
   GestureType,
 } from 'react-native-gesture-handler';
 import { createCanvas2D } from './draw/canvas2d';
