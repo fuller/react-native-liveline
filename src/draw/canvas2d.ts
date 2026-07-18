@@ -159,11 +159,41 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
   let lineDash: number[] = [];
   const stack: StyleSnapshot[] = [];
 
+  // Paint pool: one per style, reused across all draw calls within this
+  // frame's recording (a new SkCanvas/pool is created each frame, so this
+  // does not persist state across frames — only within one). AntiAlias and
+  // Style never vary per paint, so they're set once here rather than on
+  // every draw call. Everything else that a fresh Skia.Paint() would default
+  // to must be explicitly reset on every use below — see applyStyle and the
+  // draw methods for the specific leak hazards (shader, alphaf, blend mode,
+  // path effect, stroke cap).
+  const fillPaint = Skia.Paint();
+  fillPaint.setAntiAlias(true);
+  fillPaint.setStyle(PaintStyle.Fill);
+
+  const strokePaint = Skia.Paint();
+  strokePaint.setAntiAlias(true);
+  strokePaint.setStyle(PaintStyle.Stroke);
+
+  const shadowPaint = Skia.Paint();
+  shadowPaint.setAntiAlias(true);
+  shadowPaint.setStyle(PaintStyle.Fill);
+
   // Applies a fill/stroke style + globalAlpha to a paint. For color strings
   // the string's own alpha is multiplied by globalAlpha; for gradients the
-  // paint alpha modulates the shader output.
+  // paint alpha modulates the shader output. Since paint is pooled, both
+  // branches must fully reset the state the other branch sets: a solid
+  // color must clear any shader left by a prior gradient call (setColor is
+  // ignored while a shader is set), and a gradient at alpha 1 must clear any
+  // alphaf left by a prior alpha<1 call (a fresh paint's alphaf defaults to
+  // 1, which is only reproduced here by always setting it, not just when
+  // alpha < 1).
   const applyStyle = (paint: SkPaint, style: Style2D, alpha: number) => {
     if (typeof style === 'string') {
+      // setColor re-derives alphaf from the color string on every call, so
+      // no explicit alphaf reset is needed on this path — only the shader
+      // (setColor is silently ignored while a shader is set).
+      paint.setShader(null);
       paint.setColor(Skia.Color(style));
       if (alpha < 1) paint.setAlphaf(paint.getAlphaf() * alpha);
     } else {
@@ -180,7 +210,10 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
           TileMode.Clamp
         )
       );
-      if (alpha < 1) paint.setAlphaf(alpha);
+      // Unconditional (not just `if (alpha < 1)`): a pooled paint may carry
+      // a stale alphaf from a previous alpha<1 call, and unlike the solid
+      // path there's no setColor to re-derive it here.
+      paint.setAlphaf(alpha < 1 ? alpha : 1);
     }
   };
 
@@ -306,17 +339,17 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
     },
 
     fill() {
-      const paint = Skia.Paint();
-      paint.setAntiAlias(true);
-      paint.setStyle(PaintStyle.Fill);
+      const paint = fillPaint;
       applyStyle(paint, this.fillStyle, this.globalAlpha);
-      if (this.globalCompositeOperation === 'destination-out') {
-        paint.setBlendMode(BlendMode.DstOut);
-      }
+      // Unconditional: a pooled paint may carry DstOut from a prior
+      // destination-out fill/stroke/fillRect call.
+      paint.setBlendMode(
+        this.globalCompositeOperation === 'destination-out'
+          ? BlendMode.DstOut
+          : BlendMode.SrcOver
+      );
       if (this.shadowBlur > 0) {
-        const sp = Skia.Paint();
-        sp.setAntiAlias(true);
-        sp.setStyle(PaintStyle.Fill);
+        const sp = shadowPaint;
         sp.setColor(Skia.Color(this.shadowColor));
         sp.setAlphaf(sp.getAlphaf() * this.globalAlpha);
         sp.setMaskFilter(
@@ -334,19 +367,22 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
     },
 
     stroke() {
-      const paint = Skia.Paint();
-      paint.setAntiAlias(true);
-      paint.setStyle(PaintStyle.Stroke);
+      const paint = strokePaint;
       paint.setStrokeWidth(this.lineWidth);
       paint.setStrokeCap(capOf(this.lineCap));
       paint.setStrokeJoin(joinOf(this.lineJoin));
       applyStyle(paint, this.strokeStyle, this.globalAlpha);
-      if (this.globalCompositeOperation === 'destination-out') {
-        paint.setBlendMode(BlendMode.DstOut);
-      }
-      if (lineDash.length > 0) {
-        paint.setPathEffect(Skia.PathEffect.MakeDash(lineDash, 0));
-      }
+      paint.setBlendMode(
+        this.globalCompositeOperation === 'destination-out'
+          ? BlendMode.DstOut
+          : BlendMode.SrcOver
+      );
+      // Reset to null on the no-dash path: strokeText shares this pooled
+      // paint and never dashes, so it must not inherit a dash pattern left
+      // by a previous stroke() call.
+      paint.setPathEffect(
+        lineDash.length > 0 ? Skia.PathEffect.MakeDash(lineDash, 0) : null
+      );
       canvas.drawPath(path, paint);
     },
 
@@ -355,21 +391,24 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
     },
 
     fillRect(x, y, w, h) {
-      const paint = Skia.Paint();
-      paint.setAntiAlias(true);
-      paint.setStyle(PaintStyle.Fill);
+      const paint = fillPaint;
       applyStyle(paint, this.fillStyle, this.globalAlpha);
-      if (this.globalCompositeOperation === 'destination-out') {
-        paint.setBlendMode(BlendMode.DstOut);
-      }
+      paint.setBlendMode(
+        this.globalCompositeOperation === 'destination-out'
+          ? BlendMode.DstOut
+          : BlendMode.SrcOver
+      );
       canvas.drawRect(Skia.XYWHRect(x, y, w, h), paint);
     },
 
     fillText(text, x, y) {
-      const paint = Skia.Paint();
-      paint.setAntiAlias(true);
-      paint.setStyle(PaintStyle.Fill);
+      const paint = fillPaint;
       applyStyle(paint, this.fillStyle, this.globalAlpha);
+      // fillText never sets a blend mode itself (matches pre-pooling
+      // behavior, which never applied destination-out to text), but since
+      // this paint is shared with fill()/fillRect() it must not inherit
+      // DstOut from a prior destination-out fill.
+      paint.setBlendMode(BlendMode.SrcOver);
       canvas.drawText(
         text,
         x + alignDx(this.font, text, this.textAlign),
@@ -380,12 +419,17 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
     },
 
     strokeText(text, x, y) {
-      const paint = Skia.Paint();
-      paint.setAntiAlias(true);
-      paint.setStyle(PaintStyle.Stroke);
+      const paint = strokePaint;
       paint.setStrokeWidth(this.lineWidth);
+      // Reset cap to Butt (a fresh paint's default): stroke() sets cap
+      // per its own lineCap, but strokeText never has and must not inherit
+      // one from a prior stroke() call now that the paint is pooled.
+      paint.setStrokeCap(StrokeCap.Butt);
       paint.setStrokeJoin(joinOf(this.lineJoin));
       applyStyle(paint, this.strokeStyle, this.globalAlpha);
+      // strokeText never dashes; must not inherit a dash from stroke().
+      paint.setPathEffect(null);
+      paint.setBlendMode(BlendMode.SrcOver);
       canvas.drawText(
         text,
         x + alignDx(this.font, text, this.textAlign),
