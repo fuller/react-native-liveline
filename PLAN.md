@@ -191,8 +191,10 @@ and published-package Metro transform: consumer-side, deferred as planned.
 ### Deferred / nice-to-have (post-v0.1)
 - Perf: avoid re-serializing full `data` array into the config shared value on
   every tick (append-only path or ring buffer) if profiling shows cost.
-- Paint/path object pooling in the shim if GC pressure shows up.
-- `activateAfterLongPress` option for scrub inside ScrollViews.
+- Paint/path pooling, scrub activation delay, point decimation, and
+  off-screen frame-loop suspension: see **`PLAN_PERF.md`** — a source-verified
+  comparison against react-native-graph with a concrete implementation plan
+  for each (this superseded the speculative bullets that used to be here).
 - CI runs on GitHub once repo is pushed (workflows already scaffolded).
 
 ## Task list mapping (session task tool)
