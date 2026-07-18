@@ -110,6 +110,15 @@ export interface LivelineProps {
    * the crosshair on first touch — only a deliberate hold starts scrubbing.
    */
   scrubActivationDelay?: number;
+  /**
+   * Suspends the engine's per-frame UI-thread callback entirely when
+   * `false` (default: `true`). Wire this to your list's viewability
+   * callback — e.g. `FlatList`'s `onViewableItemsChanged` — so off-screen
+   * charts in a long list cost nothing. Combines with (does not replace)
+   * the existing AppState-backgrounding suspension: the frame loop only
+   * runs while the app is foregrounded *and* `active` is `true`.
+   */
+  active?: boolean;
   exaggerate?: boolean; // Tight Y-axis range — small moves fill chart height (default: false)
   showValue?: boolean; // Show live value as text overlay above the chart (default: false)
   valueMomentumColor?: boolean; // Color the value text by momentum — green/red (default: false)

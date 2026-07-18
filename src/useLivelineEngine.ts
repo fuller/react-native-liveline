@@ -123,14 +123,32 @@ export function useLivelineEngine(
     }
   }, true);
 
-  // Pause the loop while the app is backgrounded
+  // Suspend the frame loop when either the app is backgrounded or the
+  // caller marks this chart inactive (e.g. off-screen in a list, via
+  // `active={false}` wired to a FlatList's `onViewableItemsChanged`). The
+  // two conditions combine with AND — backgrounding must still suspend a
+  // chart with `active=true`, and `active=false` must stay suspended even
+  // if the app comes back to the foreground. `activePropRef` holds the
+  // latest `active` prop so the AppState listener (subscribed once) never
+  // reads a stale value.
+  const activeProp = config.active ?? true;
+  const activePropRef = useRef(activeProp);
+  const appForegroundRef = useRef(AppState.currentState === 'active');
+
   useEffect(() => {
     const sub = AppState.addEventListener('change', (status) => {
-      frame.setActive(status === 'active');
+      appForegroundRef.current = status === 'active';
+      frame.setActive(appForegroundRef.current && activePropRef.current);
     });
     return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- frame is identity-stable
   }, []);
+
+  useEffect(() => {
+    activePropRef.current = activeProp;
+    frame.setActive(appForegroundRef.current && activeProp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- frame is identity-stable
+  }, [activeProp]);
 
   // Touch-drag scrub — mirrors the web version's touchmove handling
   // (crosshair follows the finger; releasing fades it out).

@@ -36,6 +36,7 @@ export interface EngineConfig {
   showPulse: boolean;
   scrub: boolean;
   scrubActivationDelay?: number;
+  active: boolean;
   exaggerate: boolean;
   degenOptions?: DegenOptions;
   badgeTail: boolean;

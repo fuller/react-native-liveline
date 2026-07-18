@@ -149,6 +149,7 @@ The component fills its parent container — set a height on the parent. Pass
 | `momentum` | `boolean \| Momentum` | `true` | Dot glow + arrows. `true` = auto-detect, or `'up' \| 'down' \| 'flat'` |
 | `scrub` | `boolean` | `true` | Crosshair scrubbing on touch-drag |
 | `scrubActivationDelay` | `number` | `0` | Ms of long-press before the scrub pan activates. `0` = immediate. Set e.g. `300` when the chart is embedded in a `ScrollView`/`FlatList` so flick-scrolls aren't stolen by the crosshair on first touch |
+| `active` | `boolean` | `true` | Suspends the per-frame UI-thread callback entirely when `false` — wire to list viewability so off-screen charts cost nothing. See [Charts in lists](#charts-in-lists) below |
 | `exaggerate` | `boolean` | `false` | Tight Y-axis — small moves fill chart height |
 | `showValue` | `boolean` | `false` | Large live value overlay (60fps, no re-renders) |
 | `valueMomentumColor` | `boolean` | `false` | Color the value text green/red by momentum |
@@ -242,6 +243,43 @@ data" empty state is shown.
 | `padding` | `Padding` | `{ top: 12, right: auto, bottom: 28, left: 12 }` | Chart padding override (`right` is 80/54/12 based on badge/grid) |
 | `onHover` | `(point: HoverPoint \| null) => void` | — | Hover callback with `{ time, value, x, y }` |
 | `style` | `StyleProp<ViewStyle>` | — | Container style |
+
+### Charts in lists
+
+Each `Liveline` runs its own 60fps UI-thread frame loop, so a long list of
+ticker rows keeps one loop running per row — including rows scrolled
+off-screen. Set `active={false}` on rows outside the viewport (via your
+list's viewability callback) to suspend those loops entirely at no cost:
+
+```tsx
+const viewabilityConfig = { itemVisiblePercentThreshold: 0 };
+
+function TickerList({ rows }: { rows: Ticker[] }) {
+  const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set());
+
+  const onViewableItemsChanged = useRef(
+    ({ viewableItems }: { viewableItems: { key: string }[] }) => {
+      setVisibleIds(new Set(viewableItems.map((v) => v.key)));
+    }
+  ).current;
+
+  return (
+    <FlatList
+      data={rows}
+      keyExtractor={(row) => row.id}
+      viewabilityConfig={viewabilityConfig}
+      onViewableItemsChanged={onViewableItemsChanged}
+      renderItem={({ item }) => (
+        <Liveline
+          data={item.data}
+          value={item.value}
+          active={visibleIds.has(item.id)}
+        />
+      )}
+    />
+  );
+}
+```
 
 ### `LivelineTransition`
 
