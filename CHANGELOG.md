@@ -2,7 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] - Unreleased
+## [Unreleased]
+
+### Changed
+
+- **Peer dependency ranges tightened**: `react-native-reanimated` now requires
+  `>=4.0.0` (was `>=3.16.0`, which was never actually verified — this library
+  has only ever been built and tested against 4.2.1). Reanimated 4 split its
+  worklets runtime into a separate `react-native-worklets` package, which is
+  now declared as a required peer dependency (`>=0.3.0`, matching what
+  Reanimated 4 itself requires) — previously undeclared, which meant a
+  fresh install on Reanimated 4 could silently break the same way our own
+  example app build did before we added it there.
+- `react-native-gesture-handler` and `@shopify/react-native-skia` peer
+  ranges are unchanged (`>=2.16.0` / `>=2.0.0`) — verified accurate as-is.
+  Note: gesture-handler 3.x replaced the `Gesture.Pan()` builder API this
+  library uses with a hook-based API; that's a real migration, not a range
+  bump, and hasn't been done.
+
+## [0.1.0] - 2026-07-17
 
 Initial release: a React Native port of
 [liveline](https://github.com/benjitaylor/liveline) with the same SDK shape,

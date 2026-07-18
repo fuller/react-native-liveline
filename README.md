@@ -26,14 +26,22 @@ npm install @ajfuller/react-native-liveline
 Peer dependencies (install alongside):
 
 ```sh
-npm install @shopify/react-native-skia react-native-reanimated react-native-gesture-handler
+npm install @shopify/react-native-skia react-native-reanimated react-native-worklets react-native-gesture-handler
 ```
 
 | Peer | Required range |
 |---|---|
 | `@shopify/react-native-skia` | `>=2.0.0` |
-| `react-native-reanimated` | `>=3.16.0` |
+| `react-native-reanimated` | `>=4.0.0` |
+| `react-native-worklets` | `>=0.3.0` |
 | `react-native-gesture-handler` | `>=2.16.0` |
+
+Reanimated 4 split its worklets runtime out into the separate
+`react-native-worklets` package (Reanimated itself declares this as its own
+peer dependency as of 4.0.0), so it's required alongside Reanimated here too.
+This library hasn't been tested against Reanimated 3.x or gesture-handler 3.x
+(the latter replaced the `Gesture.Pan()` builder API this library uses with a
+hook-based API) — stick to the ranges above.
 
 ### Reanimated Babel plugin
 
