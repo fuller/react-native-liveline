@@ -102,6 +102,14 @@ export interface LivelineProps {
   paused?: boolean; // Pause chart scrolling (default: false)
   emptyText?: string; // Text shown in the empty state (default: 'No data to display')
   scrub?: boolean; // Enable crosshair scrubbing on touch-drag (default: true)
+  /**
+   * Milliseconds of long-press before the scrub pan gesture activates
+   * (default: 0 = immediate, matching current behavior). Set this to a
+   * positive value (e.g. 300) when embedding the chart inside a
+   * ScrollView/FlatList so a flick-scroll past the chart isn't stolen by
+   * the crosshair on first touch — only a deliberate hold starts scrubbing.
+   */
+  scrubActivationDelay?: number;
   exaggerate?: boolean; // Tight Y-axis range — small moves fill chart height (default: false)
   showValue?: boolean; // Show live value as text overlay above the chart (default: false)
   valueMomentumColor?: boolean; // Color the value text by momentum — green/red (default: false)

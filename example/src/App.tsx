@@ -11,9 +11,10 @@ import { CryptoSection } from './sections/CryptoSection';
 import { DashboardSection } from './sections/DashboardSection';
 import { MultiSeriesSection } from './sections/MultiSeriesSection';
 import { OrderbookSection } from './sections/OrderbookSection';
+import { ScrollSection } from './sections/ScrollSection';
 
 type SectionKey =
-  'line' | 'crypto' | 'dashboard' | 'candle' | 'multi' | 'orderbook';
+  'line' | 'crypto' | 'dashboard' | 'candle' | 'multi' | 'orderbook' | 'scroll';
 
 const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: 'line', label: 'Line' },
@@ -22,6 +23,7 @@ const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: 'candle', label: 'Candles' },
   { key: 'multi', label: 'Multi' },
   { key: 'orderbook', label: 'Orderbook' },
+  { key: 'scroll', label: 'Scroll' },
 ];
 
 function TopBar() {
@@ -147,6 +149,8 @@ function ActiveSection({ active }: { active: SectionKey }) {
       return <MultiSeriesSection />;
     case 'orderbook':
       return <OrderbookSection />;
+    case 'scroll':
+      return <ScrollSection />;
   }
 }
 

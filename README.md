@@ -148,6 +148,7 @@ The component fills its parent container — set a height on the parent. Pass
 |------|------|---------|-------------|
 | `momentum` | `boolean \| Momentum` | `true` | Dot glow + arrows. `true` = auto-detect, or `'up' \| 'down' \| 'flat'` |
 | `scrub` | `boolean` | `true` | Crosshair scrubbing on touch-drag |
+| `scrubActivationDelay` | `number` | `0` | Ms of long-press before the scrub pan activates. `0` = immediate. Set e.g. `300` when the chart is embedded in a `ScrollView`/`FlatList` so flick-scrolls aren't stolen by the crosshair on first touch |
 | `exaggerate` | `boolean` | `false` | Tight Y-axis — small moves fill chart height |
 | `showValue` | `boolean` | `false` | Large live value overlay (60fps, no re-renders) |
 | `valueMomentumColor` | `boolean` | `false` | Color the value text green/red by momentum |
@@ -399,7 +400,10 @@ but a few props differ because of the native/worklet environment:
 
 - **`scrub` is touch-drag**, implemented as a `react-native-gesture-handler`
   `Pan` gesture (the web version uses mouse hover). Requires your app root to
-  be wrapped in `GestureHandlerRootView` (see Installation above).
+  be wrapped in `GestureHandlerRootView` (see Installation above). When
+  `scrubActivationDelay` is set, the gesture requires a long-press hold
+  before activating (via `.activateAfterLongPress`), so an outer
+  `ScrollView`/`FlatList` keeps its own pan gesture for quick flicks.
 
 - **`showValue` renders via an animated `TextInput`** (the "ReText" pattern —
   an `Animated.createAnimatedComponent(TextInput)` driven by

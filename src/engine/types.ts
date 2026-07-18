@@ -35,6 +35,7 @@ export interface EngineConfig {
   hasOnHover: boolean;
   showPulse: boolean;
   scrub: boolean;
+  scrubActivationDelay?: number;
   exaggerate: boolean;
   degenOptions?: DegenOptions;
   badgeTail: boolean;

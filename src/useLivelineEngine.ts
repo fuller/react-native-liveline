@@ -136,7 +136,34 @@ export function useLivelineEngine(
   // (crosshair follows the finger; releasing fades it out).
   const scrubEnabled = config.scrub;
   const hasOnHover = !!onHover;
+  const activationDelay = config.scrubActivationDelay ?? 0;
   const gesture = useMemo(() => {
+    const finalize = () => {
+      'worklet';
+      hoverX.value = null;
+      if (hasOnHover) runOnJS(emitHover)(null);
+    };
+
+    if (activationDelay > 0) {
+      // Require a deliberate hold before the crosshair takes over — set
+      // hoverX in onStart/onUpdate (never onBegin, which fires pre-activation
+      // at touch-down) so nothing happens until the long-press activates.
+      // That keeps a flick-scroll on an outer ScrollView/FlatList free to
+      // pass through on first touch.
+      return Gesture.Pan()
+        .enabled(scrubEnabled)
+        .activateAfterLongPress(activationDelay)
+        .onStart((e) => {
+          'worklet';
+          hoverX.value = e.x;
+        })
+        .onUpdate((e) => {
+          'worklet';
+          hoverX.value = e.x;
+        })
+        .onFinalize(finalize);
+    }
+
     return Gesture.Pan()
       .enabled(scrubEnabled)
       .onBegin((e) => {
@@ -147,13 +174,9 @@ export function useLivelineEngine(
         'worklet';
         hoverX.value = e.x;
       })
-      .onFinalize(() => {
-        'worklet';
-        hoverX.value = null;
-        if (hasOnHover) runOnJS(emitHover)(null);
-      });
+      .onFinalize(finalize);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- hoverX is identity-stable
-  }, [scrubEnabled, hasOnHover, emitHover]);
+  }, [scrubEnabled, hasOnHover, emitHover, activationDelay]);
 
   const onLayout = useCallback(
     (e: LayoutChangeEvent) => {
