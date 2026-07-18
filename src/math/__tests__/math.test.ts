@@ -4,6 +4,7 @@ import { detectMomentum } from '../momentum';
 import { interpolateAtTime } from '../interpolate';
 import { niceTimeInterval } from '../intervals';
 import { drawSpline, type SplinePath } from '../spline';
+import { decimateMinMax } from '../decimate';
 import type { LivelinePoint } from '../../types';
 
 // -- lerp --
@@ -244,5 +245,96 @@ describe('drawSpline', () => {
       }
       prev = [x3, y3];
     }
+  });
+});
+
+// -- decimateMinMax --
+
+describe('decimateMinMax', () => {
+  const pts = (values: number[]): LivelinePoint[] =>
+    values.map((v, i) => ({ time: i, value: v }));
+
+  it('returns the input unchanged (same reference) when at or below the pixel budget', () => {
+    const input = pts([1, 5, 3, 8, 2]);
+    const result = decimateMinMax(input, 400);
+    expect(result).toBe(input); // same reference, not just equal content
+  });
+
+  it('returns the input unchanged when length exactly equals chartW', () => {
+    const input = pts(Array.from({ length: 100 }, (_, i) => i));
+    const result = decimateMinMax(input, 100);
+    expect(result).toBe(input);
+  });
+
+  it('preserves the first and last elements exactly when decimating', () => {
+    const input = pts(Array.from({ length: 5000 }, (_, i) => Math.sin(i)));
+    const result = decimateMinMax(input, 100);
+    expect(result[0]).toBe(input[0]);
+    expect(result[result.length - 1]).toBe(input[input.length - 1]);
+  });
+
+  it('produces chronologically monotonic output (required by drawSpline)', () => {
+    const input = pts(Array.from({ length: 3000 }, () => Math.random() * 100));
+    const result = decimateMinMax(input, 150);
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i]!.time).toBeGreaterThanOrEqual(result[i - 1]!.time);
+    }
+  });
+
+  it('has no duplicate points despite first/last special-casing', () => {
+    const input = pts(Array.from({ length: 2000 }, (_, i) => i % 7));
+    const result = decimateMinMax(input, 80);
+    const seen = new Set(result.map((p) => p.time));
+    expect(seen.size).toBe(result.length);
+  });
+
+  it('a synthetic spike mid-array survives decimation', () => {
+    const values = Array.from({ length: 4000 }, () => 10);
+    const spikeIndex = 2137;
+    values[spikeIndex] = 9999;
+    const input = pts(values);
+    const result = decimateMinMax(input, 200);
+    expect(result.some((p) => p.value === 9999)).toBe(true);
+  });
+
+  it('a synthetic dip mid-array (negative spike) survives decimation', () => {
+    const values = Array.from({ length: 4000 }, () => 10);
+    const dipIndex = 913;
+    values[dipIndex] = -9999;
+    const input = pts(values);
+    const result = decimateMinMax(input, 200);
+    expect(result.some((p) => p.value === -9999)).toBe(true);
+  });
+
+  it('bounds output length to roughly 2x buckets plus a small constant', () => {
+    const input = pts(Array.from({ length: 8000 }, (_, i) => i % 50));
+    const chartW = 300;
+    const result = decimateMinMax(input, chartW);
+    expect(result.length).toBeLessThanOrEqual(chartW * 2 + 2);
+  });
+
+  it('decimates dense input (10k points, chartW 400) to the expected order of magnitude', () => {
+    const input = pts(
+      Array.from({ length: 10000 }, (_, i) => Math.sin(i * 0.01) * 100)
+    );
+    const chartW = 400;
+    const result = decimateMinMax(input, chartW);
+    // Should be dramatically smaller than the input, and in the same
+    // ballpark as chartW (bounded above by 2*chartW + 2), not e.g. still
+    // thousands of points.
+    expect(result.length).toBeLessThan(input.length / 5);
+    expect(result.length).toBeLessThanOrEqual(chartW * 2 + 2);
+    expect(result.length).toBeGreaterThan(chartW / 4);
+  });
+
+  it('handles all-identical timestamps without throwing or producing NaN buckets', () => {
+    const input: LivelinePoint[] = Array.from({ length: 500 }, (_, i) => ({
+      time: 42,
+      value: i,
+    }));
+    const result = decimateMinMax(input, 50);
+    expect(result[0]).toBe(input[0]);
+    expect(result[result.length - 1]).toBe(input[input.length - 1]);
+    expect(result.every((p) => Number.isFinite(p.value))).toBe(true);
   });
 });

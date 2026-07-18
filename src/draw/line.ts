@@ -1,5 +1,6 @@
 import type { LivelinePalette, ChartLayout, LivelinePoint } from '../types';
 import { drawSpline } from '../math/spline';
+import { decimateMinMax } from '../math/decimate';
 import type { Ctx2D } from './canvas2d';
 import {
   loadingY,
@@ -140,12 +141,16 @@ export function drawLine(
         }
       : (rawY: number, _x: number) => rawY;
 
+  // Cap points fed to the O(n) spline pass at ~2 per pixel of chartW.
+  // No-op (same array, zero allocation) for normal sparse real-time density.
+  const decimated = decimateMinMax(visible, chartW);
+
   const pts: [number, number][] = [];
-  for (let i = 0; i < visible.length; i++) {
-    const p = visible[i]!;
+  for (let i = 0; i < decimated.length; i++) {
+    const p = decimated[i]!;
     const x = toX(p.time);
     const y =
-      i === visible.length - 1
+      i === decimated.length - 1
         ? morphY(clampY(toY(smoothValue)), x)
         : morphY(clampY(toY(p.value)), x);
     pts.push([x, y]);
