@@ -133,7 +133,14 @@ export function useLivelineEngine(
   // reads a stale value.
   const activeProp = config.active ?? true;
   const activePropRef = useRef(activeProp);
-  const appForegroundRef = useRef(AppState.currentState === 'active');
+  // Fail open at mount: treat anything but explicit 'background' as
+  // foregrounded. AppState can read 'unknown' (native state not yet
+  // delivered) or 'inactive' (cold-launch transition) with the app visibly
+  // in the foreground, and 'unknown' is not guaranteed a subsequent change
+  // event — initializing from `=== 'active'` would leave the chart stuck on
+  // the empty placeholder picture until the next background/foreground
+  // cycle. The change listener still uses strict `=== 'active'`.
+  const appForegroundRef = useRef(AppState.currentState !== 'background');
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (status) => {
@@ -158,6 +165,11 @@ export function useLivelineEngine(
   const gesture = useMemo(() => {
     const finalize = () => {
       'worklet';
+      // With an activation delay, onFinalize also fires when the gesture
+      // fails without ever activating (a flick-scroll stolen by an outer
+      // ScrollView — the exact case the delay exists for). Nothing was
+      // hovered, so don't emit a spurious onHover(null) to the consumer.
+      if (hoverX.value === null) return;
       hoverX.value = null;
       if (hasOnHover) runOnJS(emitHover)(null);
     };
