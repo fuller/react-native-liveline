@@ -1,5 +1,5 @@
 /* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -134,7 +134,13 @@ function CandleIcon({ color }: { color: string }) {
   );
 }
 
-export function Liveline({
+/**
+ * Memoized: in a list of charts (the `active`-prop scenario), unrelated
+ * parent re-renders must not re-render every row. Live ticks still pass
+ * through — a tick produces a new `data` array, which fails the shallow
+ * compare for that chart only.
+ */
+export const Liveline = memo(function LivelineComponent({
   data,
   value,
   series: seriesProp,
@@ -588,7 +594,7 @@ export function Liveline({
       </GestureDetector>
     </>
   );
-}
+});
 
 const styles = StyleSheet.create({
   container: {
