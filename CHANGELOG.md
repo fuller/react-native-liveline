@@ -4,7 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`scrubActivationDelay` prop** — optional ms of long-press before the
+  scrub pan gesture activates (via `.activateAfterLongPress`), for charts
+  embedded in a `ScrollView`/`FlatList` so flick-scrolls aren't stolen by
+  the crosshair on first touch. Default `0` preserves the existing
+  immediate-activation behavior exactly. The example app gained a "Scroll"
+  section demonstrating both modes.
+- **`active` prop** — set `false` to suspend the engine's per-frame
+  UI-thread callback entirely (e.g. wired to a `FlatList`'s
+  `onViewableItemsChanged` so off-screen charts in a list cost nothing).
+  Default `true`; combines with — does not replace — the existing
+  AppState-backgrounding suspension. See the README's "Charts in lists"
+  section for the intended wiring.
+
 ### Changed
+
+- **Paint pooling in the Canvas2D shim** — draw calls now reuse three
+  pooled `SkPaint` objects per frame instead of allocating a fresh native
+  paint per call (previously dozens of JSI host-object allocations per
+  frame at 60fps, all on the UI thread). No visual change.
+- **Pixel-density point decimation** — the line spline now caps its input
+  at ~2 points per pixel of chart width using min-max bucket decimation
+  (spikes/wicks survive), so per-frame spline cost is bounded by chart
+  width instead of tick density. Sparse feeds (the common case) hit a
+  zero-allocation fast path and are completely unaffected; crosshair/hover
+  interpolation still uses full-resolution data.
 
 - **Peer dependency ranges tightened**: `react-native-reanimated` now requires
   `>=4.0.0` (was `>=3.16.0`, which was never actually verified — this library
