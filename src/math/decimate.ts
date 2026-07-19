@@ -22,10 +22,20 @@ import type { LivelinePoint } from '../types';
  *
  * Output is chronologically ordered (`drawSpline` assumes monotonically
  * increasing x).
+ *
+ * `bucketSecs` (optional) pins bucket boundaries to fixed multiples of an
+ * absolute-time grid instead of anchoring them to the first visible point.
+ * With the default relative grid, a scrolling window shifts every bucket
+ * boundary each frame, so the decimated point selection churns even when the
+ * underlying data hasn't changed — which defeats cross-frame path caching
+ * (and causes subtle shimmer). An absolute grid keeps the selection stable
+ * between data changes. Falls back to the relative grid when the absolute
+ * grid would be degenerate or pathologically large.
  */
 export function decimateMinMax(
   visible: LivelinePoint[],
-  chartW: number
+  chartW: number,
+  bucketSecs: number = 0
 ): LivelinePoint[] {
   'worklet';
   const n = visible.length;
@@ -33,9 +43,29 @@ export function decimateMinMax(
 
   const first = visible[0]!;
   const last = visible[n - 1]!;
-  const bucketCount = Math.max(1, Math.round(chartW));
+
+  let bucketCount = 0;
+  let b0 = 0;
+  let useAbsolute = false;
+  if (bucketSecs > 0) {
+    b0 = Math.floor(first.time / bucketSecs);
+    const count = Math.floor(last.time / bucketSecs) - b0 + 1;
+    // Defensive bound: a bucketSecs far smaller than the data span (bad
+    // windowSecs/chartW combination) would allocate huge index arrays.
+    if (count >= 1 && count <= chartW * 4) {
+      useAbsolute = true;
+      bucketCount = count;
+    }
+  }
+  if (!useAbsolute) {
+    bucketCount = Math.max(1, Math.round(chartW));
+  }
   const timeRange = last.time - first.time;
-  const bucketWidth = timeRange > 0 ? timeRange / bucketCount : 0;
+  const bucketWidth = useAbsolute
+    ? bucketSecs
+    : timeRange > 0
+      ? timeRange / bucketCount
+      : 0;
 
   // Per-bucket min/max, tracked as indices into `visible` (interior points
   // only — index 0 and n-1 are handled separately as first/last).
@@ -44,8 +74,11 @@ export function decimateMinMax(
 
   for (let i = 1; i < n - 1; i++) {
     const p = visible[i]!;
-    let b =
-      bucketWidth > 0 ? Math.floor((p.time - first.time) / bucketWidth) : 0;
+    let b = useAbsolute
+      ? Math.floor(p.time / bucketSecs) - b0
+      : bucketWidth > 0
+        ? Math.floor((p.time - first.time) / bucketWidth)
+        : 0;
     if (b < 0) b = 0;
     else if (b >= bucketCount) b = bucketCount - 1;
 

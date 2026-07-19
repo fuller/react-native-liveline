@@ -52,11 +52,12 @@ const EMPTY_CANDLES: CandlePoint[] = [];
 function toStepConfig(
   config: Omit<EngineConfig, 'hasOnHover' | 'noMotion'>,
   hasOnHover: boolean,
-  noMotion: boolean
+  noMotion: boolean,
+  dataRev: number
 ): EngineConfigStep {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to omit them below
   const { data, candles, ...rest } = config;
-  return { ...rest, hasOnHover, noMotion };
+  return { ...rest, hasOnHover, noMotion, dataRev };
 }
 
 /** A 0×0 picture used before the first frame is recorded. */
@@ -105,7 +106,7 @@ export function useLivelineEngine(
   // exists to avoid. Everything else in EngineConfig is small and stays
   // fully mirrored every commit, same as before.
   const cfg = useSharedValue<EngineConfigStep>(
-    toStepConfig(config, !!onHover, reduceMotion)
+    toStepConfig(config, !!onHover, reduceMotion, 0)
   );
   // Seed the buffers (and the "previous" refs the mirror effect diffs
   // against) with the actual initial data/candles, copied once — otherwise
@@ -118,13 +119,23 @@ export function useLivelineEngine(
   );
   const prevDataRef = useRef<LivelinePoint[]>(config.data);
   const prevCandlesRef = useRef<CandlePoint[]>(config.candles ?? EMPTY_CANDLES);
+  // Bumped whenever the data buffer actually changes (delta or reset) —
+  // consumed by the UI-thread line path cache as an exact data identity.
+  const dataRevRef = useRef(0);
 
   // Mirror the latest props every commit — the frame worklet reads cfg.value.
   useEffect(() => {
-    cfg.value = toStepConfig(config, !!onHover, reduceMotion);
-
     const { data, candles } = config;
+    // Diff first so the mirrored config carries the up-to-date revision.
     const dataDelta = computeDelta(prevDataRef.current, data, pointsEqual);
+    if (dataDelta.kind !== 'same') dataRevRef.current++;
+    cfg.value = toStepConfig(
+      config,
+      !!onHover,
+      reduceMotion,
+      dataRevRef.current
+    );
+
     if (dataDelta.kind === 'delta') {
       const { drop, keep, tail } = dataDelta;
       dataBuf.modify((arr) => {

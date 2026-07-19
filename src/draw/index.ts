@@ -11,6 +11,11 @@ import type {
 import type { Ctx2D } from './canvas2d';
 import { drawGrid, type GridState } from './grid';
 import { drawLine } from './line';
+import {
+  createLineCacheSlot,
+  type LineCacheRef,
+  type LineCacheSlot,
+} from './lineCache';
 import { drawDot, drawArrows, drawSimpleDot, drawMultiDot } from './dot';
 import { drawCrosshair, drawMultiCrosshair } from './crosshair';
 import type { MultiSeriesHoverEntry } from './crosshair';
@@ -79,6 +84,8 @@ export interface DrawOptions {
   chartReveal: number; // 0 = loading/morphing from center, 1 = fully revealed
   pauseProgress: number; // 0 = playing, 1 = fully paused
   now_ms: number; // performance.now() for breathing animation timing
+  /** Cross-frame line path cache (see draw/lineCache) */
+  lineCache?: LineCacheRef;
 }
 
 /**
@@ -166,7 +173,11 @@ export function drawFrame(
     scrubX,
     opts.scrubAmount,
     reveal,
-    opts.now_ms
+    opts.now_ms,
+    1,
+    false,
+    1,
+    opts.lineCache
   );
 
   // 4. Time axis — same timing as grid
@@ -328,6 +339,7 @@ export function drawFrame(
 // ─── Multi-series draw orchestration ──────────────────────────────────────
 
 export interface MultiSeriesEntry {
+  id: string;
   visible: LivelinePoint[];
   smoothValue: number;
   palette: LivelinePalette;
@@ -359,6 +371,10 @@ export interface MultiSeriesDrawOptions {
   now_ms: number;
   /** Primary palette (from first series) for grid/axis/crosshair colors */
   primaryPalette: LivelinePalette;
+  /** Per-series line path caches, keyed by series id (see draw/lineCache) */
+  lineCaches?: Map<string, LineCacheSlot>;
+  /** Which backing arrays series data came from: 0 live / 1 paused / 2 stash */
+  multiDataSource?: number;
 }
 
 /**
@@ -415,6 +431,22 @@ export function drawMultiFrame(
     const secondaryFade = si > 0 && reveal < 1 ? Math.min(1, reveal * 2) : 1;
     const combinedAlpha = secondaryFade * seriesAlpha;
     if (combinedAlpha < 0.01) continue;
+    // Per-series path cache slot, created on demand. Multi-series data has
+    // no delta-tracked revision counter, so dataRev stays 0 and the key's
+    // len/firstT/lastT/lastV heuristic carries the data identity.
+    let cacheRef: LineCacheRef | undefined;
+    if (opts.lineCaches !== undefined) {
+      let slot = opts.lineCaches.get(s.id);
+      if (slot === undefined) {
+        slot = createLineCacheSlot();
+        opts.lineCaches.set(s.id, slot);
+      }
+      cacheRef = {
+        slot,
+        dataRev: 0,
+        dataSource: opts.multiDataSource ?? 0,
+      };
+    }
     ctx.save();
     if (combinedAlpha < 1) ctx.globalAlpha = combinedAlpha;
     const pts = drawLine(
@@ -428,7 +460,11 @@ export function drawMultiFrame(
       scrubX,
       opts.scrubAmount,
       reveal,
-      opts.now_ms
+      opts.now_ms,
+      1,
+      false,
+      1,
+      cacheRef
     );
     ctx.restore();
     if (pts && pts.length > 0) {

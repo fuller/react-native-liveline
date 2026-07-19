@@ -80,4 +80,12 @@ export interface EngineConfig {
  * as explicit arguments, so this narrower config never re-serializes the
  * full arrays on every commit.
  */
-export type EngineConfigStep = Omit<EngineConfig, 'data' | 'candles'>;
+export type EngineConfigStep = Omit<EngineConfig, 'data' | 'candles'> & {
+  /**
+   * Revision counter for the delta-synced `data` buffer — bumped by
+   * useLivelineEngine whenever computeDelta reports an actual change.
+   * Gives the line path cache an exact data identity (catches interior
+   * mutations that endpoint-based heuristics would miss).
+   */
+  dataRev: number;
+};

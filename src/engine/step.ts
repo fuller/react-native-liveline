@@ -908,6 +908,9 @@ export function engineStep(
       for (const key of s.displayValues.keys()) {
         if (currentIds.indexOf(key) < 0) s.displayValues.delete(key);
       }
+      for (const key of s.lineCaches.keys()) {
+        if (currentIds.indexOf(key) < 0) s.lineCaches.delete(key);
+      }
     }
 
     // Use first series data for window transition seeding
@@ -1039,6 +1042,7 @@ export function engineStep(
         }
         // Always push to entries (drawMultiFrame skips via alpha)
         seriesEntries.push({
+          id: series.id,
           visible,
           smoothValue: sv,
           palette: series.palette,
@@ -1219,6 +1223,8 @@ export function engineStep(
       pauseProgress,
       now_ms,
       primaryPalette: cfg.palette,
+      lineCaches: s.lineCaches,
+      multiDataSource: useMultiStash ? 2 : s.pausedMultiData !== null ? 1 : 0,
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text
@@ -1455,6 +1461,11 @@ export function engineStep(
       chartReveal,
       pauseProgress,
       now_ms,
+      lineCache: {
+        slot: s.lineCache,
+        dataRev: cfg.dataRev,
+        dataSource: useStash ? 2 : s.pausedData !== null ? 1 : 0,
+      },
     });
 
     // During morph (chart ↔ empty), overlay the gradient gap + text on

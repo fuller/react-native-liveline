@@ -4,6 +4,7 @@ import type { ArrowState, ShakeState } from '../draw';
 import type { GridState } from '../draw/grid';
 import type { TimeAxisState } from '../draw/timeAxis';
 import { createOrderbookState, type OrderbookState } from '../draw/orderbook';
+import { createLineCacheSlot, type LineCacheSlot } from '../draw/lineCache';
 import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
 import type { WindowTransState } from './helpers';
@@ -54,6 +55,11 @@ export interface EngineState {
   particleState: ParticleState;
   shakeState: ShakeState;
   badge: BadgeState;
+  /** Cross-frame line SkPath cache, single-series mode (see draw/lineCache) */
+  lineCache: LineCacheSlot;
+  /** Per-series line path caches, multi-series mode — keyed by series id,
+   * pruned alongside displayValues when series are removed */
+  lineCaches: Map<string, LineCacheSlot>;
 
   // Hover state
   scrubAmount: number;
@@ -182,6 +188,8 @@ export function createEngineState(
       pathW: -1,
       pathTail: false,
     },
+    lineCache: createLineCacheSlot(),
+    lineCaches: new Map<string, LineCacheSlot>(),
 
     scrubAmount: 0,
     lastHover: null,

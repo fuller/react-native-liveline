@@ -1,6 +1,13 @@
+import { Skia } from '@shopify/react-native-skia';
+import type { SkPath } from '@shopify/react-native-skia';
 import type { LivelinePalette, ChartLayout, LivelinePoint } from '../types';
 import { drawSpline } from '../math/spline';
 import { decimateMinMax } from '../math/decimate';
+import {
+  updateLinePaths,
+  type CachePath,
+  type LineCacheRef,
+} from './lineCache';
 import type { Ctx2D } from './canvas2d';
 import {
   loadingY,
@@ -37,6 +44,8 @@ function blendColor(c1: string, c2: string, t: number): string {
   'worklet';
   if (t <= 0) return c1;
   if (t >= 1) return c2;
+  // Quantize for color-cache-key stability during animated blends.
+  t = Math.round(t * 64) / 64;
   const [r1, g1, b1, a1] = parseRgba(c1);
   const [r2, g2, b2, a2] = parseRgba(c2);
   const r = Math.round(r1 + (r2 - r1) * t);
@@ -45,6 +54,53 @@ function blendColor(c1: string, c2: string, t: number): string {
   const a = a1 + (a2 - a1) * t;
   if (a >= 0.995) return `rgb(${r},${g},${b})`;
   return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+}
+
+/** Path factory for the line cache — SkPath satisfies CachePath structurally. */
+function makeSkPath(): CachePath {
+  'worklet';
+  return Skia.Path.Make();
+}
+
+/**
+ * Draw the fill gradient + stroke line from pre-assembled cache paths.
+ * Style handling mirrors renderCurve exactly; only the path source differs
+ * (adopted via beginPathFrom instead of rebuilt through the shim).
+ */
+function renderCurvePaths(
+  ctx: Ctx2D,
+  layout: ChartLayout,
+  palette: LivelinePalette,
+  stroke: CachePath,
+  fill: CachePath | null,
+  lineAlpha: number,
+  fillAlpha: number,
+  strokeColor?: string
+) {
+  'worklet';
+  const { h, pad } = layout;
+  const baseAlpha = ctx.globalAlpha;
+
+  if (fill !== null && fillAlpha > 0.01) {
+    ctx.globalAlpha = baseAlpha * fillAlpha;
+    const grad = ctx.createLinearGradient(0, pad.top, 0, h - pad.bottom);
+    grad.addColorStop(0, palette.fillTop);
+    grad.addColorStop(1, palette.fillBottom);
+    // Cache paths are always real SkPaths at runtime (built by makeSkPath);
+    // CachePath is just the Skia-free structural type for testability.
+    ctx.beginPathFrom(fill as SkPath);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = baseAlpha * lineAlpha;
+  ctx.beginPathFrom(stroke as SkPath);
+  ctx.strokeStyle = strokeColor ?? palette.line;
+  ctx.lineWidth = palette.lineWidth;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  ctx.globalAlpha = baseAlpha;
 }
 
 /** Draw the fill gradient + stroke line for a set of points. */
@@ -103,7 +159,8 @@ export function drawLine(
   now_ms: number = 0,
   colorBlend: number = 1,
   skipDashLine: boolean = false,
-  fillScale: number = 1
+  fillScale: number = 1,
+  pathCache?: LineCacheRef
 ): [number, number][] | undefined {
   'worklet';
   const { h, pad, toX, toY, chartW, chartH } = layout;
@@ -143,7 +200,11 @@ export function drawLine(
 
   // Cap points fed to the O(n) spline pass at ~2 per pixel of chartW.
   // No-op (same array, zero allocation) for normal sparse real-time density.
-  const decimated = decimateMinMax(visible, chartW);
+  // The absolute bucket grid (one bucket per pixel of the time window) keeps
+  // the decimated selection stable as the window scrolls, so the path cache
+  // below stays valid between data changes even in dense mode.
+  const bucketSecs = (layout.rightEdge - layout.leftEdge) / Math.max(chartW, 1);
+  const decimated = decimateMinMax(visible, chartW, bucketSecs);
 
   const pts: [number, number][] = [];
   for (let i = 0; i < decimated.length; i++) {
@@ -188,6 +249,57 @@ export function drawLine(
 
   const isScrubbing = scrubX !== null;
 
+  // Cross-frame path cache: when the caller provided a slot and the reveal
+  // morph is settled (morph geometry depends on now_ms and can't be keyed),
+  // assemble this frame's stroke/fill paths from the cached prefix — a few
+  // native calls on a hit instead of a full spline rebuild. Falls back to
+  // the legacy immediate-mode renderCurve otherwise. Assembled once here,
+  // then drawn under one or two clips below (scrub never reshapes geometry).
+  const wantFill = showFill && fillAlpha > 0.01;
+  const cacheReady =
+    pathCache !== undefined &&
+    chartReveal >= 1 &&
+    updateLinePaths(
+      pathCache.slot,
+      makeSkPath,
+      layout,
+      decimated,
+      pts,
+      wantFill,
+      pathCache.dataRev,
+      pathCache.dataSource,
+      visible.length,
+      visible[0]!.time,
+      visible[visible.length - 1]!.time,
+      visible[visible.length - 1]!.value
+    );
+  const paintCurve = () => {
+    if (cacheReady) {
+      const slot = pathCache!.slot;
+      renderCurvePaths(
+        ctx,
+        layout,
+        palette,
+        slot.scratch!,
+        wantFill ? slot.fillScratch : null,
+        lineAlpha,
+        fillAlpha,
+        strokeColor
+      );
+    } else {
+      renderCurve(
+        ctx,
+        layout,
+        palette,
+        pts,
+        showFill,
+        lineAlpha,
+        fillAlpha,
+        strokeColor
+      );
+    }
+  };
+
   // Clip line + fill to chart area — during big value jumps the range
   // lerps smoothly so the line may extend beyond the chart bounds.
   // Clipping keeps it tidy while the range catches up.
@@ -202,16 +314,7 @@ export function drawLine(
     ctx.beginPath();
     ctx.rect(0, 0, scrubX!, h);
     ctx.clip();
-    renderCurve(
-      ctx,
-      layout,
-      palette,
-      pts,
-      showFill,
-      lineAlpha,
-      fillAlpha,
-      strokeColor
-    );
+    paintCurve();
     ctx.restore();
 
     // Dimmed portion: clipped to RIGHT of scrub point
@@ -220,28 +323,10 @@ export function drawLine(
     ctx.rect(scrubX!, 0, layout.w - scrubX!, h);
     ctx.clip();
     ctx.globalAlpha = incomingAlpha * (1 - scrubAmount * 0.6);
-    renderCurve(
-      ctx,
-      layout,
-      palette,
-      pts,
-      showFill,
-      lineAlpha,
-      fillAlpha,
-      strokeColor
-    );
+    paintCurve();
     ctx.restore();
   } else {
-    renderCurve(
-      ctx,
-      layout,
-      palette,
-      pts,
-      showFill,
-      lineAlpha,
-      fillAlpha,
-      strokeColor
-    );
+    paintCurve();
   }
 
   // Restore from chart-area clip
