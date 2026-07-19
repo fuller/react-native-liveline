@@ -19,7 +19,7 @@ import {
 } from '../draw';
 import { drawLoading } from '../draw/loading';
 import { drawEmpty } from '../draw/empty';
-import type { EngineConfig } from './types';
+import type { EngineConfigStep } from './types';
 import type { EngineState } from './state';
 import { drawBadge } from './badge';
 import {
@@ -94,13 +94,19 @@ function drawEdgeFade(ctx: Ctx2D, padLeft: number, h: number): void {
  */
 export function engineStep(
   ctx: Ctx2D,
-  cfg: EngineConfig,
+  cfg: EngineConfigStep,
   s: EngineState,
   w: number,
   h: number,
   hoverPixelXRaw: number | null,
   dt: number,
-  now_ms: number
+  now_ms: number,
+  /** Line-mode data points — synced via its own delta-updated shared value. */
+  data: LivelinePoint[],
+  /** Candles — synced via its own delta-updated shared value; empty array
+   * (never undefined) when there is no candle data, matching the `?? []`
+   * fallback this replaces at every read site below. */
+  candles: CandlePoint[]
 ): StepOutput {
   'worklet';
   const out: StepOutput = { valueText: null, valueColor: null };
@@ -112,12 +118,8 @@ export function engineStep(
   const isCandle = cfg.mode === 'candle';
 
   if (isCandle) {
-    if (
-      cfg.paused &&
-      s.pausedCandles === null &&
-      (cfg.candles?.length ?? 0) > 0
-    ) {
-      s.pausedCandles = cfg.candles!.slice();
+    if (cfg.paused && s.pausedCandles === null && candles.length > 0) {
+      s.pausedCandles = candles.slice();
       s.pausedLive = cfg.liveCandle ?? null;
       s.pausedLineData = cfg.lineData?.slice() ?? null;
       s.pausedLineValue = cfg.lineValue ?? null;
@@ -145,20 +147,16 @@ export function engineStep(
       s.pausedMultiData = null;
     }
   } else {
-    if (cfg.paused && s.pausedData === null && cfg.data.length >= 2) {
-      s.pausedData = cfg.data.slice();
+    if (cfg.paused && s.pausedData === null && data.length >= 2) {
+      s.pausedData = data.slice();
     }
     if (!cfg.paused) {
       s.pausedData = null;
     }
   }
 
-  const points = isCandle
-    ? ([] as LivelinePoint[])
-    : (s.pausedData ?? cfg.data);
-  const effectiveCandles = isCandle
-    ? (s.pausedCandles ?? cfg.candles ?? [])
-    : [];
+  const points = isCandle ? ([] as LivelinePoint[]) : (s.pausedData ?? data);
+  const effectiveCandles = isCandle ? (s.pausedCandles ?? candles) : [];
   const hasMultiData =
     cfg.isMultiSeries && cfg.multiSeries
       ? cfg.multiSeries.some((series) => series.data.length >= 2)
@@ -248,7 +246,10 @@ export function engineStep(
       !hasData &&
       chartReveal > 0.005 &&
       s.lastData.length >= 2;
-    if (hasData && !cfg.isMultiSeries) s.lastData = points;
+    // Copy — `points` may alias the live data buffer (mutated in place by
+    // the JS-thread delta applier via `.modify()`), so a bare reference
+    // here would let future ticks silently rewrite this stash.
+    if (hasData && !cfg.isMultiSeries) s.lastData = points.slice();
   }
 
   // Update lineModeProg even during early return — prevents the
@@ -389,7 +390,11 @@ export function engineStep(
         cwt.rangeToMax = s.displayMax;
       }
     }
-    s.prevCandleData = { candles: cfg.candles ?? [], width: candleWidthSecs };
+    // Copy — `candles` is the live candle buffer (mutated in place by the
+    // JS-thread delta applier via `.modify()`); stashing a bare reference
+    // would let a later tick silently rewrite `cwt.oldCandles` (read on a
+    // future candle-width-change frame) out from under this snapshot.
+    s.prevCandleData = { candles: candles.slice(), width: candleWidthSecs };
 
     // lineModeProg is updated before the early return (see above).
     const lineModeProg = s.lineModeProg;

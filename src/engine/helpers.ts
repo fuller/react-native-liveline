@@ -2,7 +2,7 @@ import type { LivelinePoint, ChartLayout, Padding, HoverPoint } from '../types';
 import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
 import { interpolateAtTime } from '../math/interpolate';
-import type { EngineConfig } from './types';
+import type { EngineConfigStep } from './types';
 import {
   ADAPTIVE_SPEED_BOOST,
   SCRUB_LERP_SPEED,
@@ -39,7 +39,7 @@ export function computeAdaptiveSpeed(
 
 /** Update window transition state, returning current display window and transition progress. */
 export function updateWindowTransition(
-  cfg: EngineConfig,
+  cfg: EngineConfigStep,
   wt: WindowTransState,
   displayWindow: number,
   displayMin: number,

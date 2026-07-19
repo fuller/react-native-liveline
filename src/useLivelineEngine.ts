@@ -20,11 +20,39 @@ import type {
 import { createCanvas2D } from './draw/canvas2d';
 import { engineStep } from './engine/step';
 import { createEngineState, type EngineState } from './engine/state';
-import type { EngineConfig } from './engine/types';
+import type { EngineConfig, EngineConfigStep } from './engine/types';
 import { MAX_DELTA_MS } from './engine/constants';
-import type { HoverPoint, LivelineFonts } from './types';
+import { computeDelta, pointsEqual, candlesEqual } from './engine/dataDelta';
+import type {
+  HoverPoint,
+  LivelineFonts,
+  LivelinePoint,
+  CandlePoint,
+} from './types';
 
 export type { EngineConfig } from './engine/types';
+
+// A stable reference used as the `candles ?? EMPTY_CANDLES` fallback so
+// callers that never pass `candles` (line mode) get the *same* array
+// object across commits — computeDelta's `prev === next` fast path then
+// reports 'same' every commit instead of a spurious 'reset' (which a
+// fresh `[]` literal on every render would otherwise cause).
+const EMPTY_CANDLES: CandlePoint[] = [];
+
+/**
+ * Strip `data`/`candles` off the caller's config for mirroring into `cfg`
+ * — they're synced through their own delta-updated shared values instead
+ * (see `useLivelineEngine`'s mirror effect).
+ */
+function toStepConfig(
+  config: Omit<EngineConfig, 'hasOnHover' | 'noMotion'>,
+  hasOnHover: boolean,
+  noMotion: boolean
+): EngineConfigStep {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to omit them below
+  const { data, candles, ...rest } = config;
+  return { ...rest, hasOnHover, noMotion };
+}
 
 /** A 0×0 picture used before the first frame is recorded. */
 function makeEmptyPicture(): SkPicture {
@@ -65,14 +93,66 @@ export function useLivelineEngine(
 ): LivelineEngine {
   const reduceMotion = useReducedMotion();
 
-  const cfg = useSharedValue<EngineConfig>({
-    ...config,
-    hasOnHover: !!onHover,
-    noMotion: reduceMotion,
-  });
-  // Mirror the latest props every commit — the frame worklet reads cfg.value
+  // `data`/`candles` are excluded from `cfg` and mirrored through their own
+  // delta-updated shared values instead (see the effect below) — they're
+  // the only fields that can grow to thousands of points, and re-deep-
+  // converting them whole on every commit is exactly the cost this hook
+  // exists to avoid. Everything else in EngineConfig is small and stays
+  // fully mirrored every commit, same as before.
+  const cfg = useSharedValue<EngineConfigStep>(
+    toStepConfig(config, !!onHover, reduceMotion)
+  );
+  // Seed the buffers (and the "previous" refs the mirror effect diffs
+  // against) with the actual initial data/candles, copied once — otherwise
+  // the frame loop, which can start ticking on the UI thread before the
+  // mount commit's effect below has run, would briefly render off an empty
+  // buffer instead of the caller's initial data.
+  const dataBuf = useSharedValue<LivelinePoint[]>(config.data.slice());
+  const candlesBuf = useSharedValue<CandlePoint[]>(
+    (config.candles ?? EMPTY_CANDLES).slice()
+  );
+  const prevDataRef = useRef<LivelinePoint[]>(config.data);
+  const prevCandlesRef = useRef<CandlePoint[]>(config.candles ?? EMPTY_CANDLES);
+
+  // Mirror the latest props every commit — the frame worklet reads cfg.value.
   useEffect(() => {
-    cfg.value = { ...config, hasOnHover: !!onHover, noMotion: reduceMotion };
+    cfg.value = toStepConfig(config, !!onHover, reduceMotion);
+
+    const { data, candles } = config;
+    const dataDelta = computeDelta(prevDataRef.current, data, pointsEqual);
+    if (dataDelta.kind === 'delta') {
+      const { drop, keep, tail } = dataDelta;
+      dataBuf.modify((arr) => {
+        'worklet';
+        arr.splice(0, drop);
+        arr.length = keep;
+        for (const item of tail) arr.push(item);
+        return arr;
+      });
+    } else if (dataDelta.kind === 'reset') {
+      dataBuf.value = data.slice();
+    }
+    prevDataRef.current = data;
+
+    const candlesNext = candles ?? EMPTY_CANDLES;
+    const candlesDelta = computeDelta(
+      prevCandlesRef.current,
+      candlesNext,
+      candlesEqual
+    );
+    if (candlesDelta.kind === 'delta') {
+      const { drop, keep, tail } = candlesDelta;
+      candlesBuf.modify((arr) => {
+        'worklet';
+        arr.splice(0, drop);
+        arr.length = keep;
+        for (const item of tail) arr.push(item);
+        return arr;
+      });
+    } else if (candlesDelta.kind === 'reset') {
+      candlesBuf.value = candlesNext.slice();
+    }
+    prevCandlesRef.current = candlesNext;
   });
 
   const state = useSharedValue<EngineState | null>(null);
@@ -113,7 +193,18 @@ export function useLivelineEngine(
     const recorder = Skia.PictureRecorder();
     const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, w, h));
     const ctx = createCanvas2D(canvas, fonts);
-    const result = engineStep(ctx, c, s, w, h, hoverX.value, dt, now_ms);
+    const result = engineStep(
+      ctx,
+      c,
+      s,
+      w,
+      h,
+      hoverX.value,
+      dt,
+      now_ms,
+      dataBuf.value,
+      candlesBuf.value
+    );
     picture.value = recorder.finishRecordingAsPicture();
 
     if (result.valueText !== null) valueText.value = result.valueText;

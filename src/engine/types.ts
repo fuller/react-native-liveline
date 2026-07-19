@@ -71,3 +71,13 @@ export interface EngineConfig {
   isMultiSeries?: boolean;
   hiddenSeriesIds?: string[];
 }
+
+/**
+ * `EngineConfig` as mirrored into the UI-thread shared value and read by
+ * `engineStep` — `data`/`candles` are excluded because they're synced
+ * through their own delta-updated shared values instead (see
+ * useLivelineEngine.ts's `dataBuf`/`candlesBuf`) and passed to `engineStep`
+ * as explicit arguments, so this narrower config never re-serializes the
+ * full arrays on every commit.
+ */
+export type EngineConfigStep = Omit<EngineConfig, 'data' | 'candles'>;

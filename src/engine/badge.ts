@@ -11,7 +11,7 @@ import {
   BADGE_TAIL_SPREAD,
   BADGE_LINE_H,
 } from '../draw/badge';
-import type { EngineConfig } from './types';
+import type { EngineConfigStep } from './types';
 import type { BadgeState } from './state';
 import {
   BADGE_WIDTH_LERP,
@@ -34,7 +34,7 @@ import {
  */
 export function drawBadge(
   ctx: Ctx2D,
-  cfg: EngineConfig,
+  cfg: EngineConfigStep,
   badge: BadgeState,
   smoothValue: number,
   layout: ChartLayout,
