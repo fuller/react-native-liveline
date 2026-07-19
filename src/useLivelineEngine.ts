@@ -17,7 +17,11 @@ import type {
   LegacyComposedGesture as ComposedGesture,
   GestureType,
 } from 'react-native-gesture-handler';
-import { createCanvas2D } from './draw/canvas2d';
+import {
+  createCanvas2D,
+  createSkiaCache,
+  type SkiaCache,
+} from './draw/canvas2d';
 import { engineStep } from './engine/step';
 import { createEngineState, type EngineState } from './engine/state';
 import type { EngineConfig, EngineConfigStep } from './engine/types';
@@ -156,6 +160,16 @@ export function useLivelineEngine(
   });
 
   const state = useSharedValue<EngineState | null>(null);
+  // Cross-frame cache for immutable Skia objects (gradients, dash effects,
+  // blur mask filters, parsed colors) allocated by the Canvas2D shim. Lives
+  // on the UI runtime for the component's lifetime — createCanvas2D is
+  // recreated every frame, but the cache it's handed persists across frames
+  // so identical inputs (stable gradient geometry/palette, the constant
+  // dash pattern, etc.) resolve to the same native object instead of a fresh
+  // allocation each frame. Mutated in place by worklets on the UI thread only
+  // (never read from JS); nothing subscribes to it, so plain worklet mutation
+  // is enough — no .modify() needed.
+  const skiaCache = useSharedValue<SkiaCache>(createSkiaCache());
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
   const picture = useSharedValue<SkPicture>(makeEmptyPicture());
@@ -192,7 +206,7 @@ export function useLivelineEngine(
 
     const recorder = Skia.PictureRecorder();
     const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, w, h));
-    const ctx = createCanvas2D(canvas, fonts);
+    const ctx = createCanvas2D(canvas, fonts, skiaCache.value);
     const result = engineStep(
       ctx,
       c,

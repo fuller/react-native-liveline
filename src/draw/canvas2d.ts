@@ -13,6 +13,10 @@ import type {
   SkFont,
   SkPaint,
   SkPath,
+  SkColor,
+  SkShader,
+  SkPathEffect,
+  SkMaskFilter,
 } from '@shopify/react-native-skia';
 import type { LivelineFonts } from '../types';
 
@@ -153,7 +157,151 @@ function baselineDy(font: SkFont, baseline: TextBaseline2D): number {
   return -m.ascent; // 'top'
 }
 
-export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
+/**
+ * Cross-frame cache for immutable Skia objects created by the Canvas2D shim
+ * (gradients, dash effects, blur mask filters, parsed colors). `createCanvas2D`
+ * is recreated every frame, so this cache must live outside it — the caller
+ * (`useLivelineEngine`) owns one on a `useSharedValue` on the UI runtime and
+ * passes it in every frame. Plain string-keyed records only (no Map/WeakMap):
+ * this object crosses the Reanimated worklet boundary, which doesn't support
+ * those collection types.
+ *
+ * Each cache is bounded — a `xCount` counter increments on insert, and once
+ * it exceeds the cap the record is replaced with a fresh empty object and the
+ * counter reset. There is no invalidation logic: cache keys encode every
+ * input to the underlying Skia factory call, and the objects they produce are
+ * immutable, so a hit is always correct for as long as it lives.
+ */
+export interface SkiaCache {
+  colors: Record<string, SkColor>;
+  colorCount: number;
+  gradients: Record<string, SkShader>;
+  gradientCount: number;
+  dashes: Record<string, SkPathEffect>;
+  dashCount: number;
+  blurs: Record<string, SkMaskFilter>;
+  blurCount: number;
+}
+
+export function createSkiaCache(): SkiaCache {
+  return {
+    colors: {},
+    colorCount: 0,
+    gradients: {},
+    gradientCount: 0,
+    dashes: {},
+    dashCount: 0,
+    blurs: {},
+    blurCount: 0,
+  };
+}
+
+const COLOR_CACHE_CAP = 256;
+const GRADIENT_CACHE_CAP = 64;
+const DASH_CACHE_CAP = 16;
+const BLUR_CACHE_CAP = 32;
+
+// Parses a CSS color string via Skia.Color, cached by the string itself.
+// Bounded at COLOR_CACHE_CAP: blendColor-driven reveal/transition animations
+// generate many distinct interpolated rgba(...) strings, which would grow
+// this cache unboundedly without the reset-on-overflow.
+function cachedColor(cache: SkiaCache, colorString: string): SkColor {
+  'worklet';
+  const hit = cache.colors[colorString];
+  if (hit !== undefined) return hit;
+  if (cache.colorCount >= COLOR_CACHE_CAP) {
+    cache.colors = {};
+    cache.colorCount = 0;
+  }
+  const color = Skia.Color(colorString);
+  cache.colors[colorString] = color;
+  cache.colorCount++;
+  return color;
+}
+
+// Builds (or reuses) a linear gradient shader. Keyed on every input that
+// affects the resulting shader: endpoints, offsets, and color stops — a
+// stable chart fill (same geometry + palette across frames) resolves to the
+// same key and hits every frame after the first.
+function cachedGradient(
+  cache: SkiaCache,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  offsets: number[],
+  colors: string[]
+): SkShader {
+  'worklet';
+  const key = `${x0},${y0},${x1},${y1}|${offsets.join(',')}|${colors.join('|')}`;
+  const hit = cache.gradients[key];
+  if (hit !== undefined) return hit;
+  if (cache.gradientCount >= GRADIENT_CACHE_CAP) {
+    cache.gradients = {};
+    cache.gradientCount = 0;
+  }
+  const resolvedColors: SkColor[] = [];
+  for (let i = 0; i < colors.length; i++) {
+    resolvedColors.push(cachedColor(cache, colors[i]!));
+  }
+  const shader = Skia.Shader.MakeLinearGradient(
+    { x: x0, y: y0 },
+    { x: x1, y: y1 },
+    resolvedColors,
+    offsets,
+    TileMode.Clamp
+  );
+  cache.gradients[key] = shader;
+  cache.gradientCount++;
+  return shader;
+}
+
+// Builds (or reuses) a dash path effect for a given segment pattern. The
+// shim only ever uses one constant [4,4] pattern today, but the key covers
+// arbitrary patterns.
+function cachedDash(cache: SkiaCache, segments: number[]): SkPathEffect {
+  'worklet';
+  const key = segments.join(',');
+  const hit = cache.dashes[key];
+  if (hit !== undefined) return hit;
+  if (cache.dashCount >= DASH_CACHE_CAP) {
+    cache.dashes = {};
+    cache.dashCount = 0;
+  }
+  const effect = Skia.PathEffect.MakeDash(segments, 0);
+  cache.dashes[key] = effect;
+  cache.dashCount++;
+  return effect;
+}
+
+// Builds (or reuses) a blur mask filter. `sigma` is quantized to 1 decimal
+// place for both the cache key and the filter actually built — shadowBlur
+// animates continuously in drawDot's scrub-dim path (6 * (1 - scrubAmount *
+// 0.7)), and without quantization every distinct floating-point sigma would
+// be a cache miss, defeating the cache entirely during that animation.
+// Quantizing to 0.1 is visually lossless for a blur radius while keeping the
+// cache small.
+function cachedBlur(cache: SkiaCache, sigma: number): SkMaskFilter {
+  'worklet';
+  const q = Math.round(sigma * 10) / 10;
+  const key = String(q);
+  const hit = cache.blurs[key];
+  if (hit !== undefined) return hit;
+  if (cache.blurCount >= BLUR_CACHE_CAP) {
+    cache.blurs = {};
+    cache.blurCount = 0;
+  }
+  const filter = Skia.MaskFilter.MakeBlur(BlurStyle.Normal, q, true);
+  cache.blurs[key] = filter;
+  cache.blurCount++;
+  return filter;
+}
+
+export function createCanvas2D(
+  canvas: SkCanvas,
+  fonts: LivelineFonts,
+  cache: SkiaCache
+): Ctx2D {
   'worklet';
   // Pooled path, reused across every beginPath() in this frame's recording
   // (mirrors the paint pool below — one JSI host-object allocation per frame
@@ -204,20 +352,18 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
       // no explicit alphaf reset is needed on this path — only the shader
       // (setColor is silently ignored while a shader is set).
       paint.setShader(null);
-      paint.setColor(Skia.Color(style));
+      paint.setColor(cachedColor(cache, style));
       if (alpha < 1) paint.setAlphaf(paint.getAlphaf() * alpha);
     } else {
-      const colors = [];
-      for (let i = 0; i < style.colors.length; i++) {
-        colors.push(Skia.Color(style.colors[i]!));
-      }
       paint.setShader(
-        Skia.Shader.MakeLinearGradient(
-          { x: style.x0, y: style.y0 },
-          { x: style.x1, y: style.y1 },
-          colors,
+        cachedGradient(
+          cache,
+          style.x0,
+          style.y0,
+          style.x1,
+          style.y1,
           style.offsets,
-          TileMode.Clamp
+          style.colors
         )
       );
       // Unconditional (not just `if (alpha < 1)`): a pooled paint may carry
@@ -361,15 +507,9 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
       );
       if (this.shadowBlur > 0) {
         const sp = shadowPaint;
-        sp.setColor(Skia.Color(this.shadowColor));
+        sp.setColor(cachedColor(cache, this.shadowColor));
         sp.setAlphaf(sp.getAlphaf() * this.globalAlpha);
-        sp.setMaskFilter(
-          Skia.MaskFilter.MakeBlur(
-            BlurStyle.Normal,
-            this.shadowBlur * 0.5,
-            true
-          )
-        );
+        sp.setMaskFilter(cachedBlur(cache, this.shadowBlur * 0.5));
         // Draw the same path through a translated canvas instead of
         // allocating an offset copy per shadowed fill.
         canvas.save();
@@ -395,7 +535,7 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
       // paint and never dashes, so it must not inherit a dash pattern left
       // by a previous stroke() call.
       paint.setPathEffect(
-        lineDash.length > 0 ? Skia.PathEffect.MakeDash(lineDash, 0) : null
+        lineDash.length > 0 ? cachedDash(cache, lineDash) : null
       );
       canvas.drawPath(path, paint);
     },
