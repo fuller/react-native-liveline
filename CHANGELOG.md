@@ -54,6 +54,38 @@ All notable changes to this project will be documented in this file.
   width instead of tick density. Sparse feeds (the common case) hit a
   zero-allocation fast path and are completely unaffected; crosshair/hover
   interpolation still uses full-resolution data.
+- **Cached line path with translate-based scroll** — the line spline's
+  `SkPath` is now cached across frames and re-positioned with a single
+  native translate, rebuilding only when the data, Y-range, window, or
+  canvas size actually change. Between ticks on a settled chart (most
+  frames), per-frame path work drops from a full spline rebuild plus one
+  JSI segment call per point (previously run twice — fill and stroke) to
+  about ten native calls; the two live-edge segments are still appended
+  fresh each frame so tick animation is unchanged. Dense feeds get a
+  stable absolute-time decimation grid so the cache also holds there.
+  Applies to single- and multi-series line rendering; candle mode keeps
+  the previous path. Curvature of the last ~3 segments can differ
+  imperceptibly (the cache cut uses a one-sided tangent, C1-continuous
+  at the junction).
+- **Quiescence now actually engages** — the skip-re-recording condition
+  wrongly required `pulse: false`, but `pulse` defaults to `true`, so no
+  default-configured chart ever went quiescent. The condition was
+  redundant (the pulse ring is already forced off at full pause) and has
+  been removed.
+- **Badge pill path cached** — the badge's `SkPath` was rebuilt from an
+  SVG string through a native parse on every frame; it is now cached on
+  the badge state and rebuilt only when the pill geometry changes, and
+  positioned via canvas translate instead of path mutation.
+- **Animated color blends quantized** — momentum/scrub/orderbook/live-candle
+  color lerps now quantize their blend factor to 1/64 steps (visually
+  lossless) so they produce repeating `rgb()` strings that hit the shim's
+  color cache instead of a distinct cache-missing string per frame.
+- **Simplified shadows on Android** — blurred (mask-filter) shadows
+  re-raster the blur on every recorded frame, which is disproportionately
+  expensive on Android GPUs. Android now draws a flat offset silhouette
+  at reduced alpha for the live-dot and badge shadows (same depth cue,
+  no blur cost) and skips the live-candle glow's blur pass (the pulsing
+  brightness cycle is kept). iOS/web rendering is unchanged.
 
 - **Peer dependency ranges tightened**: `react-native-reanimated` now requires
   `>=4.0.0` (was `>=3.16.0`, which was never actually verified — this library
