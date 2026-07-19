@@ -39,6 +39,15 @@ All notable changes to this project will be documented in this file.
 - **`Liveline` is memoized and the package declares `sideEffects: false`**
   — unrelated parent re-renders skip chart rows, and consumer bundlers
   can tree-shake the package.
+- **Cross-frame Skia object caches** — gradient shaders, dash path
+  effects, blur mask filters, parsed colors, text widths, and font
+  metrics are now cached across frames (bounded, keyed on every input)
+  instead of being re-created natively on every draw call.
+- **Quiescent charts stop re-recording** — a paused, fully-settled chart
+  now skips its per-frame picture recording entirely (~2% vs ~94% app
+  CPU measured on the iOS simulator) and resumes instantly on any
+  interaction, prop change, or resize. Behaviorally invisible: pause
+  resume/catch-up timing is preserved.
 - **Pixel-density point decimation** — the line spline now caps its input
   at ~2 points per pixel of chart width using min-max bucket decimation
   (spikes/wicks survive), so per-frame spline cost is bounded by chart
