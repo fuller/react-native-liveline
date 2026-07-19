@@ -138,29 +138,20 @@ interface StyleSnapshot {
 }
 
 // NOTE: these module-scope worklet helpers MUST be defined above
-// createCanvas2D. The worklets babel plugin rewrites 'worklet' function
-// declarations into const-assigned worklet objects (hoisting is lost) and
-// captures createCanvas2D's closure at module evaluation — helpers defined
-// below it would be captured as `undefined` and crash on the UI thread.
-function alignDx(font: SkFont, text: string, align: TextAlign2D): number {
-  'worklet';
-  if (align === 'left') return 0;
-  const w = font.measureText(text).width;
-  return align === 'center' ? -w / 2 : -w;
-}
-
-function baselineDy(font: SkFont, baseline: TextBaseline2D): number {
-  'worklet';
-  if (baseline === 'alphabetic') return 0;
-  const m = font.getMetrics(); // ascent is negative in Skia
-  if (baseline === 'middle') return -(m.ascent + m.descent) / 2;
-  return -m.ascent; // 'top'
-}
+// createCanvas2D, and each helper that calls another worklet helper
+// (alignDx/baselineDy call the cached* functions; cachedGradient calls
+// cachedColor) MUST itself be defined below the helpers it calls. The
+// worklets babel plugin rewrites 'worklet' function declarations into
+// const-assigned worklet objects (hoisting is lost) and captures each
+// worklet's closure at module evaluation time — a helper referenced before
+// its own const assignment has run would be captured as `undefined` and
+// crash on the UI thread.
 
 /**
  * Cross-frame cache for immutable Skia objects created by the Canvas2D shim
- * (gradients, dash effects, blur mask filters, parsed colors). `createCanvas2D`
- * is recreated every frame, so this cache must live outside it — the caller
+ * (gradients, dash effects, blur mask filters, parsed colors) plus memoized
+ * text measurements (widths, font metrics). `createCanvas2D` is recreated
+ * every frame, so this cache must live outside it — the caller
  * (`useLivelineEngine`) owns one on a `useSharedValue` on the UI runtime and
  * passes it in every frame. Plain string-keyed records only (no Map/WeakMap):
  * this object crosses the Reanimated worklet boundary, which doesn't support
@@ -181,6 +172,10 @@ export interface SkiaCache {
   dashCount: number;
   blurs: Record<string, SkMaskFilter>;
   blurCount: number;
+  textWidths: Record<string, number>;
+  textWidthCount: number;
+  fontMetrics: Record<string, { ascent: number; descent: number }>;
+  fontMetricsCount: number;
 }
 
 export function createSkiaCache(): SkiaCache {
@@ -193,6 +188,10 @@ export function createSkiaCache(): SkiaCache {
     dashCount: 0,
     blurs: {},
     blurCount: 0,
+    textWidths: {},
+    textWidthCount: 0,
+    fontMetrics: {},
+    fontMetricsCount: 0,
   };
 }
 
@@ -200,6 +199,37 @@ const COLOR_CACHE_CAP = 256;
 const GRADIENT_CACHE_CAP = 64;
 const DASH_CACHE_CAP = 16;
 const BLUR_CACHE_CAP = 32;
+// Live value strings (badge/crosshair/candlestick price labels) churn every
+// tick, so this is sized closer to the per-frame distinct-string count than
+// the other caches, which cache a comparatively small, stable set of colors
+// and shaders.
+const TEXT_WIDTH_CACHE_CAP = 512;
+// One entry per font slot (8 slots in LivelineFonts today) — metrics are a
+// per-font constant, so this cache is expected to fully warm up and never
+// evict in practice; the cap is a defensive bound, not a working-set sizing.
+const FONT_METRICS_CACHE_CAP = 16;
+
+// Identifies which named slot of `fonts` a given SkFont came from, by
+// identity comparison — used to build cache keys for the text width/metrics
+// caches below, since ctx.font is an SkFont (not a string) and the same
+// string can be measured against different fonts. Falls back to a constant
+// for a font that isn't one of the named slots; every ctx.font assignment
+// in this codebase currently comes from `ctx.fonts.*` (or the `fonts.label`
+// default createCanvas2D sets), so the fallback is unreachable today but
+// kept as a defensive key rather than a crash if that invariant is ever
+// broken.
+function fontKey(fonts: LivelineFonts, font: SkFont): string {
+  'worklet';
+  if (font === fonts.label) return 'label';
+  if (font === fonts.value) return 'value';
+  if (font === fonts.badge) return 'badge';
+  if (font === fonts.crosshair) return 'crosshair';
+  if (font === fonts.orderbook) return 'orderbook';
+  if (font === fonts.empty) return 'empty';
+  if (font === fonts.refLabel) return 'refLabel';
+  if (font === fonts.seriesLabel) return 'seriesLabel';
+  return '?';
+}
 
 // Parses a CSS color string via Skia.Color, cached by the string itself.
 // Bounded at COLOR_CACHE_CAP: blendColor-driven reveal/transition animations
@@ -295,6 +325,81 @@ function cachedBlur(cache: SkiaCache, sigma: number): SkMaskFilter {
   cache.blurs[key] = filter;
   cache.blurCount++;
   return filter;
+}
+
+// Measures text width via font.measureText, cached by font slot + string.
+// Called every frame by measureText() and by alignDx for every
+// center/right-aligned fillText/strokeText — badge, crosshair, timeAxis,
+// candlestick, referenceLine, and empty all remeasure the same handful of
+// live-value strings on every tick, so this is a hot per-frame cost that a
+// cache hit skips entirely.
+function cachedTextWidth(
+  cache: SkiaCache,
+  fonts: LivelineFonts,
+  font: SkFont,
+  text: string
+): number {
+  'worklet';
+  const key = fontKey(fonts, font) + ' ' + text;
+  const hit = cache.textWidths[key];
+  if (hit !== undefined) return hit;
+  if (cache.textWidthCount >= TEXT_WIDTH_CACHE_CAP) {
+    cache.textWidths = {};
+    cache.textWidthCount = 0;
+  }
+  const width = font.measureText(text).width;
+  cache.textWidths[key] = width;
+  cache.textWidthCount++;
+  return width;
+}
+
+// Reads font.getMetrics(), cached by font slot only — metrics are a
+// per-font constant (don't vary by string), so this cache is expected to
+// warm up to at most one entry per LivelineFonts slot and never miss again.
+function cachedFontMetrics(
+  cache: SkiaCache,
+  fonts: LivelineFonts,
+  font: SkFont
+): { ascent: number; descent: number } {
+  'worklet';
+  const key = fontKey(fonts, font);
+  const hit = cache.fontMetrics[key];
+  if (hit !== undefined) return hit;
+  if (cache.fontMetricsCount >= FONT_METRICS_CACHE_CAP) {
+    cache.fontMetrics = {};
+    cache.fontMetricsCount = 0;
+  }
+  const m = font.getMetrics();
+  const metrics = { ascent: m.ascent, descent: m.descent };
+  cache.fontMetrics[key] = metrics;
+  cache.fontMetricsCount++;
+  return metrics;
+}
+
+function alignDx(
+  cache: SkiaCache,
+  fonts: LivelineFonts,
+  font: SkFont,
+  text: string,
+  align: TextAlign2D
+): number {
+  'worklet';
+  if (align === 'left') return 0;
+  const w = cachedTextWidth(cache, fonts, font, text);
+  return align === 'center' ? -w / 2 : -w;
+}
+
+function baselineDy(
+  cache: SkiaCache,
+  fonts: LivelineFonts,
+  font: SkFont,
+  baseline: TextBaseline2D
+): number {
+  'worklet';
+  if (baseline === 'alphabetic') return 0;
+  const m = cachedFontMetrics(cache, fonts, font); // ascent is negative in Skia
+  if (baseline === 'middle') return -(m.ascent + m.descent) / 2;
+  return -m.ascent; // 'top'
 }
 
 export function createCanvas2D(
@@ -565,8 +670,8 @@ export function createCanvas2D(
       paint.setBlendMode(BlendMode.SrcOver);
       canvas.drawText(
         text,
-        x + alignDx(this.font, text, this.textAlign),
-        y + baselineDy(this.font, this.textBaseline),
+        x + alignDx(cache, fonts, this.font, text, this.textAlign),
+        y + baselineDy(cache, fonts, this.font, this.textBaseline),
         paint,
         this.font
       );
@@ -586,15 +691,15 @@ export function createCanvas2D(
       paint.setBlendMode(BlendMode.SrcOver);
       canvas.drawText(
         text,
-        x + alignDx(this.font, text, this.textAlign),
-        y + baselineDy(this.font, this.textBaseline),
+        x + alignDx(cache, fonts, this.font, text, this.textAlign),
+        y + baselineDy(cache, fonts, this.font, this.textBaseline),
         paint,
         this.font
       );
     },
 
     measureText(text) {
-      return { width: this.font.measureText(text).width };
+      return { width: cachedTextWidth(cache, fonts, this.font, text) };
     },
 
     setLineDash(segments) {
