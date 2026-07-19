@@ -18,7 +18,15 @@ import type {
   SkPathEffect,
   SkMaskFilter,
 } from '@shopify/react-native-skia';
+import { Platform } from 'react-native';
 import type { LivelineFonts } from '../types';
+
+// Mask-filter (blurred) shadows re-raster the blur on every recorded frame.
+// That recurring cost lands hardest on Android's typically weaker GPUs (and
+// is brutal on emulators), so Android gets a simplified fallback: a flat
+// offset silhouette instead of a blur — see fill(). Declared above the
+// worklets that capture it (see the closure-capture note below).
+const BLUR_SHADOWS = Platform.OS !== 'android';
 
 /**
  * A Canvas2D-flavored adapter over Skia's SkCanvas.
@@ -148,9 +156,11 @@ interface StyleSnapshot {
 // crash on the UI thread.
 
 /**
- * Cross-frame cache for immutable Skia objects created by the Canvas2D shim
- * (gradients, dash effects, blur mask filters, parsed colors) plus memoized
- * text measurements (widths, font metrics). `createCanvas2D` is recreated
+ * Cross-frame cache for Skia objects created by the Canvas2D shim: immutable
+ * objects (gradients, dash effects, blur mask filters, parsed colors), plus
+ * memoized text measurements (widths, font metrics), plus a pool of the
+ * mutable path/paint host objects the shim draws through (see `pool`).
+ * `createCanvas2D` is recreated
  * every frame, so this cache must live outside it — the caller
  * (`useLivelineEngine`) owns one on a `useSharedValue` on the UI runtime and
  * passes it in every frame. Plain string-keyed records only (no Map/WeakMap):
@@ -164,6 +174,19 @@ interface StyleSnapshot {
  * immutable, so a hit is always correct for as long as it lives.
  */
 export interface SkiaCache {
+  // Pooled mutable Skia host objects, reused across frames (not just within
+  // one). Paint/path state carries no per-frame meaning: every draw method
+  // fully re-applies the state it depends on before use (see the leak-hazard
+  // comments in createCanvas2D), and the pooled path is rewound at the top
+  // of each frame. Built lazily on the UI thread by createCanvas2D on the
+  // first frame (null until then) so the allocations happen on the runtime
+  // that uses them.
+  pool: {
+    path: SkPath;
+    fillPaint: SkPaint;
+    strokePaint: SkPaint;
+    shadowPaint: SkPaint;
+  } | null;
   colors: Record<string, SkColor>;
   colorCount: number;
   gradients: Record<string, SkShader>;
@@ -180,6 +203,7 @@ export interface SkiaCache {
 
 export function createSkiaCache(): SkiaCache {
   return {
+    pool: null,
     colors: {},
     colorCount: 0,
     gradients: {},
@@ -408,39 +432,45 @@ export function createCanvas2D(
   cache: SkiaCache
 ): Ctx2D {
   'worklet';
-  // Pooled path, reused across every beginPath() in this frame's recording
-  // (mirrors the paint pool below — one JSI host-object allocation per frame
-  // instead of one per path). Reuse after canvas.drawPath is safe: Skia
-  // records paths by value with copy-on-write, so rewinding our object
-  // detaches it from anything already recorded. rewind() (not reset())
-  // keeps the verb/point storage allocated for refill. beginPathFrom()
-  // temporarily adopts a caller-owned path instead; the pool is never
-  // rewound while adopted paths are current, and adopted paths are never
-  // rewound by the shim.
-  const ownPath = Skia.Path.Make();
-  let path = ownPath;
-  let lineDash: number[] = [];
-  const stack: StyleSnapshot[] = [];
-
-  // Paint pool: one per style, reused across all draw calls within this
-  // frame's recording (a new SkCanvas/pool is created each frame, so this
-  // does not persist state across frames — only within one). AntiAlias and
-  // Style never vary per paint, so they're set once here rather than on
-  // every draw call. Everything else that a fresh Skia.Paint() would default
+  // Pooled path + paints, persisted in the cross-frame cache: one JSI
+  // host-object allocation per component lifetime instead of four per frame.
+  // Path reuse after canvas.drawPath is safe across recordings: Skia records
+  // paths (and paints) by value with copy-on-write, so rewinding/mutating
+  // our objects detaches them from anything already recorded — including the
+  // previous frame's finished picture. rewind() (not reset()) keeps the
+  // verb/point storage allocated for refill. beginPathFrom() temporarily
+  // adopts a caller-owned path instead; the pool is never rewound while
+  // adopted paths are current, and adopted paths are never rewound by the
+  // shim. AntiAlias and Style never vary per paint, so they're set once at
+  // pool creation. Everything else that a fresh Skia.Paint() would default
   // to must be explicitly reset on every use below — see applyStyle and the
   // draw methods for the specific leak hazards (shader, alphaf, blend mode,
   // path effect, stroke cap).
-  const fillPaint = Skia.Paint();
-  fillPaint.setAntiAlias(true);
-  fillPaint.setStyle(PaintStyle.Fill);
+  if (cache.pool === null) {
+    const pooledFill = Skia.Paint();
+    pooledFill.setAntiAlias(true);
+    pooledFill.setStyle(PaintStyle.Fill);
 
-  const strokePaint = Skia.Paint();
-  strokePaint.setAntiAlias(true);
-  strokePaint.setStyle(PaintStyle.Stroke);
+    const pooledStroke = Skia.Paint();
+    pooledStroke.setAntiAlias(true);
+    pooledStroke.setStyle(PaintStyle.Stroke);
 
-  const shadowPaint = Skia.Paint();
-  shadowPaint.setAntiAlias(true);
-  shadowPaint.setStyle(PaintStyle.Fill);
+    const pooledShadow = Skia.Paint();
+    pooledShadow.setAntiAlias(true);
+    pooledShadow.setStyle(PaintStyle.Fill);
+
+    cache.pool = {
+      path: Skia.Path.Make(),
+      fillPaint: pooledFill,
+      strokePaint: pooledStroke,
+      shadowPaint: pooledShadow,
+    };
+  }
+  const { path: ownPath, fillPaint, strokePaint, shadowPaint } = cache.pool;
+  ownPath.rewind(); // discard last frame's verbs
+  let path = ownPath;
+  let lineDash: number[] = [];
+  const stack: StyleSnapshot[] = [];
 
   // Applies a fill/stroke style + globalAlpha to a paint. For color strings
   // the string's own alpha is multiplied by globalAlpha; for gradients the
@@ -610,11 +640,21 @@ export function createCanvas2D(
           ? BlendMode.DstOut
           : BlendMode.SrcOver
       );
-      if (this.shadowBlur > 0) {
+      // Shadow pass. On Android (BLUR_SHADOWS false) the blur is replaced
+      // with a flat silhouette at reduced alpha — the 1px-offset rim reads
+      // as the same depth cue without re-rastering a blur every frame. A
+      // flat shadow with no vertical offset (the live-candle glow) would be
+      // an invisible repaint of the same shape, so that pass is skipped
+      // entirely there.
+      if (this.shadowBlur > 0 && (BLUR_SHADOWS || this.shadowOffsetY !== 0)) {
         const sp = shadowPaint;
         sp.setColor(cachedColor(cache, this.shadowColor));
-        sp.setAlphaf(sp.getAlphaf() * this.globalAlpha);
-        sp.setMaskFilter(cachedBlur(cache, this.shadowBlur * 0.5));
+        sp.setAlphaf(
+          sp.getAlphaf() * this.globalAlpha * (BLUR_SHADOWS ? 1 : 0.6)
+        );
+        sp.setMaskFilter(
+          BLUR_SHADOWS ? cachedBlur(cache, this.shadowBlur * 0.5) : null
+        );
         // Draw the same path through a translated canvas instead of
         // allocating an offset copy per shadowed fill.
         canvas.save();
