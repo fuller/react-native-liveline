@@ -13,6 +13,9 @@ const BEAR_RGB = [239, 68, 68] as const;
 /** Blend bear→bull by t (0=bear, 1=bull). */
 function blendColor(t: number): string {
   'worklet';
+  // Quantize so the continuously-lerping live-candle blend produces
+  // repeating rgb() strings that hit the shim's color cache across frames.
+  t = Math.round(t * 64) / 64;
   const r = Math.round(BEAR_RGB[0] + (BULL_RGB[0] - BEAR_RGB[0]) * t);
   const g = Math.round(BEAR_RGB[1] + (BULL_RGB[1] - BEAR_RGB[1]) * t);
   const b = Math.round(BEAR_RGB[2] + (BULL_RGB[2] - BEAR_RGB[2]) * t);
@@ -45,6 +48,8 @@ function blendToAccent(
   'worklet';
   if (t <= 0) return candleColor;
   if (t >= 1) return accentColor;
+  // Quantize for color-cache-key stability during animated blends.
+  t = Math.round(t * 64) / 64;
   const [r1, g1, b1] = parseRgb(candleColor);
   const [r2, g2, b2] = parseRgb(accentColor);
   const r = Math.round(r1 + (r2 - r1) * t);

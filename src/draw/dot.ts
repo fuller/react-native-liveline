@@ -13,6 +13,9 @@ function lerpColor(
   t: number
 ): string {
   'worklet';
+  // Quantize so the continuously-animating scrub dim produces repeating
+  // rgb() strings that hit the shim's color cache across frames.
+  t = Math.round(t * 64) / 64;
   const r = Math.round(a[0] + (b[0] - a[0]) * t);
   const g = Math.round(a[1] + (b[1] - a[1]) * t);
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);

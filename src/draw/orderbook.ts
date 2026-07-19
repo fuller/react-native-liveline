@@ -54,6 +54,11 @@ function mixColor(
   t: number
 ): string {
   'worklet';
+  // Quantize the blend so continuously-animating t (label fade in/out, up
+  // to MAX_LABELS per frame) produces a bounded set of repeating rgb()
+  // strings that hit the shim's color cache, instead of a distinct
+  // cache-missing string per label per frame.
+  t = Math.round(t * 64) / 64;
   const r = Math.round(from[0] + (to[0] - from[0]) * t);
   const g = Math.round(from[1] + (to[1] - from[1]) * t);
   const b = Math.round(from[2] + (to[2] - from[2]) * t);
