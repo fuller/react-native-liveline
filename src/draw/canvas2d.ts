@@ -155,7 +155,17 @@ function baselineDy(font: SkFont, baseline: TextBaseline2D): number {
 
 export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
   'worklet';
-  let path = Skia.Path.Make();
+  // Pooled path, reused across every beginPath() in this frame's recording
+  // (mirrors the paint pool below — one JSI host-object allocation per frame
+  // instead of one per path). Reuse after canvas.drawPath is safe: Skia
+  // records paths by value with copy-on-write, so rewinding our object
+  // detaches it from anything already recorded. rewind() (not reset())
+  // keeps the verb/point storage allocated for refill. beginPathFrom()
+  // temporarily adopts a caller-owned path instead; the pool is never
+  // rewound while adopted paths are current, and adopted paths are never
+  // rewound by the shim.
+  const ownPath = Skia.Path.Make();
+  let path = ownPath;
   let lineDash: number[] = [];
   const stack: StyleSnapshot[] = [];
 
@@ -289,7 +299,8 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
     },
 
     beginPath() {
-      path = Skia.Path.Make();
+      ownPath.rewind();
+      path = ownPath;
     },
 
     beginPathFrom(p) {
@@ -359,9 +370,12 @@ export function createCanvas2D(canvas: SkCanvas, fonts: LivelineFonts): Ctx2D {
             true
           )
         );
-        const shadowPath = path.copy();
-        shadowPath.offset(0, this.shadowOffsetY);
-        canvas.drawPath(shadowPath, sp);
+        // Draw the same path through a translated canvas instead of
+        // allocating an offset copy per shadowed fill.
+        canvas.save();
+        canvas.translate(0, this.shadowOffsetY);
+        canvas.drawPath(path, sp);
+        canvas.restore();
       }
       canvas.drawPath(path, paint);
     },
