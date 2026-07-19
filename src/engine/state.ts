@@ -50,6 +50,14 @@ export interface EngineState {
   scrubAmount: number;
   lastHover: { x: number; value: number; time: number } | null;
   lastHoverEntries: { color: string; label: string; value: number }[];
+  /**
+   * Last (time, value) delivered through onHover, used to skip re-emitting
+   * an unchanged point every frame while a finger rests on the chart —
+   * runOnJS traffic should be event-shaped (like the web version's
+   * mousemove-driven onHover), not frame-shaped. null = nothing emitted
+   * since the last hover ended.
+   */
+  lastEmitHover: { time: number; value: number } | null;
 
   // Reveal state (loading → chart morph)
   chartReveal: number;
@@ -146,6 +154,7 @@ export function createEngineState(
     scrubAmount: 0,
     lastHover: null,
     lastHoverEntries: [],
+    lastEmitHover: null,
 
     chartReveal: 0,
 

@@ -1153,14 +1153,25 @@ export function engineStep(
       };
       s.lastHoverEntries = hoverEntries;
       if (cfg.hasOnHover) {
-        out.emitHover = {
-          time: t,
-          value: hoverEntries[0]?.value ?? 0,
-          x: clampedX,
-          y: layout.toY(hoverEntries[0]?.value ?? 0),
-        };
+        // Emit only when the hovered point actually changed — a stationary
+        // finger must not fire runOnJS every frame.
+        const ev = hoverEntries[0]?.value ?? 0;
+        if (
+          s.lastEmitHover === null ||
+          s.lastEmitHover.time !== t ||
+          s.lastEmitHover.value !== ev
+        ) {
+          s.lastEmitHover = { time: t, value: ev };
+          out.emitHover = {
+            time: t,
+            value: ev,
+            x: clampedX,
+            y: layout.toY(ev),
+          };
+        }
       }
     }
+    if (!isActiveHover) s.lastEmitHover = null;
 
     // Scrub amount
     const scrubTarget = isActiveHover ? 1 : 0;
@@ -1374,8 +1385,19 @@ export function engineStep(
     s.scrubAmount = hoverResult.scrubAmount;
     s.lastHover = hoverResult.lastHover;
     if (cfg.hasOnHover && hoverResult.emitPoint) {
-      out.emitHover = hoverResult.emitPoint;
+      // Emit only when the hovered point actually changed — a stationary
+      // finger must not fire runOnJS every frame.
+      const ep = hoverResult.emitPoint;
+      if (
+        s.lastEmitHover === null ||
+        s.lastEmitHover.time !== ep.time ||
+        s.lastEmitHover.value !== ep.value
+      ) {
+        s.lastEmitHover = { time: ep.time, value: ep.value };
+        out.emitHover = ep;
+      }
     }
+    if (!hoverResult.isActiveHover) s.lastEmitHover = null;
     const {
       hoverX: drawHoverX,
       hoverValue: drawHoverValue,
