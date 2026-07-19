@@ -37,7 +37,11 @@ import type { EngineState } from './state';
  *    — `arrowAlpha = arrowReveal * (1 - pause)` is forced to 0 at full
  *    pause; the draw call (and its arrow-state mutation) is skipped
  *    entirely, so `cfg.showMomentum` doesn't need its own condition.
- *  - pulse ring (`draw/dot.ts`) — excluded via `showPulse` below.
+ *  - pulse ring (`draw/dot.ts`) — gated off in `draw/index.ts` by
+ *    `pause < 0.5`, so it is already not drawn at `pauseProgress === 1`;
+ *    no `showPulse` condition is needed here (and requiring
+ *    `!cfg.showPulse` would defeat quiescence for every chart, since
+ *    `pulse` defaults to true).
  *  - degen particles + chart shake (`draw/particles.ts`, shake in
  *    `draw/index.ts`) — both keyed off `cfg.degenOptions`; excluded below.
  *  - orderbook depth-flow labels (`draw/orderbook.ts`) — NOT mentioned in
@@ -65,7 +69,6 @@ export function isQuiescentCandidate(
     !cfg.loading &&
     s.loadingAlpha === 0 &&
     s.chartReveal === 1 &&
-    !cfg.showPulse &&
     !cfg.degenOptions &&
     !cfg.orderbookData &&
     cfg.mode !== 'candle' &&
