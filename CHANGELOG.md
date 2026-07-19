@@ -21,10 +21,24 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- **Paint pooling in the Canvas2D shim** — draw calls now reuse three
-  pooled `SkPaint` objects per frame instead of allocating a fresh native
-  paint per call (previously dozens of JSI host-object allocations per
-  frame at 60fps, all on the UI thread). No visual change.
+- **Paint and path pooling in the Canvas2D shim** — draw calls now reuse
+  three pooled `SkPaint` objects and a single rewound `SkPath` per frame
+  instead of allocating fresh native objects per call (previously dozens
+  of JSI host-object allocations per frame at 60fps, all on the UI
+  thread); shadowed fills also stopped allocating an offset path copy.
+  No visual change.
+- **Data/candles delta sync** — the `data` and `candles` arrays are no
+  longer re-serialized whole into the UI-thread config on every commit;
+  each tick now sends only the changed tail (usually one point) across
+  the runtime boundary, so per-tick JS cost no longer scales with buffer
+  length. Internal only — the `data`/`candles` props are unchanged.
+- **`onHover` fires on change only** — while a finger rests on the chart,
+  the callback no longer re-fires every frame with an identical point;
+  it now fires only when the hovered point actually changes (matching
+  the web version's event-driven contract).
+- **`Liveline` is memoized and the package declares `sideEffects: false`**
+  — unrelated parent re-renders skip chart rows, and consumer bundlers
+  can tree-shake the package.
 - **Pixel-density point decimation** — the line spline now caps its input
   at ~2 points per pixel of chart width using min-max bucket decimation
   (spikes/wicks survive), so per-frame spline cost is bounded by chart
