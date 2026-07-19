@@ -116,7 +116,10 @@ export function drawBadge(
         : lerp(badge.green, target, MOMENTUM_COLOR_LERP, dt);
       if (badge.green > 0.99) badge.green = 1;
       if (badge.green < 0.01) badge.green = 0;
-      const g = badge.green;
+      // Quantize the blend so the rgb() string (and its entry in the shim's
+      // color cache) repeats across frames instead of producing a distinct
+      // cache-missing string on every frame of the momentum lerp.
+      const g = Math.round(badge.green * 64) / 64;
       const rr = Math.round(
         MOMENTUM_RED[0] + (MOMENTUM_GREEN[0] - MOMENTUM_RED[0]) * g
       );
@@ -130,29 +133,45 @@ export function drawBadge(
     }
   }
 
-  // Build the pill path (SVG path string → SkPath), positioned at badge origin
-  const d = cfg.badgeTail
-    ? badgeSvgPath(pillW, pillH, BADGE_TAIL_LEN, BADGE_TAIL_SPREAD)
-    : badgePillOnly(pillW, pillH);
-  const path = Skia.Path.MakeFromSVGString(d);
-  if (!path) return;
-  path.offset(badgeLeft, badgeTop);
+  // Build the pill path (SVG path string → SkPath) only when its geometry
+  // actually changed — pillW settles quickly (the width lerp snaps), so on
+  // almost every frame this reuses the cached SkPath instead of building a
+  // fresh SVG string and paying a native parse + host-object allocation
+  // per frame. The cached path is origin-anchored and positioned with a
+  // canvas translate below, so it is never mutated after construction.
+  const wantTail = !!cfg.badgeTail;
+  if (
+    badge.path === null ||
+    badge.pathW !== pillW ||
+    badge.pathTail !== wantTail
+  ) {
+    const d = wantTail
+      ? badgeSvgPath(pillW, pillH, BADGE_TAIL_LEN, BADGE_TAIL_SPREAD)
+      : badgePillOnly(pillW, pillH);
+    const path = Skia.Path.MakeFromSVGString(d);
+    if (!path) return;
+    badge.path = path;
+    badge.pathW = pillW;
+    badge.pathTail = wantTail;
+  }
 
   ctx.save();
   ctx.globalAlpha = badgeOpacity;
 
+  // Fill the pill via the shim's current path so shadow handling applies;
+  // inner save/restore scopes both the translate and the shadow settings.
+  ctx.save();
   // Drop shadow for the minimal variant (approximates CSS drop-shadow(0 1px 4px))
   if (shadow) {
     ctx.shadowColor = cfg.palette.badgeOuterShadow;
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 1;
   }
-
-  // Fill the pill via the shim's current path so shadow handling applies
-  ctx.beginPathFrom(path);
+  ctx.translate(badgeLeft, badgeTop);
+  ctx.beginPathFrom(badge.path);
   ctx.fillStyle = fillColor;
   ctx.fill();
-  ctx.shadowBlur = 0;
+  ctx.restore();
 
   // Text — left-aligned inside the pill (matches the DOM span's padding box)
   ctx.font = ctx.fonts.label;

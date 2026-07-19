@@ -1,3 +1,4 @@
+import type { SkPath } from '@shopify/react-native-skia';
 import type { LivelinePoint, LivelinePalette, CandlePoint } from '../types';
 import type { ArrowState, ShakeState } from '../draw';
 import type { GridState } from '../draw/grid';
@@ -13,6 +14,13 @@ export interface BadgeState {
   targetW: number;
   y: number | null; // lerped badge Y, null = uninited
   green: number; // momentum color blend 0 (red) → 1 (green)
+  // Cached pill SkPath (origin at 0,0 — positioned via canvas translate at
+  // draw time) + the geometry it was built for. The pill only changes size
+  // while displayW is mid-lerp; caching skips the SVG-string build + native
+  // parse on the (vast majority of) frames where geometry is unchanged.
+  path: SkPath | null;
+  pathW: number; // pillW the cached path was built for (-1 = none)
+  pathTail: boolean; // whether the cached path includes the tail
 }
 
 export interface StashedSeries {
@@ -165,7 +173,15 @@ export function createEngineState(
     orderbookState: createOrderbookState(),
     particleState: createParticleState(),
     shakeState: createShakeState(),
-    badge: { displayW: 0, targetW: 0, y: null, green: 1 },
+    badge: {
+      displayW: 0,
+      targetW: 0,
+      y: null,
+      green: 1,
+      path: null,
+      pathW: -1,
+      pathTail: false,
+    },
 
     scrubAmount: 0,
     lastHover: null,
