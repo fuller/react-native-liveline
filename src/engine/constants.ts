@@ -20,6 +20,13 @@ export const PAUSE_CATCHUP_SPEED_FAST = 0.22;
 export const LOADING_ALPHA_SPEED = 0.14;
 export const SERIES_TOGGLE_SPEED = 0.1;
 
+// --- Quiescence (skip picture re-recording when provably static) ---
+// ~1.5s of consecutively-settled frames at 60fps — by then every
+// exponential lerp in the engine (smoothValue, range, badge, grid/time-axis
+// label fades, window transitions) has fully converged, so it's safe to
+// start skipping without any visible discontinuity.
+export const QUIESCENT_FRAME_THRESHOLD = 90;
+
 // --- Candle-specific constants ---
 export const CANDLE_LERP_SPEED = 0.25;
 export const CANDLE_WIDTH_TRANS_MS = 300;

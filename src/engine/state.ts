@@ -6,6 +6,7 @@ import { createOrderbookState, type OrderbookState } from '../draw/orderbook';
 import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
 import type { WindowTransState } from './helpers';
+import type { EngineConfigStep } from './types';
 
 export interface BadgeState {
   displayW: number; // current lerped text width (0 = uninited)
@@ -113,6 +114,21 @@ export interface EngineState {
   lastLive: CandlePoint | null;
   lastLineDataStash: LivelinePoint[];
   lastLineValueStash: number | undefined;
+
+  // --- Quiescence tracking (skip picture re-recording when provably
+  // static — see engine/quiescence.ts + useLivelineEngine.ts's frame
+  // callback) ---
+  /** Consecutive frames that passed the quiescence break conditions +
+   * `isQuiescentCandidate`. Reset to 0 the instant either breaks. */
+  quiescentFrames: number;
+  /** Identity of the `cfg.value` object mirrored on the last frame — a
+   * fresh object every commit, so `!==` here means "something committed
+   * since last frame" (prop change, theme switch, tick, ...). */
+  lastCfgObj: EngineConfigStep | null;
+  /** Canvas size as of the last frame a picture was actually recorded —
+   * a resize while frames are being skipped must break quiescence. */
+  lastRecordedW: number;
+  lastRecordedH: number;
 }
 
 export function createEngineState(
@@ -203,5 +219,12 @@ export function createEngineState(
     lastLive: null,
     lastLineDataStash: [],
     lastLineValueStash: undefined,
+
+    quiescentFrames: 0,
+    lastCfgObj: null,
+    // -1 so the very first frame's size comparison always mismatches
+    // (a real frame is always <= 0 guarded upstream, so 0×0 never records).
+    lastRecordedW: -1,
+    lastRecordedH: -1,
   };
 }

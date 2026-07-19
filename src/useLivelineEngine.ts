@@ -25,7 +25,8 @@ import {
 import { engineStep } from './engine/step';
 import { createEngineState, type EngineState } from './engine/state';
 import type { EngineConfig, EngineConfigStep } from './engine/types';
-import { MAX_DELTA_MS } from './engine/constants';
+import { isQuiescentCandidate } from './engine/quiescence';
+import { MAX_DELTA_MS, QUIESCENT_FRAME_THRESHOLD } from './engine/constants';
 import { computeDelta, pointsEqual, candlesEqual } from './engine/dataDelta';
 import type {
   HoverPoint,
@@ -204,6 +205,36 @@ export function useLivelineEngine(
     const now_ms = info.timestamp ?? 0;
     const dt = Math.min(info.timeSincePreviousFrame ?? 16.67, MAX_DELTA_MS);
 
+    // --- Quiescence: skip the picture re-record when the chart is
+    // provably static (see engine/quiescence.ts). Break conditions first —
+    // `cfg.value` is a fresh object every commit, so identity mismatch
+    // means something committed since last frame (prop change, theme
+    // switch, tick, ...); a canvas resize must also break it, compared
+    // against the size of the *last recorded* frame (not the last-checked
+    // frame, since size can't drift while frames are being skipped).
+    const cfgUnchanged = s.lastCfgObj === c;
+    const sizeUnchanged = w === s.lastRecordedW && h === s.lastRecordedH;
+    s.lastCfgObj = c;
+    if (
+      cfgUnchanged &&
+      sizeUnchanged &&
+      isQuiescentCandidate(c, s, hoverX.value)
+    ) {
+      s.quiescentFrames++;
+    } else {
+      s.quiescentFrames = 0;
+    }
+    if (s.quiescentFrames > QUIESCENT_FRAME_THRESHOLD) {
+      // Still accrue time debt exactly as engineStep would have
+      // (`s.timeDebt += (dt/1000) * pauseProgress`, and pauseProgress === 1
+      // is one of the quiescence conditions) — timeDebt drives the resume
+      // catch-up animation, so skipping without it would change resume
+      // behavior. The picture shared value is left untouched — it still
+      // holds the last recorded (pixel-identical) frame.
+      s.timeDebt += dt / 1000;
+      return;
+    }
+
     const recorder = Skia.PictureRecorder();
     const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, w, h));
     const ctx = createCanvas2D(canvas, fonts, skiaCache.value);
@@ -220,6 +251,8 @@ export function useLivelineEngine(
       candlesBuf.value
     );
     picture.value = recorder.finishRecordingAsPicture();
+    s.lastRecordedW = w;
+    s.lastRecordedH = h;
 
     if (result.valueText !== null) valueText.value = result.valueText;
     if (result.valueColor !== null) valueColor.value = result.valueColor;
