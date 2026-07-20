@@ -3,8 +3,10 @@ import {
   computeSplineTangents,
   emitSplineSegments,
   drawSplineTail,
-  type SplinePath,
 } from '../math/spline';
+import { ensured, type CachePath } from './pathCache';
+
+export type { CachePath } from './pathCache';
 
 /**
  * Cross-frame cache for the chart line's SkPath.
@@ -24,19 +26,11 @@ import {
  * cubics. `dx` is always computed against the build-time reference (never
  * accumulated), so there is no drift.
  *
- * Kept free of Skia imports (paths are typed structurally via `CachePath`)
+ * Kept free of Skia imports (paths are typed structurally via `CachePath`,
+ * shared with the badge pill cache in engine/badge.ts — see draw/pathCache.ts)
  * so jest can exercise the full key/assembly logic with fake path recorders,
  * the same way math.test.ts fakes `SplinePath`.
  */
-
-/** Structural subset of SkPath used by the cache — SkPath satisfies it. */
-export interface CachePath extends SplinePath {
-  moveTo(x: number, y: number): void;
-  rewind(): void;
-  close(): void;
-  addPath(src: CachePath, matrix?: undefined, extend?: boolean): unknown;
-  offset(dx: number, dy: number): unknown;
-}
 
 /** How drawLine receives a cache: the slot plus the data-identity inputs. */
 export interface LineCacheRef {
@@ -114,12 +108,6 @@ export function createLineCacheSlot(): LineCacheSlot {
     kPadBottom: 0,
     kChartW: 0,
   };
-}
-
-/** Returns `cur`, or a freshly built path stored nowhere — caller assigns. */
-function ensured(cur: CachePath | null, makePath: () => CachePath): CachePath {
-  'worklet';
-  return cur ?? makePath();
 }
 
 /**

@@ -11,7 +11,7 @@ import type { ChartLayout, LivelinePoint, Padding } from '../../types';
 // ── Fakes ──────────────────────────────────────────────────────────────────
 
 interface Verb {
-  op: 'M' | 'L' | 'C' | 'Z';
+  op: 'M' | 'L' | 'C' | 'Z' | 'A';
   c: number[];
 }
 
@@ -37,6 +37,9 @@ class FakePath implements CachePath {
   }
   close() {
     this.verbs.push({ op: 'Z', c: [] });
+  }
+  arcToTangent(x1: number, y1: number, x2: number, y2: number, r: number) {
+    this.verbs.push({ op: 'A', c: [x1, y1, x2, y2, r] });
   }
   rewind() {
     this.verbs.length = 0;

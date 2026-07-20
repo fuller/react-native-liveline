@@ -2,9 +2,9 @@ import { Skia } from '@shopify/react-native-skia';
 import type { ChartLayout, Momentum } from '../types';
 import { lerp, quantize } from '../math/lerp';
 import type { Ctx2D } from '../draw/canvas2d';
+import { ensured } from '../draw/pathCache';
 import {
-  badgeSvgPath,
-  badgePillOnly,
+  buildBadgePillPath,
   BADGE_PAD_X,
   BADGE_PAD_Y,
   BADGE_TAIL_LEN,
@@ -27,8 +27,8 @@ import {
  *
  * The web version renders the badge as a DOM/SVG overlay updated per frame
  * (`updateBadgeDOM`); geometry, lerps, and colors here match it exactly —
- * the pill path comes from the same badgeSvgPath generator via
- * Skia.Path.MakeFromSVGString.
+ * the pill shape comes from `buildBadgePillPath`, a direct port of the same
+ * geometry the web version's SVG path uses.
  *
  * Mutates `badge` (width/Y/color lerp state). Returns nothing.
  */
@@ -133,24 +133,29 @@ export function drawBadge(
     }
   }
 
-  // Build the pill path (SVG path string → SkPath) only when its geometry
-  // actually changed — pillW settles quickly (the width lerp snaps), so on
-  // almost every frame this reuses the cached SkPath instead of building a
-  // fresh SVG string and paying a native parse + host-object allocation
-  // per frame. The cached path is origin-anchored and positioned with a
-  // canvas translate below, so it is never mutated after construction.
+  // Rebuild the pill path only when its geometry actually changed — pillW
+  // settles quickly (the width lerp snaps), so on almost every frame this
+  // reuses the cached path instead of re-emitting it. Same lazy-alloc +
+  // rewind-and-rebuild-in-place mechanism as the line spline cache (see
+  // draw/lineCache.ts) — `ensured()` never allocates a new native path
+  // object on a rebuild, only refills the one already live. The cached
+  // path is origin-anchored and positioned with a canvas translate below.
   const wantTail = !!cfg.badgeTail;
   if (
     badge.path === null ||
     badge.pathW !== pillW ||
     badge.pathTail !== wantTail
   ) {
-    const d = wantTail
-      ? badgeSvgPath(pillW, pillH, BADGE_TAIL_LEN, BADGE_TAIL_SPREAD)
-      : badgePillOnly(pillW, pillH);
-    const path = Skia.Path.MakeFromSVGString(d);
-    if (!path) return;
-    badge.path = path;
+    badge.path = ensured(badge.path, () => Skia.Path.Make());
+    badge.path.rewind();
+    buildBadgePillPath(
+      badge.path,
+      pillW,
+      pillH,
+      BADGE_TAIL_LEN,
+      BADGE_TAIL_SPREAD,
+      wantTail
+    );
     badge.pathW = pillW;
     badge.pathTail = wantTail;
   }
