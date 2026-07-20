@@ -86,6 +86,16 @@ function drawEdgeFade(ctx: Ctx2D, padLeft: number, h: number): void {
 }
 
 /**
+ * Which backing array a draw pipeline's points came from this frame, for
+ * the line path cache's invalidation key (see draw/lineCache.ts):
+ * 0 = live buffer, 1 = paused snapshot, 2 = reverse-morph stash.
+ */
+function dataSourceOf(useStash: boolean, hasPausedSnapshot: boolean): number {
+  'worklet';
+  return useStash ? 2 : hasPausedSnapshot ? 1 : 0;
+}
+
+/**
  * One frame of the liveline engine — a direct port of the web version's
  * rAF `draw` callback, minus the DOM (badge and live value are handled via
  * the canvas and returned StepOutput). Runs entirely on the UI thread.
@@ -1224,7 +1234,7 @@ export function engineStep(
       now_ms,
       primaryPalette: cfg.palette,
       lineCaches: s.lineCaches,
-      multiDataSource: useMultiStash ? 2 : s.pausedMultiData !== null ? 1 : 0,
+      multiDataSource: dataSourceOf(useMultiStash, s.pausedMultiData !== null),
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text
@@ -1464,7 +1474,7 @@ export function engineStep(
       lineCache: {
         slot: s.lineCache,
         dataRev: cfg.dataRev,
-        dataSource: useStash ? 2 : s.pausedData !== null ? 1 : 0,
+        dataSource: dataSourceOf(useStash, s.pausedData !== null),
       },
     });
 

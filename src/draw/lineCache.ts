@@ -66,8 +66,11 @@ export interface LineCacheSlot {
   endTangent: number; // tangent the prefix actually ended with (post-clamp)
 
   // Invalidation key — flat numbers only, compared field-by-field so a
-  // per-frame check allocates nothing.
-  kValid: boolean;
+  // per-frame check allocates nothing. Validity is `prefix !== null` (no
+  // separate boolean — the two are always written together). `layout.w`
+  // isn't keyed: it only reaches the drawn geometry through `chartW`
+  // (already keyed) and pad.left (absorbed by `dx`, see below), so it can
+  // never catch an invalidation those don't already catch.
   kDataRev: number;
   kDataSource: number;
   kLen: number; // visible.length
@@ -77,7 +80,6 @@ export interface LineCacheSlot {
   kMin: number; // layout.minVal (snaps exactly when settled)
   kMax: number;
   kWindow: number; // rightEdge - leftEdge (x scale)
-  kW: number;
   kH: number;
   kPadTop: number;
   kPadBottom: number;
@@ -98,7 +100,6 @@ export function createLineCacheSlot(): LineCacheSlot {
     cutX: 0,
     cutY: 0,
     endTangent: 0,
-    kValid: false,
     kDataRev: 0,
     kDataSource: 0,
     kLen: 0,
@@ -108,12 +109,17 @@ export function createLineCacheSlot(): LineCacheSlot {
     kMin: 0,
     kMax: 0,
     kWindow: 0,
-    kW: 0,
     kH: 0,
     kPadTop: 0,
     kPadBottom: 0,
     kChartW: 0,
   };
+}
+
+/** Returns `cur`, or a freshly built path stored nowhere — caller assigns. */
+function ensured(cur: CachePath | null, makePath: () => CachePath): CachePath {
+  'worklet';
+  return cur ?? makePath();
 }
 
 /**
@@ -153,7 +159,6 @@ export function updateLinePaths(
 
   const window = layout.rightEdge - layout.leftEdge;
   const hit =
-    slot.kValid &&
     slot.prefix !== null &&
     slot.kDataRev === dataRev &&
     slot.kDataSource === dataSource &&
@@ -164,7 +169,6 @@ export function updateLinePaths(
     slot.kMin === layout.minVal &&
     slot.kMax === layout.maxVal &&
     slot.kWindow === window &&
-    slot.kW === layout.w &&
     slot.kH === layout.h &&
     slot.kPadTop === layout.pad.top &&
     slot.kPadBottom === layout.pad.bottom &&
@@ -174,7 +178,7 @@ export function updateLinePaths(
   if (hit) {
     dx = layout.toX(slot.tRef) - slot.xRefAtBuild;
   } else {
-    if (slot.prefix === null) slot.prefix = makePath();
+    slot.prefix = ensured(slot.prefix, makePath);
     const prefix = slot.prefix;
     prefix.rewind();
     prefix.moveTo(pts[0]![0], pts[0]![1]);
@@ -195,17 +199,15 @@ export function updateLinePaths(
     slot.kMin = layout.minVal;
     slot.kMax = layout.maxVal;
     slot.kWindow = window;
-    slot.kW = layout.w;
     slot.kH = layout.h;
     slot.kPadTop = layout.pad.top;
     slot.kPadBottom = layout.pad.bottom;
     slot.kChartW = layout.chartW;
-    slot.kValid = true;
     dx = 0;
   }
 
   // Assemble the stroke path: translated prefix + live tail.
-  if (slot.scratch === null) slot.scratch = makePath();
+  slot.scratch = ensured(slot.scratch, makePath);
   const scratch = slot.scratch;
   scratch.rewind();
   scratch.addPath(slot.prefix!);
@@ -225,7 +227,7 @@ export function updateLinePaths(
   // (extend=true converts its leading moveTo into a connecting segment) →
   // down to the baseline → close. Matches renderCurve's construction.
   if (wantFill) {
-    if (slot.fillScratch === null) slot.fillScratch = makePath();
+    slot.fillScratch = ensured(slot.fillScratch, makePath);
     const fill = slot.fillScratch;
     const baseY = layout.h - layout.pad.bottom;
     fill.rewind();

@@ -1,6 +1,6 @@
 import { Skia } from '@shopify/react-native-skia';
 import type { ChartLayout, Momentum } from '../types';
-import { lerp } from '../math/lerp';
+import { lerp, quantize } from '../math/lerp';
 import type { Ctx2D } from '../draw/canvas2d';
 import {
   badgeSvgPath,
@@ -119,7 +119,7 @@ export function drawBadge(
       // Quantize the blend so the rgb() string (and its entry in the shim's
       // color cache) repeats across frames instead of producing a distinct
       // cache-missing string on every frame of the momentum lerp.
-      const g = Math.round(badge.green * 64) / 64;
+      const g = quantize(badge.green);
       const rr = Math.round(
         MOMENTUM_RED[0] + (MOMENTUM_GREEN[0] - MOMENTUM_RED[0]) * g
       );
@@ -158,20 +158,24 @@ export function drawBadge(
   ctx.save();
   ctx.globalAlpha = badgeOpacity;
 
-  // Fill the pill via the shim's current path so shadow handling applies;
-  // inner save/restore scopes both the translate and the shadow settings.
-  ctx.save();
   // Drop shadow for the minimal variant (approximates CSS drop-shadow(0 1px 4px))
   if (shadow) {
     ctx.shadowColor = cfg.palette.badgeOuterShadow;
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 1;
   }
+  // Fill the pill via the shim's current path so shadow handling applies.
+  // Manually undo the translate and reset shadowBlur afterward (matching
+  // fill()'s own "no shadow" default) instead of an inner save/restore —
+  // this runs every frame the badge is visible, and save() allocates a
+  // StyleSnapshot object + a lineDash array copy that a scoped fill/translate
+  // doesn't need.
   ctx.translate(badgeLeft, badgeTop);
   ctx.beginPathFrom(badge.path);
   ctx.fillStyle = fillColor;
   ctx.fill();
-  ctx.restore();
+  ctx.shadowBlur = 0;
+  ctx.translate(-badgeLeft, -badgeTop);
 
   // Text — left-aligned inside the pill (matches the DOM span's padding box)
   ctx.font = ctx.fonts.label;

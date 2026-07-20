@@ -3,10 +3,12 @@ import type { SkPath } from '@shopify/react-native-skia';
 import type { LivelinePalette, ChartLayout, LivelinePoint } from '../types';
 import { drawSpline } from '../math/spline';
 import { decimateMinMax } from '../math/decimate';
+import { quantize } from '../math/lerp';
 import {
   updateLinePaths,
   type CachePath,
   type LineCacheRef,
+  type LineCacheSlot,
 } from './lineCache';
 import type { Ctx2D } from './canvas2d';
 import {
@@ -45,7 +47,7 @@ function blendColor(c1: string, c2: string, t: number): string {
   if (t <= 0) return c1;
   if (t >= 1) return c2;
   // Quantize for color-cache-key stability during animated blends.
-  t = Math.round(t * 64) / 64;
+  t = quantize(t);
   const [r1, g1, b1, a1] = parseRgba(c1);
   const [r2, g2, b2, a2] = parseRgba(c2);
   const r = Math.round(r1 + (r2 - r1) * t);
@@ -143,6 +145,52 @@ function renderCurve(
   ctx.lineCap = 'round';
   ctx.stroke();
   ctx.globalAlpha = baseAlpha;
+}
+
+/**
+ * Draws either the cached paths (cache hit) or falls back to rebuilding the
+ * spline immediate-mode (cache miss/disabled). A plain module-scope worklet
+ * rather than a closure captured inside drawLine — this is called up to
+ * twice per frame while scrubbing, and a closure would be a fresh function
+ * allocation on every drawLine call even in the common non-scrubbing case.
+ */
+function paintLineCurve(
+  ctx: Ctx2D,
+  layout: ChartLayout,
+  palette: LivelinePalette,
+  cacheReady: boolean,
+  cacheSlot: LineCacheSlot | undefined,
+  wantFill: boolean,
+  pts: [number, number][],
+  showFill: boolean,
+  lineAlpha: number,
+  fillAlpha: number,
+  strokeColor?: string
+) {
+  'worklet';
+  if (cacheReady && cacheSlot !== undefined) {
+    renderCurvePaths(
+      ctx,
+      layout,
+      palette,
+      cacheSlot.scratch!,
+      wantFill ? cacheSlot.fillScratch : null,
+      lineAlpha,
+      fillAlpha,
+      strokeColor
+    );
+  } else {
+    renderCurve(
+      ctx,
+      layout,
+      palette,
+      pts,
+      showFill,
+      lineAlpha,
+      fillAlpha,
+      strokeColor
+    );
+  }
 }
 
 export function drawLine(
@@ -273,32 +321,6 @@ export function drawLine(
       visible[visible.length - 1]!.time,
       visible[visible.length - 1]!.value
     );
-  const paintCurve = () => {
-    if (cacheReady) {
-      const slot = pathCache!.slot;
-      renderCurvePaths(
-        ctx,
-        layout,
-        palette,
-        slot.scratch!,
-        wantFill ? slot.fillScratch : null,
-        lineAlpha,
-        fillAlpha,
-        strokeColor
-      );
-    } else {
-      renderCurve(
-        ctx,
-        layout,
-        palette,
-        pts,
-        showFill,
-        lineAlpha,
-        fillAlpha,
-        strokeColor
-      );
-    }
-  };
 
   // Clip line + fill to chart area — during big value jumps the range
   // lerps smoothly so the line may extend beyond the chart bounds.
@@ -314,7 +336,19 @@ export function drawLine(
     ctx.beginPath();
     ctx.rect(0, 0, scrubX!, h);
     ctx.clip();
-    paintCurve();
+    paintLineCurve(
+      ctx,
+      layout,
+      palette,
+      cacheReady,
+      pathCache?.slot,
+      wantFill,
+      pts,
+      showFill,
+      lineAlpha,
+      fillAlpha,
+      strokeColor
+    );
     ctx.restore();
 
     // Dimmed portion: clipped to RIGHT of scrub point
@@ -323,10 +357,34 @@ export function drawLine(
     ctx.rect(scrubX!, 0, layout.w - scrubX!, h);
     ctx.clip();
     ctx.globalAlpha = incomingAlpha * (1 - scrubAmount * 0.6);
-    paintCurve();
+    paintLineCurve(
+      ctx,
+      layout,
+      palette,
+      cacheReady,
+      pathCache?.slot,
+      wantFill,
+      pts,
+      showFill,
+      lineAlpha,
+      fillAlpha,
+      strokeColor
+    );
     ctx.restore();
   } else {
-    paintCurve();
+    paintLineCurve(
+      ctx,
+      layout,
+      palette,
+      cacheReady,
+      pathCache?.slot,
+      wantFill,
+      pts,
+      showFill,
+      lineAlpha,
+      fillAlpha,
+      strokeColor
+    );
   }
 
   // Restore from chart-area clip

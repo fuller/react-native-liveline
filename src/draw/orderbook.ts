@@ -1,4 +1,5 @@
 import type { LivelinePalette, ChartLayout, OrderbookData } from '../types';
+import { quantize } from '../math/lerp';
 import type { Ctx2D } from './canvas2d';
 
 // Green: rgb(34, 197, 94), Red: rgb(239, 68, 68)
@@ -58,7 +59,7 @@ function mixColor(
   // to MAX_LABELS per frame) produces a bounded set of repeating rgb()
   // strings that hit the shim's color cache, instead of a distinct
   // cache-missing string per label per frame.
-  t = Math.round(t * 64) / 64;
+  t = quantize(t);
   const r = Math.round(from[0] + (to[0] - from[0]) * t);
   const g = Math.round(from[1] + (to[1] - from[1]) * t);
   const b = Math.round(from[2] + (to[2] - from[2]) * t);

@@ -1,7 +1,7 @@
 import type { Momentum, LivelinePalette } from '../types';
 import type { ArrowState } from './index';
 import { parseColorRgb } from '../theme';
-import { lerp } from '../math/lerp';
+import { lerp, quantize } from '../math/lerp';
 import type { Ctx2D } from './canvas2d';
 
 const PULSE_INTERVAL = 1500;
@@ -15,7 +15,7 @@ function lerpColor(
   'worklet';
   // Quantize so the continuously-animating scrub dim produces repeating
   // rgb() strings that hit the shim's color cache across frames.
-  t = Math.round(t * 64) / 64;
+  t = quantize(t);
   const r = Math.round(a[0] + (b[0] - a[0]) * t);
   const g = Math.round(a[1] + (b[1] - a[1]) * t);
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
