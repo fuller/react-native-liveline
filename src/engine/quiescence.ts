@@ -49,8 +49,16 @@ import type { EngineState } from './state';
  *    labels every frame purely off raw (unpaused) `dt` and `Math.random()`,
  *    independent of whether the underlying data or pause state changed —
  *    excluded via `orderbookData` below.
- *  - candle-width morph, per-series alpha lerps (multi-series) — entire
- *    modes excluded below; candle and multi-series never go quiescent.
+ *  - candle-width morph, per-series alpha lerps (multi-series) — driven by
+ *    `pausedDt`/wall-clock-elapsed transitions that freeze/converge the same
+ *    way line mode's do; multi-series stays excluded below (its own alpha
+ *    lerps aren't covered by this audit), but candle mode is not.
+ *  - candle live-glow pulse (`draw/candlestick.ts` `livePulse`) and the
+ *    candle-mode line-morph dot pulse (`draw/index.ts`, only relevant
+ *    while `cfg.lineMode` is transitioning) — both were `Math.sin(now_ms)`-
+ *    driven with no pause gate, which alone kept candle mode from ever
+ *    reaching quiescence; both now hard-cut off at `pauseProgress < 0.5`,
+ *    matching the pulse-ring precedent above.
  */
 export function isQuiescentCandidate(
   cfg: EngineConfigStep,
@@ -71,7 +79,6 @@ export function isQuiescentCandidate(
     s.chartReveal === 1 &&
     !cfg.degenOptions &&
     !cfg.orderbookData &&
-    cfg.mode !== 'candle' &&
     !isMultiSeries
   );
 }

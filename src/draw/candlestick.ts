@@ -111,6 +111,7 @@ export function drawCandlesticks(
   candleWidthSecs: number,
   liveTime: number,
   now_ms: number,
+  pauseProgress: number,
   scrubX: number,
   scrubDim: number,
   liveAlpha: number = 1,
@@ -127,8 +128,12 @@ export function drawCandlesticks(
   const padL = layout.pad.left;
   const padR = layout.pad.left + layout.chartW;
 
-  // Live pulse: subtle brightness cycle
-  const livePulse = 0.12 + Math.sin(now_ms * 0.004) * 0.08;
+  // Live pulse: subtle brightness cycle. Gated off past the same pause
+  // threshold the dot's pulse ring uses (draw/index.ts) — without this,
+  // this Math.sin(now_ms) term never settles, and candle mode could never
+  // reach quiescence (see engine/quiescence.ts).
+  const showLivePulse = pauseProgress < 0.5;
+  const livePulse = showLivePulse ? 0.12 + Math.sin(now_ms * 0.004) * 0.08 : 0;
 
   for (const c of candles) {
     const cx = toX(c.time + candleWidthSecs / 2);
@@ -193,7 +198,7 @@ export function drawCandlesticks(
     ctx.fill();
 
     // Live candle glow
-    if (isLive) {
+    if (isLive && showLivePulse) {
       ctx.save();
       ctx.globalAlpha = baseAlpha * candleAlpha * livePulse;
       ctx.shadowColor = color;
