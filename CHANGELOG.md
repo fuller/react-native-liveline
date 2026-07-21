@@ -92,6 +92,29 @@ All notable changes to this project will be documented in this file.
   at reduced alpha for the live-dot and badge shadows (same depth cue,
   no blur cost) and skips the live-candle glow's blur pass (the pulsing
   brightness cycle is kept). iOS/web rendering is unchanged.
+- **Candle mode can now go quiescent** — a `Math.sin(now_ms)`-driven glow
+  animation on the live candle (and, during a line-mode morph, the dot's
+  pulse ring) ran unconditionally, so a paused candle chart never stopped
+  re-recording. Both now hard-cut off at `pauseProgress < 0.5`, matching the
+  line-mode pulse ring's existing behavior, and candle mode is no longer
+  excluded from the quiescence check.
+- **Picture recording capped at ~60fps** — the engine previously re-recorded
+  on every vsync, so a 120Hz Android display did twice the work of a 60Hz
+  one for identical visual output. Frame skipping is safe because every
+  animation lerp in the engine composes exactly under accumulated time deltas;
+  two call sites (particle drag, orderbook churn smoothing) that weren't
+  time-scaled were fixed as a prerequisite. Applies on iOS too — no visual
+  trade-off at any frame rate, unlike the Android-only shadow simplification
+  above.
+- **Grid layer cached as a composited picture** — gridlines and Y-axis labels
+  are now recorded into their own `SkPicture`, rebuilt only when the Y-range,
+  canvas size, or palette actually change (or during the brief window right
+  after they do, while label fades are still animating), and composited with
+  a single native call the rest of the time instead of replaying every
+  gridline stroke and label draw call every frame. Time-axis labels aren't
+  cached yet — they scroll horizontally during live playback and need a
+  translate-based approach like the line spline cache above, which is its
+  own follow-up.
 
 - **Peer dependency ranges tightened**: `react-native-reanimated` now requires
   `>=4.0.0` (was `>=3.16.0`, which was never actually verified — this library
