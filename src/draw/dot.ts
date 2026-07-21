@@ -1,7 +1,9 @@
 import type { Momentum, LivelinePalette } from '../types';
 import type { ArrowState } from './index';
 import { parseColorRgb } from '../theme';
-import { lerp, quantize } from '../math/lerp';
+import { lerp } from '../math/lerp';
+import { rgbColor } from '../math/color';
+import type { SkColor } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 
 const PULSE_INTERVAL = 1500;
@@ -11,15 +13,12 @@ function lerpColor(
   a: [number, number, number],
   b: [number, number, number],
   t: number
-): string {
+): SkColor {
   'worklet';
-  // Quantize so the continuously-animating scrub dim produces repeating
-  // rgb() strings that hit the shim's color cache across frames.
-  t = quantize(t);
   const r = Math.round(a[0] + (b[0] - a[0]) * t);
   const g = Math.round(a[1] + (b[1] - a[1]) * t);
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
-  return `rgb(${r},${g},${bl})`;
+  return rgbColor(r, g, bl);
 }
 
 /** Draw the live dot: expanding ring pulse, white outer circle, colored inner dot. */

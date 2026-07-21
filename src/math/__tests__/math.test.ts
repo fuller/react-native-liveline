@@ -1,4 +1,5 @@
-import { lerp, quantize } from '../lerp';
+import { lerp } from '../lerp';
+import { rgbColor } from '../color';
 import { computeRange } from '../range';
 import { detectMomentum } from '../momentum';
 import { interpolateAtTime } from '../interpolate';
@@ -44,34 +45,34 @@ describe('lerp', () => {
   });
 });
 
-// -- quantize --
+// -- rgbColor --
 
-describe('quantize', () => {
-  it('snaps to the nearest 1/64 step by default', () => {
-    expect(quantize(0.5)).toBe(0.5); // exact step
-    expect(quantize(0.501)).toBeCloseTo(0.5, 5);
-    expect(quantize(1 / 64 + 0.001)).toBeCloseTo(1 / 64, 5);
+describe('rgbColor', () => {
+  it('scales 0-255 RGB to the 0-1 range SkColor expects', () => {
+    // Float32Array has ~7 significant digits — compare at reduced precision.
+    const c = rgbColor(255, 128, 0);
+    expect(c[0]).toBeCloseTo(1, 6);
+    expect(c[1]).toBeCloseTo(128 / 255, 6);
+    expect(c[2]).toBeCloseTo(0, 6);
   });
 
-  it('is idempotent (quantizing a quantized value is a no-op)', () => {
-    const q = quantize(0.3333);
-    expect(quantize(q)).toBe(q);
+  it('defaults alpha to 1', () => {
+    expect(rgbColor(10, 20, 30)[3]).toBe(1);
   });
 
-  it('preserves the endpoints 0 and 1', () => {
-    expect(quantize(0)).toBe(0);
-    expect(quantize(1)).toBe(1);
+  it('passes through an explicit alpha unscaled', () => {
+    expect(rgbColor(10, 20, 30, 0.5)[3]).toBe(0.5);
   });
 
-  it('respects a custom step count', () => {
-    expect(quantize(0.26, 4)).toBe(0.25); // nearest quarter
-    expect(quantize(0.4, 2)).toBe(0.5); // nearest half
+  it('returns a 4-element Float32Array', () => {
+    const c = rgbColor(0, 0, 0);
+    expect(c).toBeInstanceOf(Float32Array);
+    expect(c.length).toBe(4);
   });
 
-  it('two inputs within the same step produce identical output (the whole point: cache-key stability)', () => {
-    const a = quantize(0.503);
-    const b = quantize(0.507);
-    expect(a).toBe(b);
+  it('handles black and white exactly', () => {
+    expect(Array.from(rgbColor(0, 0, 0))).toEqual([0, 0, 0, 1]);
+    expect(Array.from(rgbColor(255, 255, 255))).toEqual([1, 1, 1, 1]);
   });
 });
 

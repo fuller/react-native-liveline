@@ -1,16 +1,16 @@
 import { Skia } from '@shopify/react-native-skia';
-import type { SkPath } from '@shopify/react-native-skia';
+import type { SkPath, SkColor } from '@shopify/react-native-skia';
 import type { LivelinePalette, ChartLayout, LivelinePoint } from '../types';
 import { drawSpline } from '../math/spline';
 import { decimateMinMax } from '../math/decimate';
-import { quantize } from '../math/lerp';
+import { rgbColor } from '../math/color';
 import {
   updateLinePaths,
   type CachePath,
   type LineCacheRef,
   type LineCacheSlot,
 } from './lineCache';
-import type { Ctx2D } from './canvas2d';
+import type { Ctx2D, Style2D } from './canvas2d';
 import {
   loadingY,
   loadingBreath,
@@ -42,20 +42,17 @@ function parseRgba(color: string): [number, number, number, number] {
 }
 
 /** Lerp between two CSS colors including alpha. Handles hex, rgb(), rgba(). */
-function blendColor(c1: string, c2: string, t: number): string {
+function blendColor(c1: string, c2: string, t: number): SkColor {
   'worklet';
-  if (t <= 0) return c1;
-  if (t >= 1) return c2;
-  // Quantize for color-cache-key stability during animated blends.
-  t = quantize(t);
   const [r1, g1, b1, a1] = parseRgba(c1);
+  if (t <= 0) return rgbColor(r1, g1, b1, a1);
   const [r2, g2, b2, a2] = parseRgba(c2);
+  if (t >= 1) return rgbColor(r2, g2, b2, a2);
   const r = Math.round(r1 + (r2 - r1) * t);
   const g = Math.round(g1 + (g2 - g1) * t);
   const b = Math.round(b1 + (b2 - b1) * t);
   const a = a1 + (a2 - a1) * t;
-  if (a >= 0.995) return `rgb(${r},${g},${b})`;
-  return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+  return rgbColor(r, g, b, a);
 }
 
 /** Path factory for the line cache — SkPath satisfies CachePath structurally. */
@@ -77,7 +74,7 @@ function renderCurvePaths(
   fill: CachePath | null,
   lineAlpha: number,
   fillAlpha: number,
-  strokeColor?: string
+  strokeColor?: Style2D
 ) {
   'worklet';
   const { h, pad } = layout;
@@ -114,7 +111,7 @@ function renderCurve(
   showFill: boolean,
   lineAlpha: number = 1,
   fillAlpha: number = 1,
-  strokeColor?: string
+  strokeColor?: Style2D
 ) {
   'worklet';
   const { h, pad } = layout;
@@ -165,7 +162,7 @@ function paintLineCurve(
   showFill: boolean,
   lineAlpha: number,
   fillAlpha: number,
-  strokeColor?: string
+  strokeColor?: Style2D
 ) {
   'worklet';
   if (cacheReady && cacheSlot !== undefined) {

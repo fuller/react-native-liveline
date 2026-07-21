@@ -56,7 +56,10 @@ export interface Gradient2D {
   addColorStop(offset: number, color: string): void;
 }
 
-export type Style2D = string | Gradient2D;
+/** A plain color string, a gradient, or a pre-built SkColor (Float32Array,
+ * see math/color.ts's `rgbColor`) — the latter skips both string formatting
+ * and the native Skia.Color() parse for animated blends. */
+export type Style2D = string | Gradient2D | SkColor;
 export type LineCap2D = 'butt' | 'round' | 'square';
 export type LineJoin2D = 'miter' | 'round' | 'bevel';
 export type TextAlign2D = 'left' | 'center' | 'right';
@@ -74,7 +77,7 @@ export interface Ctx2D {
   textAlign: TextAlign2D;
   textBaseline: TextBaseline2D;
   globalCompositeOperation: CompositeOp2D;
-  shadowColor: string;
+  shadowColor: string | SkColor;
   shadowBlur: number;
   shadowOffsetY: number;
   readonly fonts: LivelineFonts;
@@ -145,7 +148,7 @@ interface StyleSnapshot {
   textAlign: TextAlign2D;
   textBaseline: TextBaseline2D;
   globalCompositeOperation: CompositeOp2D;
-  shadowColor: string;
+  shadowColor: string | SkColor;
   shadowBlur: number;
   shadowOffsetY: number;
   lineDash: number[];
@@ -495,6 +498,14 @@ export function createCanvas2D(
       paint.setShader(null);
       paint.setColor(cachedColor(cache, style));
       if (alpha < 1) paint.setAlphaf(paint.getAlphaf() * alpha);
+    } else if (style instanceof Float32Array) {
+      // A pre-built SkColor (see math/color.ts's rgbColor) — an animated
+      // blend that skipped the string round-trip entirely. Same alpha
+      // handling as the string path: setColor re-derives alphaf from the
+      // color's own 4th (alpha) component every call.
+      paint.setShader(null);
+      paint.setColor(style);
+      if (alpha < 1) paint.setAlphaf(paint.getAlphaf() * alpha);
     } else {
       paint.setShader(
         cachedGradient(
@@ -654,7 +665,11 @@ export function createCanvas2D(
       // entirely there.
       if (this.shadowBlur > 0 && (BLUR_SHADOWS || this.shadowOffsetY !== 0)) {
         const sp = shadowPaint;
-        sp.setColor(cachedColor(cache, this.shadowColor));
+        sp.setColor(
+          typeof this.shadowColor === 'string'
+            ? cachedColor(cache, this.shadowColor)
+            : this.shadowColor
+        );
         sp.setAlphaf(
           sp.getAlphaf() * this.globalAlpha * (BLUR_SHADOWS ? 1 : 0.6)
         );

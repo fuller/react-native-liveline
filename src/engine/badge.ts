@@ -1,7 +1,8 @@
 import { Skia } from '@shopify/react-native-skia';
 import type { ChartLayout, Momentum } from '../types';
-import { lerp, quantize } from '../math/lerp';
-import type { Ctx2D } from '../draw/canvas2d';
+import { lerp } from '../math/lerp';
+import { rgbColor } from '../math/color';
+import type { Ctx2D, Style2D } from '../draw/canvas2d';
 import { ensured } from '../draw/pathCache';
 import {
   buildBadgePillPath,
@@ -97,7 +98,7 @@ export function drawBadge(
   const badgeTop = badge.y - pillH / 2;
 
   // Pill fill color
-  let fillColor: string;
+  let fillColor: Style2D;
   let textColor: string;
   let shadow = false;
   if (cfg.badgeVariant === 'minimal') {
@@ -116,10 +117,7 @@ export function drawBadge(
         : lerp(badge.green, target, MOMENTUM_COLOR_LERP, dt);
       if (badge.green > 0.99) badge.green = 1;
       if (badge.green < 0.01) badge.green = 0;
-      // Quantize the blend so the rgb() string (and its entry in the shim's
-      // color cache) repeats across frames instead of producing a distinct
-      // cache-missing string on every frame of the momentum lerp.
-      const g = quantize(badge.green);
+      const g = badge.green;
       const rr = Math.round(
         MOMENTUM_RED[0] + (MOMENTUM_GREEN[0] - MOMENTUM_RED[0]) * g
       );
@@ -129,7 +127,7 @@ export function drawBadge(
       const bb = Math.round(
         MOMENTUM_RED[2] + (MOMENTUM_GREEN[2] - MOMENTUM_RED[2]) * g
       );
-      fillColor = `rgb(${rr},${gg},${bb})`;
+      fillColor = rgbColor(rr, gg, bb);
     }
   }
 

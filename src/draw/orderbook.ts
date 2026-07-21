@@ -1,5 +1,6 @@
 import type { LivelinePalette, ChartLayout, OrderbookData } from '../types';
-import { quantize } from '../math/lerp';
+import { rgbColor } from '../math/color';
+import type { SkColor } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 
 // Green: rgb(34, 197, 94), Red: rgb(239, 68, 68)
@@ -53,17 +54,12 @@ function mixColor(
   from: [number, number, number],
   to: [number, number, number],
   t: number
-): string {
+): SkColor {
   'worklet';
-  // Quantize the blend so continuously-animating t (label fade in/out, up
-  // to MAX_LABELS per frame) produces a bounded set of repeating rgb()
-  // strings that hit the shim's color cache, instead of a distinct
-  // cache-missing string per label per frame.
-  t = quantize(t);
   const r = Math.round(from[0] + (to[0] - from[0]) * t);
   const g = Math.round(from[1] + (to[1] - from[1]) * t);
   const b = Math.round(from[2] + (to[2] - from[2]) * t);
-  return `rgb(${r},${g},${b})`;
+  return rgbColor(r, g, b);
 }
 
 function formatSize(size: number): string {
