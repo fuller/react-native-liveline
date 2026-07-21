@@ -27,6 +27,14 @@ export const SERIES_TOGGLE_SPEED = 0.1;
 // start skipping without any visible discontinuity.
 export const QUIESCENT_FRAME_THRESHOLD = 90;
 
+// --- Frame pacing (cap picture re-recording on high-refresh displays) ---
+// Below the nominal 60fps interval (1000/60 ≈ 16.67ms) on purpose: at
+// exactly 16.67, vsync jitter alone would intermittently trip the gate on
+// a real 60Hz display, silently skipping legitimate frames and halving its
+// effective frame rate. This margin lets every native 60Hz vsync through
+// while still roughly halving work on a 120Hz display.
+export const MIN_FRAME_INTERVAL_MS = 15;
+
 // --- Candle-specific constants ---
 export const CANDLE_LERP_SPEED = 0.25;
 export const CANDLE_WIDTH_TRANS_MS = 300;

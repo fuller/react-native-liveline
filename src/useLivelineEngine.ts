@@ -26,7 +26,11 @@ import { engineStep } from './engine/step';
 import { createEngineState, type EngineState } from './engine/state';
 import type { EngineConfig, EngineConfigStep } from './engine/types';
 import { isQuiescentCandidate } from './engine/quiescence';
-import { MAX_DELTA_MS, QUIESCENT_FRAME_THRESHOLD } from './engine/constants';
+import {
+  MAX_DELTA_MS,
+  QUIESCENT_FRAME_THRESHOLD,
+  MIN_FRAME_INTERVAL_MS,
+} from './engine/constants';
 import { computeDelta, pointsEqual, candlesEqual } from './engine/dataDelta';
 import type {
   HoverPoint,
@@ -214,7 +218,19 @@ export function useLivelineEngine(
     }
 
     const now_ms = info.timestamp ?? 0;
-    const dt = Math.min(info.timeSincePreviousFrame ?? 16.67, MAX_DELTA_MS);
+    // Wall-clock time since the last frame that actually ran engineStep —
+    // not info.timeSincePreviousFrame (vsync-to-vsync). These differ once
+    // frame pacing (below) starts skipping vsyncs: every lerp() in the
+    // engine is a continuous exponential decay, so applying it once with
+    // dt=dt1+dt2 is identical to applying it twice with dt1 then dt2 — an
+    // accumulated dt on the frame that does run is mathematically
+    // equivalent to running every frame, not an approximation. Only
+    // updated on frames that actually record (below), so a quiescence gap
+    // correctly produces one large, clamped dt on resume — same as any
+    // other stall today.
+    const rawDt =
+      s.lastFrameTimestamp === null ? 16.67 : now_ms - s.lastFrameTimestamp;
+    const dt = Math.min(Math.max(rawDt, 0), MAX_DELTA_MS);
 
     // --- Quiescence: skip the picture re-record when the chart is
     // provably static (see engine/quiescence.ts). Break conditions first —
@@ -246,6 +262,20 @@ export function useLivelineEngine(
       return;
     }
 
+    // --- Frame pacing: on a high-refresh display (120Hz+), re-recording
+    // every vsync buys nothing visually for a data chart but doubles CPU
+    // work. MIN_FRAME_INTERVAL_MS is deliberately below the nominal 60fps
+    // interval (16.67ms) to absorb vsync jitter — set it exactly at 16.67
+    // and jitter alone would intermittently skip legitimate frames on a
+    // real 60Hz display, silently halving its frame rate. Skipped frames
+    // still let `dt` (above) accumulate correctly on the frame that runs.
+    if (
+      s.lastFrameTimestamp !== null &&
+      now_ms - s.lastFrameTimestamp < MIN_FRAME_INTERVAL_MS
+    ) {
+      return;
+    }
+
     const recorder = Skia.PictureRecorder();
     const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, w, h));
     const ctx = createCanvas2D(canvas, fonts, skiaCache.value);
@@ -258,12 +288,14 @@ export function useLivelineEngine(
       hoverX.value,
       dt,
       now_ms,
+      fonts,
       dataBuf.value,
       candlesBuf.value
     );
     picture.value = recorder.finishRecordingAsPicture();
     s.lastRecordedW = w;
     s.lastRecordedH = h;
+    s.lastFrameTimestamp = now_ms;
 
     if (result.valueText !== null) valueText.value = result.valueText;
     if (result.valueColor !== null) valueColor.value = result.valueColor;

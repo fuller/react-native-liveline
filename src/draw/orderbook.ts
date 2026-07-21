@@ -122,8 +122,13 @@ export function drawOrderbook(
   state.prevBidTotal = bidTotal;
   state.prevAskTotal = askTotal;
 
-  // Smooth the churn rate (fast attack, slower decay)
-  const churnLerp = churnSignal > state.churnRate ? 0.3 : 0.05;
+  // Smooth the churn rate (fast attack, slower decay). Converted to the
+  // same continuous-decay form as speedLerp below — a fixed per-call blend
+  // factor would smooth more slowly in wall-clock terms whenever a frame
+  // gets skipped (frame pacing, a stalled JS thread, ...) since it's
+  // applied once per call, not once per unit time.
+  const churnRateTarget = churnSignal > state.churnRate ? 0.3 : 0.05;
+  const churnLerp = 1 - Math.pow(1 - churnRateTarget, dt / 16.67);
   state.churnRate += (churnSignal - state.churnRate) * churnLerp;
 
   // Activity = max of price momentum and orderbook churn
