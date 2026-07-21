@@ -72,10 +72,16 @@ All notable changes to this project will be documented in this file.
   default-configured chart ever went quiescent. The condition was
   redundant (the pulse ring is already forced off at full pause) and has
   been removed.
-- **Badge pill path cached** — the badge's `SkPath` was rebuilt from an
-  SVG string through a native parse on every frame; it is now cached on
-  the badge state and rebuilt only when the pill geometry changes, and
-  positioned via canvas translate instead of path mutation.
+- **Badge pill path cached, and no longer built from an SVG string** — the
+  badge's `SkPath` was rebuilt via `Skia.Path.MakeFromSVGString` (a native
+  string parse) on every frame; it's now built directly with primitive
+  path calls (the same `arcToTangent` rounding `roundedRect` already uses
+  for candle bodies) and cached, rebuilding only when the pill geometry
+  changes and reusing the same native object across rebuilds rather than
+  replacing it. Positioned via canvas translate instead of path mutation.
+  Shares its lazy-cache mechanism with the line path cache below (see
+  `draw/pathCache.ts`). No visual change — the geometry is a direct,
+  tested port of the original SVG shape.
 - **Animated color blends quantized** — momentum/scrub/orderbook/live-candle
   color lerps now quantize their blend factor to 1/64 steps (visually
   lossless) so they produce repeating `rgb()` strings that hit the shim's
