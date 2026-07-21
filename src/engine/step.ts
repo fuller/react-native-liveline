@@ -4,6 +4,7 @@ import type {
   Momentum,
   HoverPoint,
   CandlePoint,
+  LivelineFonts,
 } from '../types';
 import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
@@ -22,6 +23,7 @@ import { drawEmpty } from '../draw/empty';
 import type { EngineConfigStep } from './types';
 import type { EngineState } from './state';
 import { drawBadge } from './badge';
+import { updateGridLayer } from './gridLayer';
 import {
   computeAdaptiveSpeed,
   updateWindowTransition,
@@ -111,6 +113,7 @@ export function engineStep(
   hoverPixelXRaw: number | null,
   dt: number,
   now_ms: number,
+  fonts: LivelineFonts,
   /** Line-mode data points — synced via its own delta-updated shared value. */
   data: LivelinePoint[],
   /** Candles — synced via its own delta-updated shared value; empty array
@@ -652,6 +655,26 @@ export function engineStep(
       toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
     };
 
+    // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
+    // while the reveal morph is animating: ctx.drawPicture ignores
+    // globalAlpha, so compositing a cached picture during the fade-in
+    // would visibly snap to full opacity instead of ramping. Uses
+    // pausedDt (not dt) to match the dt this branch's own drawGrid call
+    // (via CandleDrawOptions.dt below) already uses, so label fades
+    // freeze/resume with pause exactly as they did before this cache.
+    if (cfg.showGrid && chartReveal >= 1) {
+      updateGridLayer(
+        s.gridLayer,
+        s.gridState,
+        layout,
+        cfg.palette,
+        cfg.formatValue,
+        pausedDt,
+        s.gridLayerCache,
+        fonts
+      );
+    }
+
     // --- Hover + scrub ---
     const hoverPx = hoverPixelX;
     let hoveredCandle: CandlePoint | null = null;
@@ -857,6 +880,7 @@ export function engineStep(
       // loading→live (where loadingAlpha starts at ~1), while still
       // allowing smooth fade-out during empty→live (loadingAlpha is 0).
       showEmptyOverlay: !(cfg.loading ?? false) && loadingAlpha < 0.01,
+      gridLayer: s.gridLayer,
     });
 
     // Badge in candle mode — only when in line mode (lineModeProg > 0.5)
@@ -1137,6 +1161,22 @@ export function engineStep(
       toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
     };
 
+    // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
+    // while the reveal morph is animating (ctx.drawPicture ignores
+    // globalAlpha; see the candle-mode branch above for the full reason).
+    if (cfg.showGrid && chartReveal >= 1) {
+      updateGridLayer(
+        s.gridLayer,
+        s.gridState,
+        layout,
+        cfg.palette,
+        cfg.formatValue,
+        dt,
+        s.gridLayerCache,
+        fonts
+      );
+    }
+
     // Hover — interpolate value at hover time for each series
     const hoverPx = hoverPixelX;
     let drawHoverX: number | null = null;
@@ -1235,6 +1275,7 @@ export function engineStep(
       primaryPalette: cfg.palette,
       lineCaches: s.lineCaches,
       multiDataSource: dataSourceOf(useMultiStash, s.pausedMultiData !== null),
+      gridLayer: s.gridLayer,
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text
@@ -1385,6 +1426,22 @@ export function engineStep(
       toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
     };
 
+    // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
+    // while the reveal morph is animating (ctx.drawPicture ignores
+    // globalAlpha; see the candle-mode branch above for the full reason).
+    if (cfg.showGrid && chartReveal >= 1) {
+      updateGridLayer(
+        s.gridLayer,
+        s.gridState,
+        layout,
+        cfg.palette,
+        cfg.formatValue,
+        dt,
+        s.gridLayerCache,
+        fonts
+      );
+    }
+
     // Momentum
     const momentum: Momentum = cfg.momentumOverride ?? detectMomentum(visible);
 
@@ -1476,6 +1533,7 @@ export function engineStep(
         dataRev: cfg.dataRev,
         dataSource: dataSourceOf(useStash, s.pausedData !== null),
       },
+      gridLayer: s.gridLayer,
     });
 
     // During morph (chart ↔ empty), overlay the gradient gap + text on

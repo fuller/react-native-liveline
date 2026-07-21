@@ -8,8 +8,10 @@ import type {
   DegenOptions,
   CandlePoint,
 } from '../types';
+import type { SkPicture } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 import { drawGrid, type GridState } from './grid';
+import type { GridLayerSlot } from './gridLayer';
 import { drawLine } from './line';
 import {
   createLineCacheSlot,
@@ -86,6 +88,8 @@ export interface DrawOptions {
   now_ms: number; // performance.now() for breathing animation timing
   /** Cross-frame line path cache (see draw/lineCache) */
   lineCache?: LineCacheRef;
+  /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
+  gridLayer?: GridLayerSlot<SkPicture>;
 }
 
 /**
@@ -138,8 +142,19 @@ export function drawFrame(
     const gridAlpha = reveal < 1 ? revealRamp(0.15, 0.7) : 1;
     if (gridAlpha > 0.01) {
       ctx.save();
-      if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
-      drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+      if (opts.gridLayer?.picture && reveal >= 1) {
+        ctx.drawPicture(opts.gridLayer.picture);
+      } else {
+        if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+        drawGrid(
+          ctx,
+          layout,
+          palette,
+          opts.formatValue,
+          opts.gridState,
+          opts.dt
+        );
+      }
       ctx.restore();
     }
   }
@@ -375,6 +390,8 @@ export interface MultiSeriesDrawOptions {
   lineCaches?: Map<string, LineCacheSlot>;
   /** Which backing arrays series data came from: 0 live / 1 paused / 2 stash */
   multiDataSource?: number;
+  /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
+  gridLayer?: GridLayerSlot<SkPicture>;
 }
 
 /**
@@ -408,8 +425,19 @@ export function drawMultiFrame(
     const gridAlpha = reveal < 1 ? revealRamp(0.15, 0.7) : 1;
     if (gridAlpha > 0.01) {
       ctx.save();
-      if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
-      drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+      if (opts.gridLayer?.picture && reveal >= 1) {
+        ctx.drawPicture(opts.gridLayer.picture);
+      } else {
+        if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+        drawGrid(
+          ctx,
+          layout,
+          palette,
+          opts.formatValue,
+          opts.gridState,
+          opts.dt
+        );
+      }
       ctx.restore();
     }
   }
@@ -638,6 +666,8 @@ export interface CandleDrawOptions {
   emptyText?: string;
   loadingAlpha: number;
   showEmptyOverlay: boolean; // true only when collapsing to empty (not loading, not forward morph)
+  /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
+  gridLayer?: GridLayerSlot<SkPicture>;
 }
 
 /**
@@ -681,8 +711,12 @@ export function drawCandleFrame(
   const gridAlpha = revealRamp(0.25, 0.6);
   if (opts.showGrid && gridAlpha > 0.01) {
     ctx.save();
-    if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
-    drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+    if (opts.gridLayer?.picture && reveal >= 1) {
+      ctx.drawPicture(opts.gridLayer.picture);
+    } else {
+      if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+      drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+    }
     ctx.restore();
   }
 
@@ -791,6 +825,7 @@ export function drawCandleFrame(
         opts.oldWidth,
         -1,
         opts.now_ms,
+        opts.pauseProgress,
         opts.hoverX ?? 0,
         opts.scrubAmount,
         1,
@@ -806,6 +841,7 @@ export function drawCandleFrame(
         opts.displayCandleWidth,
         opts.liveCandle?.time ?? -1,
         opts.now_ms,
+        opts.pauseProgress,
         opts.hoverX ?? 0,
         opts.scrubAmount,
         opts.liveBirthAlpha,
@@ -823,6 +859,7 @@ export function drawCandleFrame(
         opts.displayCandleWidth,
         opts.liveCandle?.time ?? -1,
         opts.now_ms,
+        opts.pauseProgress,
         opts.hoverX ?? 0,
         opts.scrubAmount,
         opts.liveBirthAlpha,
@@ -838,7 +875,7 @@ export function drawCandleFrame(
   if (lp > 0.5 && linePts && linePts.length > 0 && reveal > 0.3) {
     const lastPt = linePts[linePts.length - 1]!;
     const dotAlpha = (lp - 0.5) * 2 * ((reveal - 0.3) / 0.7);
-    const showPulse = lp > 0.8 && reveal > 0.6;
+    const showPulse = lp > 0.8 && reveal > 0.6 && opts.pauseProgress < 0.5;
     if (dotAlpha > 0.01) {
       ctx.save();
       ctx.globalAlpha = dotAlpha;

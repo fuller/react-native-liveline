@@ -17,6 +17,7 @@ import type {
   SkShader,
   SkPathEffect,
   SkMaskFilter,
+  SkPicture,
 } from '@shopify/react-native-skia';
 import { Platform } from 'react-native';
 import type { LivelineFonts } from '../types';
@@ -126,6 +127,11 @@ export interface Ctx2D {
     y1: number
   ): Gradient2D;
   translate(dx: number, dy: number): void;
+  /** Composites a previously-recorded picture at the current transform
+   * (Skia extension, no Canvas2D equivalent). Ignores `globalAlpha` — Skia's
+   * drawPicture takes no paint/alpha argument, so callers must not use this
+   * during an alpha fade (e.g. the chart reveal morph). */
+  drawPicture(picture: SkPicture): void;
 }
 
 interface StyleSnapshot {
@@ -765,6 +771,10 @@ export function createCanvas2D(
 
     translate(dx, dy) {
       canvas.translate(dx, dy);
+    },
+
+    drawPicture(picture) {
+      canvas.drawPicture(picture);
     },
   };
 

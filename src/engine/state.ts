@@ -1,12 +1,14 @@
-import type { SkPath } from '@shopify/react-native-skia';
+import type { SkPath, SkPicture } from '@shopify/react-native-skia';
 import type { LivelinePoint, LivelinePalette, CandlePoint } from '../types';
 import type { ArrowState, ShakeState } from '../draw';
 import type { GridState } from '../draw/grid';
 import type { TimeAxisState } from '../draw/timeAxis';
 import { createOrderbookState, type OrderbookState } from '../draw/orderbook';
 import { createLineCacheSlot, type LineCacheSlot } from '../draw/lineCache';
+import { createGridLayerSlot, type GridLayerSlot } from '../draw/gridLayer';
 import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
+import { createSkiaCache, type SkiaCache } from '../draw/canvas2d';
 import type { WindowTransState } from './helpers';
 import type { EngineConfigStep } from './types';
 
@@ -60,6 +62,14 @@ export interface EngineState {
   /** Per-series line path caches, multi-series mode — keyed by series id,
    * pruned alongside displayValues when series are removed */
   lineCaches: Map<string, LineCacheSlot>;
+  /** Cross-frame grid (gridlines + Y-axis labels) SkPicture cache (see
+   * engine/gridLayer). Single shared instance across modes since only one
+   * mode draws per frame. */
+  gridLayer: GridLayerSlot<SkPicture>;
+  /** Dedicated Skia object cache for the grid layer's own sub-recording —
+   * deliberately not shared with the main frame's SkiaCache (see
+   * engine/gridLayer.ts's doc comment). */
+  gridLayerCache: SkiaCache;
 
   // Hover state
   scrubAmount: number;
@@ -143,6 +153,14 @@ export interface EngineState {
    * a resize while frames are being skipped must break quiescence. */
   lastRecordedW: number;
   lastRecordedH: number;
+
+  // --- Frame pacing (see engine/constants.ts's MIN_FRAME_INTERVAL_MS) ---
+  /** `now_ms` as of the last frame that actually ran engineStep — the
+   * source of `dt` (wall-clock elapsed, not vsync-to-vsync) and the pacing
+   * gate. `null` until the first frame ever records. Left untouched by
+   * both the quiescence skip and the pacing skip, so it always reflects
+   * "when did state last actually advance." */
+  lastFrameTimestamp: number | null;
 }
 
 export function createEngineState(
@@ -190,6 +208,8 @@ export function createEngineState(
     },
     lineCache: createLineCacheSlot(),
     lineCaches: new Map<string, LineCacheSlot>(),
+    gridLayer: createGridLayerSlot<SkPicture>(),
+    gridLayerCache: createSkiaCache(),
 
     scrubAmount: 0,
     lastHover: null,
@@ -250,5 +270,7 @@ export function createEngineState(
     // (a real frame is always <= 0 guarded upstream, so 0×0 never records).
     lastRecordedW: -1,
     lastRecordedH: -1,
+
+    lastFrameTimestamp: null,
   };
 }
