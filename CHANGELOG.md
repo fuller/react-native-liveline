@@ -115,6 +115,20 @@ All notable changes to this project will be documented in this file.
   cached yet — they scroll horizontally during live playback and need a
   translate-based approach like the line spline cache above, which is its
   own follow-up.
+- **Animated color blends build an SkColor directly** — the dot's scrub-dim
+  lerp, orderbook's label fade, the badge's momentum color, the line's
+  reveal-morph stroke, and every candle color now build a Skia color object
+  straight from their computed RGB numbers instead of formatting an
+  `rgb()`/`rgba()` string and parsing it back natively — cheaper than even a
+  color-cache hit, and slightly more precise (no more snapping the blend to
+  1/64 steps to keep a string cache-key stable).
+- **Candle draw calls batched** — each candle previously issued up to 3
+  separate native draw calls (2 wicks + 1 body); non-live candles are now
+  grouped by color (at most 2 groups) into a combined path per group, so a
+  100-candle chart costs a handful of calls instead of 200-300+. Falls back
+  to per-candle drawing while scrub-dimming is active, since that gives each
+  candle its own alpha that can't be expressed as one paint-level alpha for
+  a combined path.
 
 - **Peer dependency ranges tightened**: `react-native-reanimated` now requires
   `>=4.0.0` (was `>=3.16.0`, which was never actually verified — this library
