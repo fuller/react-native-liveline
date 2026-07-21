@@ -5,7 +5,6 @@ import {
   type CachePath,
 } from '../lineCache';
 import { drawSpline } from '../../math/spline';
-import { decimateMinMax } from '../../math/decimate';
 import type { ChartLayout, LivelinePoint, Padding } from '../../types';
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
@@ -368,72 +367,6 @@ describe('updateLinePaths', () => {
   });
 });
 
-describe('decimateMinMax absolute grid', () => {
-  const dense = (t0: number, count: number, dt: number): LivelinePoint[] => {
-    const out: LivelinePoint[] = [];
-    for (let i = 0; i < count; i++) {
-      out.push({ time: t0 + i * dt, value: Math.sin(i * 0.7) * 10 });
-    }
-    return out;
-  };
-
-  it('keeps interior selection stable across a scrolled window', () => {
-    const chartW = 50;
-    const bucketSecs = 2;
-    const all = dense(0, 1000, 0.5); // 500s of data at 2Hz
-    // Two windows shifted by 10 points (5s) — same absolute grid
-    const winA = all.slice(100, 400);
-    const winB = all.slice(110, 410);
-    const outA = decimateMinMax(winA, chartW, bucketSecs);
-    const outB = decimateMinMax(winB, chartW, bucketSecs);
-
-    // Interior points present in both windows' time overlap must be selected
-    // identically (first/last are window-dependent by contract).
-    const overlapStart = winB[1]!.time;
-    const overlapEnd = winA[winA.length - 2]!.time;
-    const key = (p: LivelinePoint) => `${p.time}:${p.value}`;
-    const selA = new Set(
-      outA
-        .slice(1, -1)
-        .filter(
-          (p) =>
-            p.time >= overlapStart + bucketSecs &&
-            p.time <= overlapEnd - bucketSecs
-        )
-        .map(key)
-    );
-    const selB = new Set(
-      outB
-        .slice(1, -1)
-        .filter(
-          (p) =>
-            p.time >= overlapStart + bucketSecs &&
-            p.time <= overlapEnd - bucketSecs
-        )
-        .map(key)
-    );
-    expect(selA).toEqual(selB);
-  });
-
-  it('preserves spikes and chronological order with the absolute grid', () => {
-    const pts = dense(0, 500, 0.5);
-    pts[250] = { time: pts[250]!.time, value: 99 }; // spike
-    const out = decimateMinMax(pts, 40, 6);
-    expect(out.length).toBeLessThan(pts.length);
-    expect(out[0]).toBe(pts[0]);
-    expect(out[out.length - 1]).toBe(pts[pts.length - 1]);
-    expect(out.some((p) => p.value === 99)).toBe(true);
-    for (let i = 1; i < out.length; i++) {
-      expect(out[i]!.time).toBeGreaterThanOrEqual(out[i - 1]!.time);
-    }
-  });
-
-  it('falls back to the relative grid on pathological bucketSecs', () => {
-    const pts = dense(0, 300, 1);
-    // bucketSecs tiny vs span → absolute grid would need > chartW*4 buckets
-    const out = decimateMinMax(pts, 40, 0.001);
-    expect(out.length).toBeLessThan(pts.length);
-    expect(out[0]).toBe(pts[0]);
-    expect(out[out.length - 1]).toBe(pts[pts.length - 1]);
-  });
-});
+// decimateMinMax's own correctness (including the bucketSecs absolute-grid
+// path) is covered in math/__tests__/math.test.ts, next to its other tests —
+// this file only tests what's specific to the cache built on top of it.
