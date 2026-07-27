@@ -407,6 +407,10 @@ export interface MultiSeriesEntry {
   palette: LivelinePalette;
   label?: string;
   alpha?: number; // series visibility alpha (0 = hidden, 1 = visible)
+  /** Per-series data revision for this series' line cache key — see
+   * EngineConfigStep.multiRevs. 0 when unavailable, which degrades to the
+   * old value-heuristic-only behavior rather than breaking. */
+  dataRev: number;
 }
 
 export interface MultiSeriesDrawOptions {
@@ -501,9 +505,10 @@ export function drawMultiFrame(
     const secondaryFade = si > 0 && reveal < 1 ? Math.min(1, reveal * 2) : 1;
     const combinedAlpha = secondaryFade * seriesAlpha;
     if (combinedAlpha < 0.01) continue;
-    // Per-series path cache slot, created on demand. Multi-series data has
-    // no delta-tracked revision counter, so dataRev stays 0 and the key's
-    // len/firstT/lastT/lastV heuristic carries the data identity.
+    // Per-series path cache slot, created on demand. `s.dataRev` is that
+    // series' own revision counter (see EngineConfigStep.multiRevs), so an
+    // interior revision invalidates just that series' cache — the key's
+    // len/firstT/lastT/lastV heuristic can't see interior changes on its own.
     let cacheRef: LineCacheRef | undefined;
     if (opts.lineCaches !== undefined) {
       let slot = opts.lineCaches.get(s.id);
@@ -513,7 +518,7 @@ export function drawMultiFrame(
       }
       cacheRef = {
         slot,
-        dataRev: 0,
+        dataRev: s.dataRev,
         dataSource: opts.multiDataSource ?? 0,
       };
     }

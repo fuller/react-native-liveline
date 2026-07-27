@@ -1154,6 +1154,10 @@ export function engineStep(
           if (range.max > globalMax) globalMax = range.max;
         }
         // Always push to entries (drawMultiFrame skips via alpha)
+        // 0 when the caller's config predates multiRevs (or the series is
+        // brand new this frame) — that just falls back to the previous
+        // value-heuristic-only cache key rather than misbehaving.
+        const seriesRev = cfg.multiRevs?.[series.id] ?? 0;
         let entry = s.multiSeriesEntryScratch.get(series.id);
         if (entry === undefined) {
           entry = {
@@ -1163,6 +1167,7 @@ export function engineStep(
             palette: series.palette,
             label: series.label,
             alpha,
+            dataRev: seriesRev,
           };
           s.multiSeriesEntryScratch.set(series.id, entry);
         } else {
@@ -1171,6 +1176,7 @@ export function engineStep(
           entry.palette = series.palette;
           entry.label = series.label;
           entry.alpha = alpha;
+          entry.dataRev = seriesRev;
         }
         seriesEntries.push(entry);
       }

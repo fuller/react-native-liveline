@@ -62,11 +62,12 @@ function toStepConfig(
   hasOnHover: boolean,
   noMotion: boolean,
   dataRev: number,
-  candlesRev: number
+  candlesRev: number,
+  multiRevs: Record<string, number> | undefined
 ): EngineConfigStep {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to omit them below
   const { data, candles, ...rest } = config;
-  return { ...rest, hasOnHover, noMotion, dataRev, candlesRev };
+  return { ...rest, hasOnHover, noMotion, dataRev, candlesRev, multiRevs };
 }
 
 /** A 0×0 picture used before the first frame is recorded. */
@@ -115,7 +116,7 @@ export function useLivelineEngine(
   // exists to avoid. Everything else in EngineConfig is small and stays
   // fully mirrored every commit, same as before.
   const cfg = useSharedValue<EngineConfigStep>(
-    toStepConfig(config, !!onHover, reduceMotion, 0, 0)
+    toStepConfig(config, !!onHover, reduceMotion, 0, 0, undefined)
   );
   // Seed the buffers (and the "previous" refs the mirror effect diffs
   // against) with the actual initial data/candles, copied once — otherwise
@@ -137,6 +138,22 @@ export function useLivelineEngine(
   // already-closed candle in place (a late trade correcting the previous
   // bar's OHLC): the heuristic fields don't move, but this does.
   const candlesRevRef = useRef(0);
+  // Per-series revision counters for multi-series mode, plus the previous
+  // `data` array reference each one was computed against. Unlike `data` and
+  // `candles`, multi-series data isn't delta-synced through its own buffer —
+  // it rides along inside the mirrored config — so there's no computeDelta
+  // result to key off. A reference comparison is used instead, which is
+  // deliberately as strong as (and no stronger than) the single-series path:
+  // it catches the realistic corruption case, a caller handing us a NEW array
+  // whose interior differs, which the cache's len/firstT/lastT/lastV
+  // heuristic cannot see. It does not catch a caller mutating the SAME array
+  // object in place — but neither does `dataRev`, since computeDelta returns
+  // 'same' for a reference-equal array and never bumps either. These live on
+  // the JS thread on purpose: array identity is stable here, whereas the
+  // worklet boundary deep-copies on every commit, so a reference check on the
+  // UI thread would report "changed" every single frame.
+  const prevMultiDataRef = useRef<Map<string, LivelinePoint[]>>(new Map());
+  const multiRevsRef = useRef<Map<string, number>>(new Map());
 
   // Mirror the latest props every commit — the frame worklet reads cfg.value.
   useEffect(() => {
@@ -157,12 +174,39 @@ export function useLivelineEngine(
     );
     if (candlesDelta.kind !== 'same') candlesRevRef.current++;
 
+    // Same "diff before the config write" rule as above, for multi-series.
+    // Rebuilt as a plain object each commit (small — one number per series)
+    // so it can cross into the worklet runtime alongside the rest of cfg.
+    let multiRevs: Record<string, number> | undefined;
+    const multi = config.multiSeries;
+    if (multi !== undefined && multi.length > 0) {
+      const prevData = prevMultiDataRef.current;
+      const revs = multiRevsRef.current;
+      multiRevs = {};
+      for (const series of multi) {
+        if (prevData.get(series.id) !== series.data) {
+          revs.set(series.id, (revs.get(series.id) ?? 0) + 1);
+          prevData.set(series.id, series.data);
+        }
+        multiRevs[series.id] = revs.get(series.id) ?? 0;
+      }
+      // Drop bookkeeping for series that no longer exist, so both maps can't
+      // grow without bound across a long-lived chart whose series churn.
+      if (prevData.size > multi.length) {
+        const live = new Set(multi.map((s) => s.id));
+        for (const id of prevData.keys())
+          if (!live.has(id)) prevData.delete(id);
+        for (const id of revs.keys()) if (!live.has(id)) revs.delete(id);
+      }
+    }
+
     cfg.value = toStepConfig(
       config,
       !!onHover,
       reduceMotion,
       dataRevRef.current,
-      candlesRevRef.current
+      candlesRevRef.current,
+      multiRevs
     );
 
     if (dataDelta.kind === 'delta') {

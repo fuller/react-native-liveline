@@ -96,4 +96,15 @@ export type EngineConfigStep = Omit<EngineConfig, 'data' | 'candles'> & {
    * min/max can all stay unchanged when that happens).
    */
   candlesRev: number;
+  /**
+   * Per-series revision counters for multi-series mode, keyed by series id.
+   * The multi-series line caches previously passed a hardcoded `dataRev: 0`
+   * and leaned entirely on the len/firstT/lastT/lastV value heuristic, which
+   * — exactly like the candle cache before `candlesRev` — cannot see a
+   * consumer revising an *interior* point of a series (every heuristic field
+   * stays put). Bumped per series by useLivelineEngine when that series'
+   * `data` array reference changes; see the comment there for what that does
+   * and doesn't catch. Absent (undefined) outside multi-series mode.
+   */
+  multiRevs?: Record<string, number>;
 };

@@ -192,6 +192,13 @@ All notable changes to this project will be documented in this file.
   (~25×/sec even when the book hasn't changed) and now caches its outline
   color string against the palette RGB instead of rebuilding it per frame.
   Weighted-pick distribution is unchanged — same scan order and totals.
+- **Multi-series line caches get a real data revision** — they passed a
+  hardcoded `dataRev: 0` and relied entirely on a length/first-time/last-time/
+  last-value heuristic, which cannot see a consumer revising an *interior*
+  point of a series: every heuristic field stays put and the stale line keeps
+  rendering. This is the same defect `candlesRev` fixed for candles, and it
+  now has the same fix — a per-series revision counter, so an interior
+  revision invalidates only the series that changed.
 - **Clipping uses a non-antialiased rect instead of an antialiased path** —
   every clip in the library is an axis-aligned rectangle, but all of them
   went through `clipPath(..., doAntiAlias: true)`. An antialiased path clip
