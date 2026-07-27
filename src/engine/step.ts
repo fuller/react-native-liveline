@@ -10,12 +10,14 @@ import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
 import { detectMomentum } from '../math/momentum';
 import { interpolateAtTime } from '../math/interpolate';
+import { easeInOutCos } from '../math/ease';
+import { filterVisiblePointsInto } from '../math/visible';
 import type { Ctx2D } from '../draw/canvas2d';
 import {
   drawFrame,
   drawMultiFrame,
   drawCandleFrame,
-  FADE_EDGE_WIDTH,
+  drawEdgeFade,
   type MultiSeriesEntry,
 } from '../draw';
 import { drawLoading } from '../draw/loading';
@@ -51,6 +53,7 @@ import {
   SERIES_TOGGLE_SPEED,
   LINE_MORPH_MS,
   CANDLE_LERP_SPEED,
+  CANDLE_SNAP_THRESHOLD,
   CANDLE_WIDTH_TRANS_MS,
   CLOSE_LINE_LERP_SPEED,
   LINE_DENSITY_MS,
@@ -67,24 +70,6 @@ export interface StepOutput {
   valueText: string | null;
   /** Live value display color ('' = default color) */
   valueColor: string | null;
-}
-
-/** Left-edge fade used by the loading/empty fallback branches. */
-function drawEdgeFade(ctx: Ctx2D, padLeft: number, h: number): void {
-  'worklet';
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  const fadeGrad = ctx.createLinearGradient(
-    padLeft,
-    0,
-    padLeft + FADE_EDGE_WIDTH,
-    0
-  );
-  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  ctx.fillStyle = fadeGrad;
-  ctx.fillRect(0, 0, padLeft + FADE_EDGE_WIDTH, h);
-  ctx.restore();
 }
 
 /**
@@ -279,8 +264,7 @@ export function engineStep(
     if (lmt.startMs > 0) {
       const elapsed = now_ms - lmt.startMs;
       const t = Math.min(elapsed / LINE_MORPH_MS, 1);
-      s.lineModeProg =
-        lmt.from + (lmt.to - lmt.from) * ((1 - Math.cos(t * Math.PI)) / 2);
+      s.lineModeProg = lmt.from + (lmt.to - lmt.from) * easeInOutCos(t);
       if (t >= 1) {
         s.lineModeProg = lmt.to;
         lmt.startMs = 0;
@@ -364,7 +348,7 @@ export function engineStep(
     if (cwt.startMs > 0) {
       const elapsed = now_ms - cwt.startMs;
       const t = Math.min(elapsed / CANDLE_WIDTH_TRANS_MS, 1);
-      morphT = (1 - Math.cos(t * Math.PI)) / 2;
+      morphT = easeInOutCos(t);
       displayCandleWidth = Math.exp(
         Math.log(cwt.fromWidth) +
           (Math.log(cwt.toWidth) - Math.log(cwt.fromWidth)) * morphT
@@ -479,6 +463,40 @@ export function engineStep(
         dc.high = lerp(dc.high, rawLive.high, CANDLE_LERP_SPEED, pausedDt);
         dc.low = lerp(dc.low, rawLive.low, CANDLE_LERP_SPEED, pausedDt);
         dc.close = lerp(dc.close, rawLive.close, CANDLE_LERP_SPEED, pausedDt);
+        // Exact snap once each component is within an epsilon of its
+        // target — every sibling lerp in this codebase does this (see
+        // updateCandleRange's pxThreshold, LINE_SNAP_THRESHOLD/
+        // VALUE_SNAP_THRESHOLD elsewhere in this file). Without it, high/low
+        // never becomes bit-exact with rawLive; since computeCandleRange
+        // scans the live candle too, that epsilon drift keeps nudging
+        // displayMax/displayMin whenever the live candle holds the visible
+        // extreme, which mismatches the candle cache's kMinVal/kMaxVal and
+        // forces a full geometry rebuild every frame.
+        const prevRange = s.displayMax - s.displayMin || 1;
+        if (
+          Math.abs(dc.open - rawLive.open) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.open = rawLive.open;
+        }
+        if (
+          Math.abs(dc.high - rawLive.high) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.high = rawLive.high;
+        }
+        if (
+          Math.abs(dc.low - rawLive.low) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.low = rawLive.low;
+        }
+        if (
+          Math.abs(dc.close - rawLive.close) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.close = rawLive.close;
+        }
       }
       s.liveBirthAlpha = lerp(s.liveBirthAlpha, 1, 0.2, pausedDt);
       if (s.liveBirthAlpha > 0.99) s.liveBirthAlpha = 1;
@@ -569,7 +587,10 @@ export function engineStep(
     }
 
     // --- Build visible candles ---
-    const visible: CandlePoint[] = [];
+    // Reused scratch array (see EngineState.candleVisibleScratch) instead of
+    // a fresh allocation every frame — same rationale as visibleScratch.
+    const visible: CandlePoint[] = s.candleVisibleScratch;
+    visible.length = 0;
     for (const c of effectiveCandles) {
       if (c.time + candleWidthSecs >= leftEdge && c.time <= rightEdge) {
         visible.push(c);
@@ -591,9 +612,15 @@ export function engineStep(
       }
     }
 
-    // Stash visible candles for reverse morph
+    // Stash visible candles for reverse morph. Copy — `visible` above is a
+    // reused scratch array (`candleVisibleScratch`), refilled in place next
+    // frame; a bare reference here (the old behavior, back when `visible`
+    // was a fresh array every frame) would let next frame's refill silently
+    // corrupt this stash out from under the reverse morph. Mirrors the
+    // `s.lastData = points.slice()` copy above and its comment, for the
+    // same reason.
     if (hasData) {
-      s.lastCandles = visible;
+      s.lastCandles = visible.slice();
       s.lastLive = smoothLive ?? null;
     }
     const effectiveVisible = useStash ? s.lastCandles : visible;
@@ -881,6 +908,11 @@ export function engineStep(
       // allowing smooth fade-out during empty→live (loadingAlpha is 0).
       showEmptyOverlay: !(cfg.loading ?? false) && loadingAlpha < 0.01,
       gridLayer: s.gridLayer,
+      candleCache: {
+        slot: s.candleCache,
+        dataSource: dataSourceOf(useStash, s.pausedCandles !== null),
+        candlesRev: cfg.candlesRev,
+      },
     });
 
     // Badge in candle mode — only when in line mode (lineModeProg > 0.5)
@@ -935,15 +967,40 @@ export function engineStep(
     const chartW = w - pad.left - pad.right - labelReserve;
     const buffer = cfg.showBadge ? WINDOW_BUFFER : WINDOW_BUFFER_NO_BADGE;
 
-    // Clean stale entries from displayValues (series that were removed)
-    if (!useMultiStash) {
-      const currentIds: string[] = [];
-      for (const series of effectiveMultiSeries) currentIds.push(series.id);
+    // Clean stale entries from displayValues (series that were removed).
+    // Guarded on a size check so the steady state (series count unchanged
+    // frame-to-frame, the overwhelming common case) allocates and iterates
+    // nothing: every current series gets `s.displayValues.set(series.id, dv)`
+    // below (when `!useMultiStash`), so by the end of any frame that ran
+    // this block, displayValues.size === effectiveMultiSeries.length for
+    // *that* frame's series set. A size mismatch at the top of the next
+    // frame therefore only happens when the set actually shrank (removals) —
+    // growth alone (an id added, none removed) leaves size <= length and is
+    // correctly skipped, since there's nothing stale to clean. Note this is
+    // a cheap proxy, not exact identity: a same-size id swap (series A
+    // replaced by series B in one commit, count unchanged) slips through
+    // undetected until a future size change catches it — rare in practice
+    // (call sites keep ids stable across renders) and harmless when it does
+    // happen (the stale entry just sits unused in the map).
+    if (!useMultiStash && s.displayValues.size > effectiveMultiSeries.length) {
+      const currentIds = new Set<string>();
+      for (const series of effectiveMultiSeries) currentIds.add(series.id);
       for (const key of s.displayValues.keys()) {
-        if (currentIds.indexOf(key) < 0) s.displayValues.delete(key);
+        if (!currentIds.has(key)) s.displayValues.delete(key);
       }
       for (const key of s.lineCaches.keys()) {
-        if (currentIds.indexOf(key) < 0) s.lineCaches.delete(key);
+        if (!currentIds.has(key)) s.lineCaches.delete(key);
+      }
+      // Same pruning for the per-series visible-array and MultiSeriesEntry
+      // pools (see EngineState.multiVisibleScratch/multiSeriesEntryScratch)
+      // — both are keyed and repopulated exactly like lineCaches above, so
+      // they need the same cleanup-on-removal treatment to avoid leaking a
+      // growing set of dead series ids forever.
+      for (const key of s.multiVisibleScratch.keys()) {
+        if (!currentIds.has(key)) s.multiVisibleScratch.delete(key);
+      }
+      for (const key of s.multiSeriesEntryScratch.keys()) {
+        if (!currentIds.has(key)) s.multiSeriesEntryScratch.delete(key);
       }
     }
 
@@ -953,8 +1010,10 @@ export function engineStep(
     if (hasData) s.frozenNow = Date.now() / 1000 - s.timeDebt;
     const now = useMultiStash ? s.frozenNow : Date.now() / 1000 - s.timeDebt;
 
-    // Per-series smooth values (freeze when using stash)
-    const smoothValues = new Map<string, number>();
+    // Per-series smooth values (freeze when using stash). Reused across
+    // frames (cleared, not reallocated) — see EngineState.smoothValuesScratch.
+    const smoothValues = s.smoothValuesScratch;
+    smoothValues.clear();
     for (const series of effectiveMultiSeries) {
       let dv = s.displayValues.get(series.id);
       if (dv === undefined) dv = series.value;
@@ -977,7 +1036,11 @@ export function engineStep(
       smoothValues.set(series.id, dv);
     }
 
-    // Per-series visibility alpha (lerp toward 0 for hidden, 1 for visible)
+    // Per-series visibility alpha (lerp toward 0 for hidden, 1 for visible).
+    // Deliberately no `new Set(hiddenIds)` here: N is a handful of hidden
+    // series ids at most, and building + hashing into a Set every frame
+    // costs strictly more than the linear scan it would replace — don't
+    // "optimize" this back to a Set.
     const hiddenIds = cfg.hiddenSeriesIds;
     const seriesAlphas = s.seriesAlpha;
     for (const series of effectiveMultiSeries) {
@@ -1013,15 +1076,19 @@ export function engineStep(
       const targetLeftEdge = targetRightEdge - cfg.windowSecs;
       let unionMin = Infinity;
       let unionMax = -Infinity;
+      // Reused across iterations (see EngineState.multiUnionVisibleScratch)
+      // — each series is filtered, read synchronously by computeRange right
+      // below, then moved past; nothing needs its own copy.
+      const targetVisible = s.multiUnionVisibleScratch;
       for (const series of effectiveMultiSeries) {
         const sData = s.pausedMultiData?.get(series.id)?.data ?? series.data;
         const sv = smoothValues.get(series.id) ?? series.value;
-        const targetVisible: LivelinePoint[] = [];
-        for (const p of sData) {
-          if (p.time >= targetLeftEdge - 2 && p.time <= targetRightEdge) {
-            targetVisible.push(p);
-          }
-        }
+        filterVisiblePointsInto(
+          sData,
+          targetLeftEdge,
+          targetRightEdge,
+          targetVisible
+        );
         if (targetVisible.length > 0) {
           const range = computeRange(
             targetVisible,
@@ -1050,16 +1117,28 @@ export function engineStep(
     // Build per-series visible arrays and compute global range
     // Use paused snapshots when available to prevent left-edge erosion
     // Exclude hidden series (alpha < 0.01) from range so Y-axis adjusts
-    const seriesEntries: MultiSeriesEntry[] = [];
+    //
+    // Both the per-series `visible` arrays and the `MultiSeriesEntry`
+    // objects that wrap them are pooled on EngineState, keyed by series id
+    // (multiVisibleScratch / multiSeriesEntryScratch — see their doc
+    // comments), rather than allocated fresh every frame. Confirmed safe:
+    // drawMultiFrame (draw/index.ts) only reads each entry synchronously
+    // while building its own output; it never retains the entry or its
+    // `.visible` array past the call. `seriesEntries` itself reuses
+    // `seriesEntriesScratch` the same way `visibleScratch` is reused below.
+    const seriesEntries: MultiSeriesEntry[] = s.seriesEntriesScratch;
+    seriesEntries.length = 0;
     let globalMin = Infinity;
     let globalMax = -Infinity;
     for (const series of effectiveMultiSeries) {
       const snap = s.pausedMultiData?.get(series.id);
       const seriesData = snap?.data ?? series.data;
-      const visible: LivelinePoint[] = [];
-      for (const p of seriesData) {
-        if (p.time >= leftEdge - 2 && p.time <= filterRight) visible.push(p);
+      let visible = s.multiVisibleScratch.get(series.id);
+      if (visible === undefined) {
+        visible = [];
+        s.multiVisibleScratch.set(series.id, visible);
       }
+      filterVisiblePointsInto(seriesData, leftEdge, filterRight, visible);
       const sv = smoothValues.get(series.id) ?? series.value;
       const alpha = seriesAlphas.get(series.id) ?? 1;
       if (visible.length >= 2) {
@@ -1075,14 +1154,25 @@ export function engineStep(
           if (range.max > globalMax) globalMax = range.max;
         }
         // Always push to entries (drawMultiFrame skips via alpha)
-        seriesEntries.push({
-          id: series.id,
-          visible,
-          smoothValue: sv,
-          palette: series.palette,
-          label: series.label,
-          alpha,
-        });
+        let entry = s.multiSeriesEntryScratch.get(series.id);
+        if (entry === undefined) {
+          entry = {
+            id: series.id,
+            visible,
+            smoothValue: sv,
+            palette: series.palette,
+            label: series.label,
+            alpha,
+          };
+          s.multiSeriesEntryScratch.set(series.id, entry);
+        } else {
+          entry.visible = visible;
+          entry.smoothValue = sv;
+          entry.palette = series.palette;
+          entry.label = series.label;
+          entry.alpha = alpha;
+        }
+        seriesEntries.push(entry);
       }
     }
 
@@ -1370,12 +1460,14 @@ export function engineStep(
     // Filter visible points — when pausing, contract right edge to `now`
     // so new data (with real-time timestamps) can't appear past the live dot
     const filterRight = rightEdge - (rightEdge - now) * pauseProgress;
-    const visible: LivelinePoint[] = [];
-    for (const p of effectivePoints) {
-      if (p.time >= leftEdge - 2 && p.time <= filterRight) {
-        visible.push(p);
-      }
-    }
+    // Reused scratch array (see EngineState.visibleScratch) instead of a
+    // fresh allocation every frame. Safe: nothing in this pipeline stashes
+    // `visible` itself past this frame (contrast candle mode's
+    // `lastCandles`, which does and therefore copies at the stash point —
+    // see the comment there); drawFrame/drawLine only read it synchronously
+    // while building this frame's picture.
+    const visible = s.visibleScratch;
+    filterVisiblePointsInto(effectivePoints, leftEdge, filterRight, visible);
 
     if (visible.length < 2) {
       return out;
@@ -1515,7 +1607,19 @@ export function engineStep(
       formatTime: cfg.formatTime,
       gridState: s.gridState,
       timeAxisState: s.timeAxisState,
-      dt,
+      // pausedDt (not dt) — this pipeline is the only one that reaches
+      // drawOrderbook (see draw/index.ts drawFrame), whose label spawn/
+      // movement is otherwise driven purely by raw dt + Math.random() with
+      // no pause gate of its own. Using pausedDt here freezes it at full
+      // pause, matching the candle pipeline's existing precedent (step.ts,
+      // drawCandleFrame call) and making orderbook charts eligible for
+      // engine quiescence (see engine/quiescence.ts). The other opts.dt
+      // consumers in drawFrame (grid/time-axis fade, shake decay, arrows,
+      // particles) are unaffected by this: they're either already
+      // pause-gated to zero effect or gated off entirely via
+      // cfg.degenOptions, so freezing dt here doesn't change their
+      // behavior at full pause.
+      dt: pausedDt,
       targetWindowSecs: cfg.windowSecs,
       tooltipY: cfg.tooltipY,
       tooltipOutline: cfg.tooltipOutline,

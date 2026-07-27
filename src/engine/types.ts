@@ -88,4 +88,12 @@ export type EngineConfigStep = Omit<EngineConfig, 'data' | 'candles'> & {
    * mutations that endpoint-based heuristics would miss).
    */
   dataRev: number;
+  /**
+   * Same idea as `dataRev`, for the delta-synced `candles` buffer — bumped
+   * by useLivelineEngine whenever computeDelta reports an actual change.
+   * Gives the candle cache an exact data identity, catching a consumer
+   * revising an already-closed candle in place (count/first-time/last-time/
+   * min/max can all stay unchanged when that happens).
+   */
+  candlesRev: number;
 };

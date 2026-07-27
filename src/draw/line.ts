@@ -5,6 +5,8 @@ import { drawSpline } from '../math/spline';
 import { decimateMinMax } from '../math/decimate';
 import { rgbColor } from '../math/color';
 import {
+  lineCacheHits,
+  assembleLineTail,
   updateLinePaths,
   type CachePath,
   type LineCacheRef,
@@ -243,38 +245,10 @@ export function drawLine(
         }
       : (rawY: number, _x: number) => rawY;
 
-  // Cap points fed to the O(n) spline pass at ~2 per pixel of chartW.
-  // No-op (same array, zero allocation) for normal sparse real-time density.
-  // The absolute bucket grid (one bucket per pixel of the time window) keeps
-  // the decimated selection stable as the window scrolls, so the path cache
-  // below stays valid between data changes even in dense mode.
-  const bucketSecs = (layout.rightEdge - layout.leftEdge) / Math.max(chartW, 1);
-  const decimated = decimateMinMax(visible, chartW, bucketSecs);
-
-  const pts: [number, number][] = [];
-  for (let i = 0; i < decimated.length; i++) {
-    const p = decimated[i]!;
-    const x = toX(p.time);
-    const y =
-      i === decimated.length - 1
-        ? morphY(clampY(toY(smoothValue)), x)
-        : morphY(clampY(toY(p.value)), x);
-    pts.push([x, y]);
-  }
-  // Tip X: at reveal=0 extends to full chart width (matching loading/empty line),
-  // at reveal=1 sits at the live dot position. Smooth morph between.
-  const liveTipX = toX(now);
-  const fullRightX = pad.left + chartW;
-  const tipX =
-    chartReveal < 1
-      ? liveTipX + (fullRightX - liveTipX) * (1 - chartReveal)
-      : liveTipX;
-  pts.push([tipX, morphY(clampY(toY(smoothValue)), tipX)]);
-
-  if (pts.length < 2) return undefined;
-
   // Reveal alphas: at reveal=0, line matches loading/empty brightness (shared breath).
   // As reveal increases, line ramps to full. Fill fades in with reveal.
+  // Computed before the cache check below — wantFill only needs these, not
+  // the point arrays — so a cache hit never waits on the point-array work.
   let lineAlpha = 1;
   let fillAlpha = fillScale;
   if (chartReveal < 1) {
@@ -282,6 +256,7 @@ export function drawLine(
     lineAlpha = breath + (1 - breath) * chartReveal;
     fillAlpha = chartReveal * fillScale;
   }
+  const wantFill = showFill && fillAlpha > 0.01;
 
   // Blend line color: grey at reveal=0, accent by reveal≈0.3.
   // colorBlend scales the accent mix — 0 forces grey (used during reverse morph
@@ -293,31 +268,114 @@ export function drawLine(
       : undefined;
 
   const isScrubbing = scrubX !== null;
+  const visLen = visible.length;
 
-  // Cross-frame path cache: when the caller provided a slot and the reveal
-  // morph is settled (morph geometry depends on now_ms and can't be keyed),
-  // assemble this frame's stroke/fill paths from the cached prefix — a few
-  // native calls on a hit instead of a full spline rebuild. Falls back to
-  // the legacy immediate-mode renderCurve otherwise. Assembled once here,
-  // then drawn under one or two clips below (scrub never reshapes geometry).
-  const wantFill = showFill && fillAlpha > 0.01;
-  const cacheReady =
+  // Cross-frame path cache: the key/identity check runs FIRST, before any
+  // per-frame array is built. On a hit, decimateMinMax and the O(decimated)
+  // interior-points loop (in the miss branch below) are skipped entirely —
+  // the spline interior is already baked into slot.prefix, so only the two
+  // points that actually move frame to frame (the last data point re-Y'd to
+  // smoothValue, and the live tip) are needed to assemble this frame's
+  // stroke/fill paths. Falls back to the legacy immediate-mode path (decimate
+  // + rebuild via updateLinePaths) on a miss, while the reveal morph is
+  // active (its geometry depends on now_ms and can't be keyed), or when no
+  // cache slot was provided. `lineCacheHits` is the exact predicate
+  // updateLinePaths uses internally on the miss/legacy path below, so the
+  // two checks can never drift apart.
+  let pts: [number, number][];
+  let cacheReady = false;
+
+  if (
     pathCache !== undefined &&
     chartReveal >= 1 &&
-    updateLinePaths(
+    visLen > 0 &&
+    lineCacheHits(
+      pathCache.slot,
+      layout,
+      pathCache.dataRev,
+      pathCache.dataSource,
+      visLen,
+      visible[0]!.time,
+      visible[visLen - 1]!.time,
+      visible[visLen - 1]!.value
+    )
+  ) {
+    const visLast = visible[visLen - 1]!;
+    const lastX = toX(visLast.time);
+    // Last data point and live tip share the same Y here: chartReveal >= 1
+    // means morphY is the identity, and both use smoothValue (see the
+    // legacy loop below) — so one calc covers what would be pts[N-1] and
+    // pts[N].
+    const tailY = clampY(toY(smoothValue));
+    const tipX = toX(now);
+    const firstY = wantFill ? clampY(toY(visible[0]!.value)) : 0;
+    assembleLineTail(
       pathCache.slot,
       makeSkPath,
       layout,
-      decimated,
-      pts,
       wantFill,
-      pathCache.dataRev,
-      pathCache.dataSource,
-      visible.length,
-      visible[0]!.time,
-      visible[visible.length - 1]!.time,
-      visible[visible.length - 1]!.value
+      lastX,
+      tailY,
+      tipX,
+      tailY,
+      firstY
     );
+    cacheReady = true;
+    pts = [
+      [lastX, tailY],
+      [tipX, tailY],
+    ];
+  } else {
+    // Cap points fed to the O(n) spline pass at ~2 per pixel of chartW.
+    // No-op (same array, zero allocation) for normal sparse real-time density.
+    // The absolute bucket grid (one bucket per pixel of the time window) keeps
+    // the decimated selection stable as the window scrolls, so the path cache
+    // below stays valid between data changes even in dense mode.
+    const bucketSecs =
+      (layout.rightEdge - layout.leftEdge) / Math.max(chartW, 1);
+    const decimated = decimateMinMax(visible, chartW, bucketSecs);
+
+    const built: [number, number][] = [];
+    for (let i = 0; i < decimated.length; i++) {
+      const p = decimated[i]!;
+      const x = toX(p.time);
+      const y =
+        i === decimated.length - 1
+          ? morphY(clampY(toY(smoothValue)), x)
+          : morphY(clampY(toY(p.value)), x);
+      built.push([x, y]);
+    }
+    // Tip X: at reveal=0 extends to full chart width (matching loading/empty line),
+    // at reveal=1 sits at the live dot position. Smooth morph between.
+    const liveTipX = toX(now);
+    const fullRightX = pad.left + chartW;
+    const tipX =
+      chartReveal < 1
+        ? liveTipX + (fullRightX - liveTipX) * (1 - chartReveal)
+        : liveTipX;
+    built.push([tipX, morphY(clampY(toY(smoothValue)), tipX)]);
+
+    if (built.length < 2) return undefined;
+    pts = built;
+
+    cacheReady =
+      pathCache !== undefined &&
+      chartReveal >= 1 &&
+      updateLinePaths(
+        pathCache.slot,
+        makeSkPath,
+        layout,
+        decimated,
+        pts,
+        wantFill,
+        pathCache.dataRev,
+        pathCache.dataSource,
+        visLen,
+        visible[0]!.time,
+        visible[visLen - 1]!.time,
+        visible[visLen - 1]!.value
+      );
+  }
 
   // Clip line + fill to chart area — during big value jumps the range
   // lerps smoothly so the line may extend beyond the chart bounds.

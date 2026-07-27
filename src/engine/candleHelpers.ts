@@ -1,5 +1,6 @@
 import type { CandlePoint, ChartLayout } from '../types';
 import { lerp } from '../math/lerp';
+import { easeInOutCos, logLerp } from '../math/ease';
 import {
   RANGE_LERP_SPEED,
   RANGE_ADAPTIVE_BOOST,
@@ -179,11 +180,9 @@ export function updateCandleWindowTransition(
   } else {
     const elapsed = now_ms - wt.startMs;
     const t = Math.min(elapsed / WINDOW_TRANSITION_MS, 1);
-    const eased = (1 - Math.cos(t * Math.PI)) / 2;
+    const eased = easeInOutCos(t);
     windowTransProgress = eased;
-    const logFrom = Math.log(wt.from);
-    const logTo = Math.log(wt.to);
-    resultWindow = Math.exp(logFrom + (logTo - logFrom) * eased);
+    resultWindow = logLerp(wt.from, wt.to, eased);
     if (t >= 1) {
       resultWindow = targetWindowSecs;
       wt.startMs = 0;

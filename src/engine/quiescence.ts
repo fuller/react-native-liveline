@@ -44,11 +44,15 @@ import type { EngineState } from './state';
  *    `pulse` defaults to true).
  *  - degen particles + chart shake (`draw/particles.ts`, shake in
  *    `draw/index.ts`) — both keyed off `cfg.degenOptions`; excluded below.
- *  - orderbook depth-flow labels (`draw/orderbook.ts`) — NOT mentioned in
- *    the brief; found during this audit. `drawOrderbook` spawns and moves
- *    labels every frame purely off raw (unpaused) `dt` and `Math.random()`,
- *    independent of whether the underlying data or pause state changed —
- *    excluded via `orderbookData` below.
+ *  - orderbook depth-flow labels (`draw/orderbook.ts`) — `drawOrderbook`
+ *    spawns and moves labels off `dt` and `Math.random()`. It used to run
+ *    on raw (unpaused) `dt`, independent of pause state, which is why
+ *    `orderbookData` was excluded below. `engine/step.ts`'s single-series
+ *    pipeline (the only one that reaches `drawOrderbook` — multi-series
+ *    doesn't draw it, and stays excluded below for its own reasons) now
+ *    passes `pausedDt` instead, matching the candle pipeline's existing
+ *    precedent, so label spawn/movement freezes at full pause like every
+ *    other animated feature here; no separate condition is needed below.
  *  - candle-width morph, per-series alpha lerps (multi-series) — driven by
  *    `pausedDt`/wall-clock-elapsed transitions that freeze/converge the same
  *    way line mode's do; multi-series stays excluded below (its own alpha
@@ -78,7 +82,6 @@ export function isQuiescentCandidate(
     s.loadingAlpha === 0 &&
     s.chartReveal === 1 &&
     !cfg.degenOptions &&
-    !cfg.orderbookData &&
     !isMultiSeries
   );
 }

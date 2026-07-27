@@ -1,10 +1,14 @@
 import type { SkPath, SkPicture } from '@shopify/react-native-skia';
 import type { LivelinePoint, LivelinePalette, CandlePoint } from '../types';
-import type { ArrowState, ShakeState } from '../draw';
+import type { ArrowState, ShakeState, MultiSeriesEntry } from '../draw';
 import type { GridState } from '../draw/grid';
 import type { TimeAxisState } from '../draw/timeAxis';
 import { createOrderbookState, type OrderbookState } from '../draw/orderbook';
 import { createLineCacheSlot, type LineCacheSlot } from '../draw/lineCache';
+import {
+  createCandleCacheSlot,
+  type CandleCacheSlot,
+} from '../draw/candleCache';
 import { createGridLayerSlot, type GridLayerSlot } from '../draw/gridLayer';
 import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
@@ -43,6 +47,58 @@ export interface EngineState {
   displayValue: number;
   displayValues: Map<string, number>;
   seriesAlpha: Map<string, number>;
+  /** Scratch map for this frame's per-series smoothed values (multi-series
+   * mode) — persisted and `.clear()`-ed each frame instead of a fresh `Map`,
+   * since this is rebuilt on every frame regardless (the values it holds
+   * are this frame's lerp output) but the container itself doesn't need to
+   * be reallocated 60x/sec. */
+  smoothValuesScratch: Map<string, number>;
+  /** Scratch array for single-series mode's per-frame visible-points filter
+   * (`filterVisiblePointsInto` in math/visible.ts) — reused and refilled
+   * every frame instead of a fresh array, same rationale as
+   * `smoothValuesScratch`. NOT used for candle mode's own visible-candles
+   * build (see `candleVisibleScratch`) or multi-series (see
+   * `multiVisibleScratch`) — each mode filters a differently-shaped point
+   * array. */
+  visibleScratch: LivelinePoint[];
+  /** Scratch array for candle mode's per-frame visible-candles build
+   * (`engine/step.ts`, the manual width-adjusted loop — NOT
+   * `filterVisiblePointsInto`, see `math/visible.ts`'s docblock on why
+   * candle visibility uses its own bound). CAUTION: candle mode also
+   * aliases this frame's visible array into `lastCandles` for the
+   * reverse-morph stash; that assignment copies (`.slice()`) specifically
+   * because this array is reused in place next frame — see the comment at
+   * the `s.lastCandles = ...` assignment. */
+  candleVisibleScratch: CandlePoint[];
+  /** Scratch array reused across multi-series's per-series union-range scan
+   * (the `targetVisible` loop in `engine/step.ts`, seeding the window
+   * transition's target Y range from ALL series, not just the first). A
+   * single shared array is safe here because each iteration fills it,
+   * reads it synchronously (via `computeRange`), and moves on before the
+   * next iteration refills it — nothing holds a reference across
+   * iterations or frames. */
+  multiUnionVisibleScratch: LivelinePoint[];
+  /** Per-series scratch arrays for multi-series mode's per-frame
+   * visible-points filter, keyed by series id — mirrors `lineCaches`
+   * below (same key, same cleanup-on-removal treatment) since each series
+   * needs its own retained backing array rather than one shared buffer
+   * (unlike `multiUnionVisibleScratch` above, these ARE retained past the
+   * frame: they become `MultiSeriesEntry.visible`, read by `drawMultiFrame`
+   * and by the hover-tooltip scan later in the same frame, so they can't
+   * double as a single shared scratch slot). */
+  multiVisibleScratch: Map<string, LivelinePoint[]>;
+  /** Pooled `MultiSeriesEntry` objects for multi-series mode, keyed by
+   * series id — mirrors `lineCaches`/`multiVisibleScratch` (same key, same
+   * cleanup). Avoids allocating a fresh object literal per visible series
+   * per frame; fields are overwritten in place instead. Confirmed safe:
+   * `drawMultiFrame` (draw/index.ts) reads each entry synchronously to
+   * build its own `pts`/`allPts` output and never stores the entry object
+   * or its `.visible` array beyond that call. */
+  multiSeriesEntryScratch: Map<string, MultiSeriesEntry>;
+  /** Reused container for this frame's multi-series draw list — filled by
+   * looking up/creating pooled entries in `multiSeriesEntryScratch` above,
+   * `.length = 0` then pushed into each frame like `visibleScratch`. */
+  seriesEntriesScratch: MultiSeriesEntry[];
   displayMin: number;
   displayMax: number;
   targetMin: number;
@@ -70,6 +126,9 @@ export interface EngineState {
    * deliberately not shared with the main frame's SkiaCache (see
    * engine/gridLayer.ts's doc comment). */
   gridLayerCache: SkiaCache;
+  /** Cross-frame closed-candle body+wick path cache, candle mode (see
+   * draw/candleCache). */
+  candleCache: CandleCacheSlot;
 
   // Hover state
   scrubAmount: number;
@@ -174,6 +233,13 @@ export function createEngineState(
     displayValue: value,
     displayValues: new Map<string, number>(),
     seriesAlpha: new Map<string, number>(),
+    smoothValuesScratch: new Map<string, number>(),
+    visibleScratch: [],
+    candleVisibleScratch: [],
+    multiUnionVisibleScratch: [],
+    multiVisibleScratch: new Map<string, LivelinePoint[]>(),
+    multiSeriesEntryScratch: new Map<string, MultiSeriesEntry>(),
+    seriesEntriesScratch: [],
     displayMin: 0,
     displayMax: 0,
     targetMin: 0,
@@ -210,6 +276,7 @@ export function createEngineState(
     lineCaches: new Map<string, LineCacheSlot>(),
     gridLayer: createGridLayerSlot<SkPicture>(),
     gridLayerCache: createSkiaCache(),
+    candleCache: createCandleCacheSlot(),
 
     scrubAmount: 0,
     lastHover: null,

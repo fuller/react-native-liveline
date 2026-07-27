@@ -129,6 +129,69 @@ All notable changes to this project will be documented in this file.
   to per-candle drawing while scrub-dimming is active, since that gives each
   candle its own alpha that can't be expressed as one paint-level alpha for
   a combined path.
+- **Closed-candle geometry cached with translate-based scroll** — the
+  body+wick paths for every closed candle are now built once into four
+  combined paths (bull/bear × body/wick) and re-positioned each frame with a
+  single native translate, rebuilding only when the candle data, Y-range,
+  candle width, window, or canvas size actually change. Between candle
+  closes (most frames) this replaces a full geometry rebuild — for wide
+  candles each body is a rounded rect, nine native path calls apiece — with
+  four fill/stroke calls against cached paths. The live candle is still
+  drawn fresh every frame, so tick animation is unchanged, and colors are
+  never baked into the cached geometry, so accent-blend and line-mode-morph
+  color animation keep working on top of it. Mirrors the line spline cache
+  above, sharing its lazy-cache mechanism (`draw/pathCache.ts`). The cache
+  sits out entirely during scrub-dimming, candle-width morph, mid
+  line-mode-morph, and the reveal OHLC-collapse window, all of which reshape
+  every candle per frame. No visual change.
+- **Live-candle OHLC lerp snaps to its target** — the live candle's
+  open/high/low/close smoothing had no exact-snap step, unlike every other
+  lerp in the engine, so it approached its target asymptotically without ever
+  reaching it. Since the visible Y-range is computed across all candles
+  including the live one, that left the range drifting by an epsilon every
+  frame whenever the live candle held the window extreme — which invalidated
+  the candle geometry cache above on every frame in exactly the case it
+  matters most. Now snapped sub-pixel, matching the existing line/value snap
+  thresholds. Invisible at any zoom level.
+- **Per-frame allocations removed from the multi-series step** — the
+  hidden-series lookup built a fresh `Set` every frame where an array scan
+  over a handful of ids is cheaper, and the stale-entry cleanup allocated a
+  container every frame to do nothing in the steady state; the cleanup is now
+  guarded on a size comparison that skips it entirely unless a series was
+  actually removed. The per-frame smoothed-values map is reused across frames
+  rather than reallocated.
+- **Line path cache no longer pays for the work it exists to skip** — the
+  spline decimation and the per-point screen-coordinate array were built
+  *before* the cache was consulted, then discarded on every cache hit (the
+  hit path reads only the two live-tail points). The cheap key check now runs
+  first, so a hit skips decimation entirely and allocates two points instead
+  of up to two per pixel of chart width — per series, per frame. The key
+  comparison lives in one place shared by both the early check and the
+  rebuild path, so the fast and slow paths can't drift apart, and the
+  assembled output is verified identical between them.
+- **Orderbook charts can now go quiescent** — the orderbook's label spawn,
+  drift, and expiry ran off raw wall-clock `dt` rather than the pause-scaled
+  `dt` the rest of the engine uses, so a chart with `orderbookData` re-recorded
+  forever even when fully paused and was excluded from the quiescence check
+  outright. It now uses the same pause-scaled delta as every other animation,
+  matching what candle mode already did. Orderbook label flow freezes at full
+  pause, consistent with every other pause-gated animation.
+- **Per-frame point arrays pooled** — the visible-window filter allocated a
+  fresh array per pipeline (and per series in multi-series mode) every frame,
+  plus one object per visible series for the draw list. These now refill
+  reusable buffers held on engine state, pruned when a series is removed. The
+  candle-mode reverse-morph stash copies at the stash point rather than
+  aliasing the frame's buffer.
+
+### Internal
+
+- Shared helpers extracted for logic that had been copied across modules:
+  cosine ease-in-out and log-space interpolation (4 sites), the reveal
+  smoothstep ramp (3 sites, each of which also allocated a closure per frame),
+  the scrub-fade opacity curve (3 sites), the left-edge fade gradient (4
+  sites), and the visible-window point filter (4 sites). No behavior change —
+  these were byte-identical copies whose tuning constants could silently
+  diverge.
 
 - **Peer dependency ranges tightened**: `react-native-reanimated` now requires
   `>=4.0.0` (was `>=3.16.0`, which was never actually verified — this library

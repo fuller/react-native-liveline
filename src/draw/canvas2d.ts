@@ -210,7 +210,17 @@ export interface SkiaCache {
   fontMetricsCount: number;
 }
 
+// The 'worklet' directive is required even though this just returns a plain
+// literal: engine/state.ts's createEngineState (itself a worklet, called
+// lazily from the UI-thread frame callback) calls this directly to build
+// `gridLayerCache`. A worklet calling a non-worklet function only works on
+// the JS thread — on the UI thread the callee was never serialized into the
+// worklet runtime, so the call resolves to a non-function and throws
+// "Object is not a function" in release/Hermes builds specifically (dev
+// builds tolerated it). See useLivelineEngine.ts's `createSkiaCache()` call
+// for the JS-thread-only call site that doesn't need this.
 export function createSkiaCache(): SkiaCache {
+  'worklet';
   return {
     pool: null,
     colors: {},

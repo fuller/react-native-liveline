@@ -2,6 +2,8 @@ import type { LivelinePoint, ChartLayout, Padding, HoverPoint } from '../types';
 import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
 import { interpolateAtTime } from '../math/interpolate';
+import { easeInOutCos, logLerp } from '../math/ease';
+import { filterVisiblePoints } from '../math/visible';
 import type { EngineConfigStep } from './types';
 import {
   ADAPTIVE_SPEED_BOOST,
@@ -60,12 +62,11 @@ export function updateWindowTransition(
     wt.rangeFromMax = displayMax;
     const targetRightEdge = now + cfg.windowSecs * buffer;
     const targetLeftEdge = targetRightEdge - cfg.windowSecs;
-    const targetVisible: LivelinePoint[] = [];
-    for (const p of points) {
-      if (p.time >= targetLeftEdge - 2 && p.time <= targetRightEdge) {
-        targetVisible.push(p);
-      }
-    }
+    const targetVisible = filterVisiblePoints(
+      points,
+      targetLeftEdge,
+      targetRightEdge
+    );
     if (targetVisible.length > 0) {
       const targetRange = computeRange(
         targetVisible,
@@ -86,11 +87,9 @@ export function updateWindowTransition(
     const elapsed = now_ms - wt.startMs;
     const duration = WINDOW_TRANSITION_MS;
     const t = Math.min(elapsed / duration, 1);
-    const eased = (1 - Math.cos(t * Math.PI)) / 2;
+    const eased = easeInOutCos(t);
     windowTransProgress = eased;
-    const logFrom = Math.log(wt.from);
-    const logTo = Math.log(wt.to);
-    resultWindow = Math.exp(logFrom + (logTo - logFrom) * eased);
+    resultWindow = logLerp(wt.from, wt.to, eased);
     if (t >= 1) {
       resultWindow = cfg.windowSecs;
       wt.startMs = 0;

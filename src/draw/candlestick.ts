@@ -1,7 +1,12 @@
 import type { ChartLayout, LivelinePalette, CandlePoint } from '../types';
 import { rgbColor } from '../math/color';
-import type { SkColor } from '@shopify/react-native-skia';
+import type { SkColor, SkPath } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
+import {
+  updateCandleCache,
+  type CandleCacheRef,
+  type CachePath,
+} from './candleCache';
 
 export type { CandlePoint } from '../types';
 
@@ -135,7 +140,20 @@ export function drawCandlesticks(
   liveAlpha: number = 1,
   liveBullBlend: number = -1,
   accentColor?: string,
-  accentBlend: number = 0
+  accentBlend: number = 0,
+  /** Cross-frame cache for closed-candle body+wick geometry (see
+   * draw/candleCache.ts). Only consulted along the canBatch fast path —
+   * caller must not pass this during scrub-dimming (canBatch is already
+   * false then), candle-width morph, mid line-mode-morph, or the reveal
+   * OHLC-collapse window; see draw/index.ts's drawCandleFrame for where
+   * those bypasses are wired. */
+  cache?: CandleCacheRef,
+  /** Real SkPath factory, supplied by the caller so this Skia-adjacent-but-
+   * import-free module never imports the real `Skia` object itself (this
+   * file is exercised directly by candlestick.test.ts under jest, which
+   * can't parse @shopify/react-native-skia's ESM build — see draw/index.ts,
+   * which owns the runtime import, same as line.ts does for the line cache). */
+  makePath?: () => CachePath
 ) {
   'worklet';
   if (candles.length === 0) return;
@@ -180,54 +198,124 @@ export function drawCandlesticks(
     ctx.lineCap = 'round';
     ctx.lineWidth = wickW;
 
-    for (const isBull of [true, false] as const) {
-      const groupColor = isBull ? bullColor : bearColor;
+    const cacheReady =
+      cache !== undefined &&
+      makePath !== undefined &&
+      updateCandleCache(
+        cache.slot,
+        makePath,
+        layout,
+        candles,
+        candleWidthSecs,
+        liveTime,
+        bodyW,
+        radius,
+        cache.dataSource,
+        cache.candlesRev
+      );
 
-      let bodyCount = 0;
-      ctx.beginPath();
+    if (cacheReady) {
+      // Closed-candle geometry came from the cache (built once, translated
+      // cross-frame — see draw/candleCache.ts) instead of being rebuilt by
+      // the loops below. Still need to find the live candle, which is never
+      // part of the cache and is drawn separately further down.
       for (const c of candles) {
         if (c.time === liveTime) {
           liveCandle = c;
-          continue;
+          break;
         }
-        if (c.close >= c.open !== isBull) continue;
-        const cx = toX(c.time + candleWidthSecs / 2);
-        if (cx + halfBody < padL || cx - halfBody > padR) continue;
-        const bodyTop = toY(Math.max(c.open, c.close));
-        const bodyBottom = toY(Math.min(c.open, c.close));
-        bodyRect(cx, bodyTop, Math.max(1, bodyBottom - bodyTop));
-        bodyCount++;
       }
-      if (bodyCount > 0) {
-        ctx.fillStyle = groupColor;
+      const slot = cache!.slot;
+      const dx = layout.toX(slot.tRef) - slot.xRefAtBuild;
+      // save()/restore() would only be scoping this translate — replace
+      // with the inverse translate instead, since save() pushes a 13-field
+      // snapshot object plus a lineDash.slice() array (two allocations) on
+      // this hot per-frame draw path for no benefit: the only ctx state
+      // mutated below is fillStyle/strokeStyle, which the legacy fallback
+      // branch below doesn't save/restore either, and the live-candle block
+      // further down re-sets both before use.
+      if (dx !== 0) ctx.translate(dx, 0);
+      if (slot.hasBullBodies) {
+        ctx.beginPathFrom(slot.bullBodies as SkPath);
+        ctx.fillStyle = bullColor;
         ctx.fill();
       }
-
-      let wickCount = 0;
-      ctx.beginPath();
-      for (const c of candles) {
-        if (c.time === liveTime) continue;
-        if (c.close >= c.open !== isBull) continue;
-        const cx = toX(c.time + candleWidthSecs / 2);
-        if (cx + halfBody < padL || cx - halfBody > padR) continue;
-        const bodyTop = toY(Math.max(c.open, c.close));
-        const bodyBottom = toY(Math.min(c.open, c.close));
-        const wickTop = toY(c.high);
-        const wickBottom = toY(c.low);
-        if (bodyTop - wickTop > 0.5) {
-          ctx.moveTo(cx, bodyTop);
-          ctx.lineTo(cx, wickTop);
-          wickCount++;
-        }
-        if (wickBottom - bodyBottom > 0.5) {
-          ctx.moveTo(cx, bodyBottom);
-          ctx.lineTo(cx, wickBottom);
-          wickCount++;
-        }
-      }
-      if (wickCount > 0) {
-        ctx.strokeStyle = groupColor;
+      if (slot.hasBullWicks) {
+        ctx.beginPathFrom(slot.bullWicks as SkPath);
+        ctx.strokeStyle = bullColor;
         ctx.stroke();
+      }
+      if (slot.hasBearBodies) {
+        ctx.beginPathFrom(slot.bearBodies as SkPath);
+        ctx.fillStyle = bearColor;
+        ctx.fill();
+      }
+      if (slot.hasBearWicks) {
+        ctx.beginPathFrom(slot.bearWicks as SkPath);
+        ctx.strokeStyle = bearColor;
+        ctx.stroke();
+      }
+      if (dx !== 0) ctx.translate(-dx, 0);
+      // Release the cache-owned path adopted by the last beginPathFrom()
+      // above back to the pooled path. Every other exit from this function
+      // passes through a ctx.beginPath() in the live-candle block below —
+      // but that block is skipped when there's no live candle, or when it's
+      // off-screen, which would otherwise leave a cache-owned path current
+      // on the ctx. Any downstream moveTo/rect without a preceding
+      // beginPath would then append into — and permanently corrupt — that
+      // cached path (it's only ever rewind()'d on a key miss). See the
+      // beginPathFrom contract in canvas2d.ts.
+      ctx.beginPath();
+    } else {
+      for (const isBull of [true, false] as const) {
+        const groupColor = isBull ? bullColor : bearColor;
+
+        let bodyCount = 0;
+        ctx.beginPath();
+        for (const c of candles) {
+          if (c.time === liveTime) {
+            liveCandle = c;
+            continue;
+          }
+          if (c.close >= c.open !== isBull) continue;
+          const cx = toX(c.time + candleWidthSecs / 2);
+          if (cx + halfBody < padL || cx - halfBody > padR) continue;
+          const bodyTop = toY(Math.max(c.open, c.close));
+          const bodyBottom = toY(Math.min(c.open, c.close));
+          bodyRect(cx, bodyTop, Math.max(1, bodyBottom - bodyTop));
+          bodyCount++;
+        }
+        if (bodyCount > 0) {
+          ctx.fillStyle = groupColor;
+          ctx.fill();
+        }
+
+        let wickCount = 0;
+        ctx.beginPath();
+        for (const c of candles) {
+          if (c.time === liveTime) continue;
+          if (c.close >= c.open !== isBull) continue;
+          const cx = toX(c.time + candleWidthSecs / 2);
+          if (cx + halfBody < padL || cx - halfBody > padR) continue;
+          const bodyTop = toY(Math.max(c.open, c.close));
+          const bodyBottom = toY(Math.min(c.open, c.close));
+          const wickTop = toY(c.high);
+          const wickBottom = toY(c.low);
+          if (bodyTop - wickTop > 0.5) {
+            ctx.moveTo(cx, bodyTop);
+            ctx.lineTo(cx, wickTop);
+            wickCount++;
+          }
+          if (wickBottom - bodyBottom > 0.5) {
+            ctx.moveTo(cx, bodyBottom);
+            ctx.lineTo(cx, wickBottom);
+            wickCount++;
+          }
+        }
+        if (wickCount > 0) {
+          ctx.strokeStyle = groupColor;
+          ctx.stroke();
+        }
       }
     }
   } else {

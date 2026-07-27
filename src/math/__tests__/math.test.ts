@@ -1,4 +1,7 @@
 import { lerp } from '../lerp';
+import { easeInOutCos, logLerp } from '../ease';
+import { smoothstepRamp } from '../ramp';
+import { filterVisiblePoints, filterVisiblePointsInto } from '../visible';
 import { rgbColor } from '../color';
 import { computeRange } from '../range';
 import { detectMomentum } from '../momentum';
@@ -42,6 +45,172 @@ describe('lerp', () => {
     let v = 0;
     for (let i = 0; i < 200; i++) v = lerp(v, 100, 0.08, 16.67);
     expect(v).toBeCloseTo(100, 1);
+  });
+});
+
+// -- easeInOutCos --
+
+describe('easeInOutCos', () => {
+  it('starts at 0 and ends at 1', () => {
+    expect(easeInOutCos(0)).toBeCloseTo(0);
+    expect(easeInOutCos(1)).toBeCloseTo(1);
+  });
+
+  it('sits at 0.5 for the midpoint', () => {
+    expect(easeInOutCos(0.5)).toBeCloseTo(0.5);
+  });
+
+  it('is monotonically increasing over [0, 1]', () => {
+    let prev = -Infinity;
+    for (let t = 0; t <= 1; t += 0.05) {
+      const v = easeInOutCos(t);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it('has zero slope at both endpoints (ease-in-out, not linear)', () => {
+    const nearStart = easeInOutCos(0.02);
+    const nearEnd = easeInOutCos(0.98);
+    // Linear would give 0.02 / 0.98 — cosine easing stays flatter near the ends.
+    expect(nearStart).toBeLessThan(0.02);
+    expect(1 - nearEnd).toBeLessThan(0.02);
+  });
+});
+
+// -- logLerp --
+
+describe('logLerp', () => {
+  it('returns `from` at t=0 and `to` at t=1', () => {
+    expect(logLerp(10, 40, 0)).toBeCloseTo(10);
+    expect(logLerp(10, 40, 1)).toBeCloseTo(40);
+  });
+
+  it('interpolates in log space, not linear space', () => {
+    // Doubling and halving should feel symmetric: sqrt(from*to) at t=0.5.
+    const mid = logLerp(10, 40, 0.5);
+    expect(mid).toBeCloseTo(Math.sqrt(10 * 40));
+    expect(mid).not.toBeCloseTo((10 + 40) / 2);
+  });
+
+  it('handles from === to as a constant', () => {
+    expect(logLerp(25, 25, 0.5)).toBeCloseTo(25);
+  });
+});
+
+// -- smoothstepRamp --
+
+describe('smoothstepRamp', () => {
+  it('clamps to 0 below the start threshold', () => {
+    expect(smoothstepRamp(0, 0.15, 0.7)).toBe(0);
+    expect(smoothstepRamp(-1, 0.15, 0.7)).toBe(0);
+  });
+
+  it('clamps to 1 above the end threshold', () => {
+    expect(smoothstepRamp(0.7, 0.15, 0.7)).toBe(1);
+    expect(smoothstepRamp(2, 0.15, 0.7)).toBe(1);
+  });
+
+  it('is 0.5 at the midpoint of the ramp', () => {
+    expect(smoothstepRamp(0.5, 0, 1)).toBeCloseTo(0.5);
+  });
+
+  it('is monotonically increasing across the ramp', () => {
+    let prev = -Infinity;
+    for (let r = 0; r <= 1; r += 0.05) {
+      const v = smoothstepRamp(r, 0.15, 0.7);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+});
+
+// -- filterVisiblePoints --
+
+describe('filterVisiblePoints', () => {
+  const pts = (times: number[]): LivelinePoint[] =>
+    times.map((t) => ({ time: t, value: t }));
+
+  it('keeps points strictly within [leftEdge, rightEdge]', () => {
+    const result = filterVisiblePoints(pts([0, 5, 10, 15, 20]), 5, 15);
+    expect(result.map((p) => p.time)).toEqual([5, 10, 15]);
+  });
+
+  it('includes points up to 2 units before leftEdge (the float-rounding epsilon)', () => {
+    const result = filterVisiblePoints(pts([3, 4, 5]), 5, 10);
+    expect(result.map((p) => p.time)).toEqual([3, 4, 5]);
+  });
+
+  it('excludes points more than 2 units before leftEdge', () => {
+    const result = filterVisiblePoints(pts([2.9, 3]), 5, 10);
+    expect(result.map((p) => p.time)).toEqual([3]);
+  });
+
+  it('excludes points after rightEdge', () => {
+    const result = filterVisiblePoints(pts([9, 10, 11]), 0, 10);
+    expect(result.map((p) => p.time)).toEqual([9, 10]);
+  });
+
+  it('returns a new array, not the input reference', () => {
+    const input = pts([1, 2, 3]);
+    const result = filterVisiblePoints(input, 0, 10);
+    expect(result).not.toBe(input);
+  });
+
+  it('returns an empty array when nothing is visible', () => {
+    expect(filterVisiblePoints(pts([100, 200]), 0, 10)).toEqual([]);
+  });
+
+  it('handles an empty input array', () => {
+    expect(filterVisiblePoints([], 0, 10)).toEqual([]);
+  });
+});
+
+// -- filterVisiblePointsInto --
+
+describe('filterVisiblePointsInto', () => {
+  const pts = (times: number[]): LivelinePoint[] =>
+    times.map((t) => ({ time: t, value: t }));
+
+  it('produces the same results as the allocating filterVisiblePoints', () => {
+    const cases: [number[], number, number][] = [
+      [[0, 5, 10, 15, 20], 5, 15],
+      [[3, 4, 5], 5, 10],
+      [[2.9, 3], 5, 10],
+      [[9, 10, 11], 0, 10],
+      [[100, 200], 0, 10],
+      [[], 0, 10],
+    ];
+    for (const [times, leftEdge, rightEdge] of cases) {
+      const out: LivelinePoint[] = [];
+      filterVisiblePointsInto(pts(times), leftEdge, rightEdge, out);
+      expect(out).toEqual(filterVisiblePoints(pts(times), leftEdge, rightEdge));
+    }
+  });
+
+  it('reuses the provided array instead of allocating a new one', () => {
+    const out: LivelinePoint[] = [];
+    filterVisiblePointsInto(pts([0, 5, 10, 15, 20]), 5, 15, out);
+    const sameArray = out;
+    filterVisiblePointsInto(pts([1, 2, 3]), 0, 10, out);
+    expect(out).toBe(sameArray);
+  });
+
+  it('truncates stale entries left over from a longer previous frame', () => {
+    const out: LivelinePoint[] = [];
+    filterVisiblePointsInto(pts([0, 5, 10, 15, 20]), 5, 15, out);
+    expect(out.length).toBe(3);
+    filterVisiblePointsInto(pts([0, 100]), 5, 15, out);
+    expect(out.length).toBe(0);
+  });
+
+  it('overwrites pre-existing (garbage) contents in the output array', () => {
+    const out: LivelinePoint[] = [
+      { time: -1, value: -1 },
+      { time: -2, value: -2 },
+    ];
+    filterVisiblePointsInto(pts([1, 2, 3]), 0, 10, out);
+    expect(out.map((p) => p.time)).toEqual([1, 2, 3]);
   });
 });
 

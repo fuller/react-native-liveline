@@ -57,11 +57,12 @@ function toStepConfig(
   config: Omit<EngineConfig, 'hasOnHover' | 'noMotion'>,
   hasOnHover: boolean,
   noMotion: boolean,
-  dataRev: number
+  dataRev: number,
+  candlesRev: number
 ): EngineConfigStep {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to omit them below
   const { data, candles, ...rest } = config;
-  return { ...rest, hasOnHover, noMotion, dataRev };
+  return { ...rest, hasOnHover, noMotion, dataRev, candlesRev };
 }
 
 /** A 0×0 picture used before the first frame is recorded. */
@@ -110,7 +111,7 @@ export function useLivelineEngine(
   // exists to avoid. Everything else in EngineConfig is small and stays
   // fully mirrored every commit, same as before.
   const cfg = useSharedValue<EngineConfigStep>(
-    toStepConfig(config, !!onHover, reduceMotion, 0)
+    toStepConfig(config, !!onHover, reduceMotion, 0, 0)
   );
   // Seed the buffers (and the "previous" refs the mirror effect diffs
   // against) with the actual initial data/candles, copied once — otherwise
@@ -126,18 +127,38 @@ export function useLivelineEngine(
   // Bumped whenever the data buffer actually changes (delta or reset) —
   // consumed by the UI-thread line path cache as an exact data identity.
   const dataRevRef = useRef(0);
+  // Same idea for the candles buffer — consumed by the UI-thread candle
+  // cache. A revision counter (rather than the count/first/last-time
+  // heuristic the cache also tracks) is what catches a consumer revising an
+  // already-closed candle in place (a late trade correcting the previous
+  // bar's OHLC): the heuristic fields don't move, but this does.
+  const candlesRevRef = useRef(0);
 
   // Mirror the latest props every commit — the frame worklet reads cfg.value.
   useEffect(() => {
     const { data, candles } = config;
-    // Diff first so the mirrored config carries the up-to-date revision.
+    // Diff first so the mirrored config carries the up-to-date revisions —
+    // both dataRev and candlesRev must be bumped (when their delta isn't
+    // 'same') before cfg.value is written below, so a commit that revises
+    // data and/or candles is visible to the UI-thread caches immediately,
+    // not one frame late.
     const dataDelta = computeDelta(prevDataRef.current, data, pointsEqual);
     if (dataDelta.kind !== 'same') dataRevRef.current++;
+
+    const candlesNext = candles ?? EMPTY_CANDLES;
+    const candlesDelta = computeDelta(
+      prevCandlesRef.current,
+      candlesNext,
+      candlesEqual
+    );
+    if (candlesDelta.kind !== 'same') candlesRevRef.current++;
+
     cfg.value = toStepConfig(
       config,
       !!onHover,
       reduceMotion,
-      dataRevRef.current
+      dataRevRef.current,
+      candlesRevRef.current
     );
 
     if (dataDelta.kind === 'delta') {
@@ -154,12 +175,6 @@ export function useLivelineEngine(
     }
     prevDataRef.current = data;
 
-    const candlesNext = candles ?? EMPTY_CANDLES;
-    const candlesDelta = computeDelta(
-      prevCandlesRef.current,
-      candlesNext,
-      candlesEqual
-    );
     if (candlesDelta.kind === 'delta') {
       const { drop, keep, tail } = candlesDelta;
       candlesBuf.modify((arr) => {
