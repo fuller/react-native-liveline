@@ -125,21 +125,42 @@ traces — Hermes-only (worklet JS) **51-53%**, Skia-only **34%**, both 9-10%. T
 is roughly half JS interpretation, so Skia call-count tuning has limited headroom.
 Debug inflates the Hermes share — treat 51% as an upper bound.
 
-### Android — simpleperf (UNVERIFIED: no SDK on this machine)
+### Android — simpleperf (verified)
 
-No `adb`/`emulator`/`ANDROID_HOME` here as of 2026-07-27, so the below is written
-from the tool docs and has **not** been run. Verify before trusting it. A
-`liveline_test` AVD dir and prebuilt debug+release APKs exist under
-`example/android/app/build/outputs/apk/`.
+SDK is at `/opt/homebrew/share/android-commandlinetools` (exported from
+`~/.zshenv`). Package is **`liveline.example`** — no `com.` prefix. Emulator AVD
+is `liveline_test`; `simpleperf` ships on-device at `/system/bin`, no NDK push.
 
 ```bash
-PID=$(adb shell pidof com.liveline.example)
-adb shell simpleperf record -p $PID --call-graph fp --duration 20 \
-  -o /data/local/tmp/perf.data
-adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso,symbol
+adb reverse tcp:8081 tcp:8083           # dev build -> host Metro
+adb shell monkey -p liveline.example -c android.intent.category.LAUNCHER 1
+
+adb root && adb shell setprop security.perf_harden 0   # else: Permission denied
+PID=$(adb shell pidof liveline.example | tr -d '\r')
+adb shell simpleperf record -e cpu-clock -p $PID --call-graph fp \
+  --duration 20 -o /data/local/tmp/perf.data
+adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso   # or comm, symbol
 ```
 
-Needs unstripped `.so`/symfs for readable Skia frames. Perfetto covers the other
-half (frame timeline, thread states) and `adb shell dumpsys gfxinfo <pkg>
-framestats` is the cheap frame-time histogram. Part 2's CPU A/B ports directly —
-read `utime+stime` from `/proc/<pid>/stat` instead of `ps -o cputime`.
+Three traps, all hit on first run:
+- **`-e cpu-clock` is required on emulators** — the default `cpu-cycles` needs a
+  hardware PMU: "Event type 'cpu-cycles' is not supported on the device".
+- **`perf_harden` blocks `perf_event_open`** — needs `adb root` + the setprop
+  above. Works on `google_apis` images (not `_playstore`).
+- Sort key for threads is **`comm`**, not `thread` (silently returns nothing).
+
+`--sort dso` maps straight to subsystem, which is cleaner than iOS's regex
+approach. Reference (2026-07-27, emulator, Debug, 89287 samples): libhermesvm
+**45%**, librnskia **9.6%**, kernel 11.5%, libhwui 3.2%, libworklets 2.1%. By
+thread: main 44.8%, `mqt_v_js` 35.6%, RenderThread 14.0%, hades 4.5%.
+Corroborates iOS — Hermes dominates, Skia is a minority.
+
+Notable: the top `librnskia` symbols are **not** rasterization, they're JSI
+property dispatch — `__hash_table::find(string)` 2.6%, `RuntimeAwareCache::get`
+1.3%, `JsiHostObject::get` 1.0%. ~5% of total process CPU is string-keyed
+lookup resolving Skia methods across JSI, which is why reducing the *number* of
+JSI calls (pooling, batching) pays more than tuning the Skia work itself.
+
+Perfetto covers frame timeline/thread states; `adb shell dumpsys gfxinfo <pkg>`
+is the cheap frame histogram (cumulative — reset first). Part 2's CPU A/B ports
+directly: read `utime+stime` from `/proc/<pid>/stat` instead of `ps -o cputime`.
