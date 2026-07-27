@@ -113,6 +113,16 @@ export const SIZE_VARIANTS: { w: number; h: number; label: string }[] = [
   { w: 120, h: 80, label: '120×80' },
 ];
 
+/** Accent swatches offered by the global picker — first is the library default. */
+export const ACCENT_COLORS = [
+  '#3b82f6', // blue (default)
+  '#ef4444', // red
+  '#22c55e', // green
+  '#f59e0b', // amber
+  '#8b5cf6', // violet
+  '#ec4899', // pink
+];
+
 export const MULTI_COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b'];
 export const MULTI_LABELS = ['Yes', 'No', 'Maybe', 'Other'];
 export const MULTI_BIASES = [0.51, 0.49, 0.5, 0.48];

@@ -30,6 +30,7 @@ export function DashboardSection() {
   const volatility: Volatility = 'normal';
 
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
+  const lastValueRef = useRef(100);
 
   const startLive = useCallback(() => {
     clearInterval(intervalRef.current);
@@ -43,13 +44,14 @@ export function DashboardSection() {
     }
     setData(seed);
     setValue(v);
+    lastValueRef.current = v;
 
     intervalRef.current = setInterval(() => {
+      const now2 = Date.now() / 1000;
+      const pt = generatePoint(lastValueRef.current, now2, volatility);
+      lastValueRef.current = pt.value;
+      setValue(pt.value);
       setData((prev) => {
-        const now2 = Date.now() / 1000;
-        const lastVal = prev.length > 0 ? prev[prev.length - 1]!.value : 100;
-        const pt = generatePoint(lastVal, now2, volatility);
-        setValue(pt.value);
         const next = [...prev, pt];
         return next.length > 500 ? next.slice(-500) : next;
       });
@@ -94,7 +96,7 @@ export function DashboardSection() {
           <View key={size.label}>
             <Text
               style={{
-                fontSize: 10,
+                fontSize: 12,
                 color: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)',
                 marginBottom: 4,
               }}

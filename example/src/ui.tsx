@@ -2,17 +2,9 @@
 import { Pressable, Text, View } from 'react-native';
 import type { ReactNode } from 'react';
 import { useAppTheme } from './AppTheme';
+import { CONTROL_HEIGHT, CONTROL_RADIUS, PILL_HEIGHT, fg } from './uiStyle';
 
 const ACCENT = '#3b82f6';
-
-export const CONTROL_HEIGHT = 24;
-export const CONTROL_RADIUS = 5;
-export const PILL_HEIGHT = 28;
-
-export function fg(isDark: boolean, alpha: number): string {
-  const base = isDark ? '255,255,255' : '0,0,0';
-  return `rgba(${base},${alpha})`;
-}
 
 export function PageBg({ children }: { children: ReactNode }) {
   const { isDark } = useAppTheme();
@@ -141,7 +133,7 @@ export function Btn({
     >
       <Text
         style={{
-          fontSize: 11,
+          fontSize: 12,
           lineHeight: 15,
           color: active ? ACCENT : fg(isDark, 0.45),
         }}
@@ -177,7 +169,7 @@ export function Toggle({
     >
       <Text
         style={{
-          fontSize: 11,
+          fontSize: 12,
           lineHeight: 15,
           color: on ? ACCENT : fg(isDark, 0.35),
         }}
@@ -236,7 +228,7 @@ export function StatusBar({ items }: { items: string[] }) {
       }}
     >
       {items.map((it) => (
-        <Text key={it} style={{ fontSize: 11, color: fg(isDark, 0.25) }}>
+        <Text key={it} style={{ fontSize: 12, color: fg(isDark, 0.25) }}>
           {it}
         </Text>
       ))}

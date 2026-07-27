@@ -2,9 +2,12 @@
 import { useState } from 'react';
 import { Pressable, SafeAreaView, ScrollView, Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { ACCENT_COLORS, AppThemeProvider, useAppTheme } from './AppTheme';
+import { AppThemeProvider, useAppTheme } from './AppTheme';
+import { ACCENT_COLORS } from './demoData';
+import { FpsCounter } from './FpsCounter';
 import { StressButton } from './StressButton';
-import { Btn, fg, PageBg, Pill } from './ui';
+import { Btn, PageBg, Pill } from './ui';
+import { fg } from './uiStyle';
 import { BasicLineSection } from './sections/BasicLineSection';
 import { CandlestickSection } from './sections/CandlestickSection';
 import { CryptoSection } from './sections/CryptoSection';
@@ -55,7 +58,10 @@ function TopBar() {
         >
           Liveline
         </Text>
-        <StressButton />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <FpsCounter />
+          <StressButton />
+        </View>
       </View>
 
       <View

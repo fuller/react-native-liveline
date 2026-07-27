@@ -1,5 +1,5 @@
 /* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived, mirrors upstream web demo controls */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Text, View } from 'react-native';
 import { Liveline } from '@ajfuller/react-native-liveline';
 import type {
@@ -19,7 +19,6 @@ import {
 import {
   Btn,
   ChartFrame,
-  fg,
   Label,
   ScreenTitle,
   Section,
@@ -27,10 +26,245 @@ import {
   StatusBar,
   Toggle,
 } from '../ui';
+import { fg } from '../uiStyle';
 
 type Scenario = 'loading' | 'loading-hold' | 'live' | 'empty';
 
 const DEGEN_SCALES = [0.5, 1, 2, 4];
+
+interface DegenOptions {
+  scale: number;
+  downMomentum: boolean;
+}
+
+/**
+ * "Features" + "Degen" toggle panels — pulled out of BasicLineSection to keep
+ * it readable. Memoized: every prop here is a stable useState setter or a
+ * boolean/enum that only changes on user input, never on the per-tick
+ * setData/setValue calls driving the chart above, so this actually skips
+ * re-rendering on ticks instead of just relocating the render.
+ */
+const FeatureControls = memo(function FeatureControlsImpl({
+  grid,
+  setGrid,
+  fill,
+  setFill,
+  badge,
+  setBadge,
+  badgeVariant,
+  setBadgeVariant,
+  momentum,
+  setMomentum,
+  pulse,
+  setPulse,
+  scrub,
+  setScrub,
+  exaggerate,
+  setExaggerate,
+  degen,
+  setDegen,
+  degenDown,
+  setDegenDown,
+  degenScale,
+  setDegenScale,
+}: {
+  grid: boolean;
+  setGrid: (v: boolean) => void;
+  fill: boolean;
+  setFill: (v: boolean) => void;
+  badge: boolean;
+  setBadge: (v: boolean) => void;
+  badgeVariant: BadgeVariant;
+  setBadgeVariant: (v: BadgeVariant) => void;
+  momentum: boolean;
+  setMomentum: (v: boolean) => void;
+  pulse: boolean;
+  setPulse: (v: boolean) => void;
+  scrub: boolean;
+  setScrub: (v: boolean) => void;
+  exaggerate: boolean;
+  setExaggerate: (v: boolean) => void;
+  degen: boolean;
+  setDegen: (v: boolean) => void;
+  degenDown: boolean;
+  setDegenDown: (v: boolean) => void;
+  degenScale: number;
+  setDegenScale: (v: number) => void;
+}) {
+  return (
+    <>
+      <Section label="Features">
+        <Toggle on={grid} onToggle={setGrid}>
+          Grid
+        </Toggle>
+        <Toggle on={fill} onToggle={setFill}>
+          Fill
+        </Toggle>
+        <Toggle on={badge} onToggle={setBadge}>
+          Badge
+        </Toggle>
+        <Toggle on={momentum} onToggle={setMomentum}>
+          Momentum
+        </Toggle>
+        <Toggle on={pulse} onToggle={setPulse}>
+          Pulse
+        </Toggle>
+        <Toggle on={scrub} onToggle={setScrub}>
+          Scrub
+        </Toggle>
+        <Toggle on={exaggerate} onToggle={setExaggerate}>
+          Exaggerate
+        </Toggle>
+        <Sep />
+        <Label text="Badge style">
+          <Btn
+            active={badgeVariant === 'default'}
+            onPress={() => setBadgeVariant('default')}
+          >
+            Default
+          </Btn>
+          <Btn
+            active={badgeVariant === 'minimal'}
+            onPress={() => setBadgeVariant('minimal')}
+          >
+            Minimal
+          </Btn>
+        </Label>
+      </Section>
+
+      <Section label="Degen">
+        <Toggle on={degen} onToggle={setDegen}>
+          Enable
+        </Toggle>
+        {degen && (
+          <>
+            <Sep />
+            <Toggle on={degenDown} onToggle={setDegenDown}>
+              Down momentum
+            </Toggle>
+            <Sep />
+            <Label text="Scale">
+              {DEGEN_SCALES.map((s) => (
+                <Btn
+                  key={s}
+                  active={degenScale === s}
+                  onPress={() => setDegenScale(s)}
+                >
+                  {s}x
+                </Btn>
+              ))}
+            </Label>
+          </>
+        )}
+      </Section>
+    </>
+  );
+});
+
+/**
+ * Mini-chart grid at several fixed sizes — ported from dev/main.tsx lines 285-326.
+ * Deliberately NOT memoized: `data` and `value` change on every simulated
+ * tick, so a React.memo wrapper here would fail its shallow comparison every
+ * render anyway and just add a wasted check.
+ */
+function SizeVariants({
+  isDark,
+  data,
+  value,
+  theme,
+  accent,
+  windowSecs,
+  loading,
+  paused,
+  badge,
+  badgeVariant,
+  momentum,
+  fill,
+  grid,
+  scrub,
+  pulse,
+  exaggerate,
+  degenOpts,
+}: {
+  isDark: boolean;
+  data: LivelinePoint[];
+  value: number;
+  theme: 'dark' | 'light';
+  accent: string;
+  windowSecs: number;
+  loading: boolean;
+  paused: boolean;
+  badge: boolean;
+  badgeVariant: BadgeVariant;
+  momentum: boolean;
+  fill: boolean;
+  grid: boolean;
+  scrub: boolean;
+  pulse: boolean;
+  exaggerate: boolean;
+  degenOpts: DegenOptions | undefined;
+}) {
+  return (
+    <>
+      <Text
+        style={{
+          fontSize: 12,
+          color: fg(isDark, 0.3),
+          marginTop: 24,
+          marginBottom: 8,
+        }}
+      >
+        Size variants
+      </Text>
+      <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>
+        {SIZE_VARIANTS.map((size) => (
+          <View key={size.label}>
+            <Text
+              style={{
+                fontSize: 12,
+                color: fg(isDark, 0.25),
+                marginBottom: 4,
+              }}
+            >
+              {size.label}
+            </Text>
+            <View
+              style={{
+                width: size.w,
+                height: size.h,
+                backgroundColor: fg(isDark, 0.02),
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: fg(isDark, 0.06),
+                overflow: 'hidden',
+              }}
+            >
+              <Liveline
+                data={data}
+                value={value}
+                theme={theme}
+                color={accent}
+                window={windowSecs}
+                loading={loading}
+                paused={paused}
+                badge={badge && size.w >= 200}
+                badgeVariant={badgeVariant}
+                momentum={momentum && size.w >= 200}
+                fill={fill}
+                grid={grid && size.w >= 200}
+                scrub={scrub}
+                pulse={pulse}
+                exaggerate={exaggerate}
+                degen={degenOpts}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        ))}
+      </View>
+    </>
+  );
+}
 
 export function BasicLineSection() {
   const { isDark, accent } = useAppTheme();
@@ -62,7 +296,10 @@ export function BasicLineSection() {
 
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
   const volatilityRef = useRef(volatility);
-  volatilityRef.current = volatility;
+  useEffect(() => {
+    volatilityRef.current = volatility;
+  }, [volatility]);
+  const lastValueRef = useRef(100);
 
   const startLive = useCallback(() => {
     clearInterval(intervalRef.current);
@@ -78,13 +315,18 @@ export function BasicLineSection() {
     }
     setData(seed);
     setValue(v);
+    lastValueRef.current = v;
 
     intervalRef.current = setInterval(() => {
+      const now2 = Date.now() / 1000;
+      const pt = generatePoint(
+        lastValueRef.current,
+        now2,
+        volatilityRef.current
+      );
+      lastValueRef.current = pt.value;
+      setValue(pt.value);
       setData((prev) => {
-        const now2 = Date.now() / 1000;
-        const lastVal = prev.length > 0 ? prev[prev.length - 1]!.value : 100;
-        const pt = generatePoint(lastVal, now2, volatilityRef.current);
-        setValue(pt.value);
         const next = [...prev, pt];
         return next.length > 500 ? next.slice(-500) : next;
       });
@@ -123,11 +365,15 @@ export function BasicLineSection() {
     if (scenario !== 'live') return;
     clearInterval(intervalRef.current);
     intervalRef.current = setInterval(() => {
+      const now = Date.now() / 1000;
+      const pt = generatePoint(
+        lastValueRef.current,
+        now,
+        volatilityRef.current
+      );
+      lastValueRef.current = pt.value;
+      setValue(pt.value);
       setData((prev) => {
-        const now = Date.now() / 1000;
-        const lastVal = prev.length > 0 ? prev[prev.length - 1]!.value : 100;
-        const pt = generatePoint(lastVal, now, volatilityRef.current);
-        setValue(pt.value);
         const next = [...prev, pt];
         return next.length > 500 ? next.slice(-500) : next;
       });
@@ -227,70 +473,30 @@ export function BasicLineSection() {
         </Label>
       </Section>
 
-      <Section label="Features">
-        <Toggle on={grid} onToggle={setGrid}>
-          Grid
-        </Toggle>
-        <Toggle on={fill} onToggle={setFill}>
-          Fill
-        </Toggle>
-        <Toggle on={badge} onToggle={setBadge}>
-          Badge
-        </Toggle>
-        <Toggle on={momentum} onToggle={setMomentum}>
-          Momentum
-        </Toggle>
-        <Toggle on={pulse} onToggle={setPulse}>
-          Pulse
-        </Toggle>
-        <Toggle on={scrub} onToggle={setScrub}>
-          Scrub
-        </Toggle>
-        <Toggle on={exaggerate} onToggle={setExaggerate}>
-          Exaggerate
-        </Toggle>
-        <Sep />
-        <Label text="Badge style">
-          <Btn
-            active={badgeVariant === 'default'}
-            onPress={() => setBadgeVariant('default')}
-          >
-            Default
-          </Btn>
-          <Btn
-            active={badgeVariant === 'minimal'}
-            onPress={() => setBadgeVariant('minimal')}
-          >
-            Minimal
-          </Btn>
-        </Label>
-      </Section>
-
-      <Section label="Degen">
-        <Toggle on={degen} onToggle={setDegen}>
-          Enable
-        </Toggle>
-        {degen && (
-          <>
-            <Sep />
-            <Toggle on={degenDown} onToggle={setDegenDown}>
-              Down momentum
-            </Toggle>
-            <Sep />
-            <Label text="Scale">
-              {DEGEN_SCALES.map((s) => (
-                <Btn
-                  key={s}
-                  active={degenScale === s}
-                  onPress={() => setDegenScale(s)}
-                >
-                  {s}x
-                </Btn>
-              ))}
-            </Label>
-          </>
-        )}
-      </Section>
+      <FeatureControls
+        grid={grid}
+        setGrid={setGrid}
+        fill={fill}
+        setFill={setFill}
+        badge={badge}
+        setBadge={setBadge}
+        badgeVariant={badgeVariant}
+        setBadgeVariant={setBadgeVariant}
+        momentum={momentum}
+        setMomentum={setMomentum}
+        pulse={pulse}
+        setPulse={setPulse}
+        scrub={scrub}
+        setScrub={setScrub}
+        exaggerate={exaggerate}
+        setExaggerate={setExaggerate}
+        degen={degen}
+        setDegen={setDegen}
+        degenDown={degenDown}
+        setDegenDown={setDegenDown}
+        degenScale={degenScale}
+        setDegenScale={setDegenScale}
+      />
 
       <ChartFrame height={320}>
         <Liveline
@@ -319,63 +525,25 @@ export function BasicLineSection() {
         />
       </ChartFrame>
 
-      {/* Size variants — ported from dev/main.tsx lines 285-326 */}
-      <Text
-        style={{
-          fontSize: 12,
-          color: fg(isDark, 0.3),
-          marginTop: 24,
-          marginBottom: 8,
-        }}
-      >
-        Size variants
-      </Text>
-      <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>
-        {SIZE_VARIANTS.map((size) => (
-          <View key={size.label}>
-            <Text
-              style={{
-                fontSize: 10,
-                color: fg(isDark, 0.25),
-                marginBottom: 4,
-              }}
-            >
-              {size.label}
-            </Text>
-            <View
-              style={{
-                width: size.w,
-                height: size.h,
-                backgroundColor: fg(isDark, 0.02),
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: fg(isDark, 0.06),
-                overflow: 'hidden',
-              }}
-            >
-              <Liveline
-                data={data}
-                value={value}
-                theme={theme}
-                color={accent}
-                window={windowSecs}
-                loading={loading}
-                paused={paused}
-                badge={badge && size.w >= 200}
-                badgeVariant={badgeVariant}
-                momentum={momentum && size.w >= 200}
-                fill={fill}
-                grid={grid && size.w >= 200}
-                scrub={scrub}
-                pulse={pulse}
-                exaggerate={exaggerate}
-                degen={degenOpts}
-                style={{ flex: 1 }}
-              />
-            </View>
-          </View>
-        ))}
-      </View>
+      <SizeVariants
+        isDark={isDark}
+        data={data}
+        value={value}
+        theme={theme}
+        accent={accent}
+        windowSecs={windowSecs}
+        loading={loading}
+        paused={paused}
+        badge={badge}
+        badgeVariant={badgeVariant}
+        momentum={momentum}
+        fill={fill}
+        grid={grid}
+        scrub={scrub}
+        pulse={pulse}
+        exaggerate={exaggerate}
+        degenOpts={degenOpts}
+      />
 
       <StatusBar
         items={[

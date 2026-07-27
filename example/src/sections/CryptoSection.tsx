@@ -50,7 +50,9 @@ export function CryptoSection() {
 
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
   const volatilityRef = useRef(volatility);
-  volatilityRef.current = volatility;
+  useEffect(() => {
+    volatilityRef.current = volatility;
+  }, [volatility]);
   const lastValueRef = useRef(BASE_VALUE);
 
   const startLive = useCallback(() => {

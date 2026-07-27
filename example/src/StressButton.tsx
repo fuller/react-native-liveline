@@ -2,7 +2,7 @@
 import { useCallback, useState } from 'react';
 import { Pressable, Text } from 'react-native';
 import { useAppTheme } from './AppTheme';
-import { CONTROL_HEIGHT, CONTROL_RADIUS } from './ui';
+import { CONTROL_HEIGHT, CONTROL_RADIUS } from './uiStyle';
 
 /**
  * Blocks the JS thread synchronously for ~2s. The chart engine runs entirely
@@ -41,7 +41,7 @@ export function StressButton() {
     >
       <Text
         style={{
-          fontSize: 11,
+          fontSize: 12,
           fontWeight: '600',
           color: isDark ? '#ff8080' : '#c81e1e',
         }}

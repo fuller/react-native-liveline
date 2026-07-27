@@ -5,7 +5,8 @@ import { Liveline } from '@ajfuller/react-native-liveline';
 import type { LivelinePoint } from '@ajfuller/react-native-liveline';
 import { useAppTheme } from '../AppTheme';
 import { generatePoint, TIME_WINDOWS, type Volatility } from '../demoData';
-import { fg, ScreenTitle } from '../ui';
+import { ScreenTitle } from '../ui';
+import { fg } from '../uiStyle';
 
 const VOLATILITY: Volatility = 'normal';
 const TICK_MS = 300;
@@ -49,7 +50,7 @@ function MiniChart({
     <View>
       <Text
         style={{
-          fontSize: 11,
+          fontSize: 12,
           fontWeight: '600',
           color: isDark ? '#fff' : '#111',
           marginBottom: 6,
@@ -93,6 +94,7 @@ export function ScrollSection() {
   const [data, setData] = useState<LivelinePoint[]>([]);
   const [value, setValue] = useState(100);
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
+  const lastValueRef = useRef(100);
 
   const startLive = useCallback(() => {
     clearInterval(intervalRef.current);
@@ -106,13 +108,14 @@ export function ScrollSection() {
     }
     setData(seed);
     setValue(v);
+    lastValueRef.current = v;
 
     intervalRef.current = setInterval(() => {
+      const now2 = Date.now() / 1000;
+      const pt = generatePoint(lastValueRef.current, now2, VOLATILITY);
+      lastValueRef.current = pt.value;
+      setValue(pt.value);
       setData((prev) => {
-        const now2 = Date.now() / 1000;
-        const lastVal = prev.length > 0 ? prev[prev.length - 1]!.value : 100;
-        const pt = generatePoint(lastVal, now2, VOLATILITY);
-        setValue(pt.value);
         const next = [...prev, pt];
         return next.length > 500 ? next.slice(-500) : next;
       });

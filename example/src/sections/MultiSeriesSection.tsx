@@ -47,7 +47,9 @@ export function MultiSeriesSection() {
   const [compactToggle, setCompactToggle] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
   const seriesCountRef = useRef(seriesCount);
-  seriesCountRef.current = seriesCount;
+  useEffect(() => {
+    seriesCountRef.current = seriesCount;
+  }, [seriesCount]);
 
   const startLive = useCallback((count: number) => {
     clearInterval(intervalRef.current);
