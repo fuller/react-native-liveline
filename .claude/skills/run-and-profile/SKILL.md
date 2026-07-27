@@ -84,3 +84,62 @@ Reference (2026-07-27, iPhone 17 Pro sim, Debug, load ~8-11), `main` 60e493e →
 Does not establish: Simulator + Debug + loaded host, whole-pipeline only (can't
 attribute to one change). Sim Skia is Metal; Android is a GL backend. **Release
 on physical Android hardware remains unmeasured** — standing open item.
+
+## Part 3 — Symbol-level attribution (where the time goes)
+
+Part 2 gives a total; this gives a breakdown. Note that `react-native
+profile-hermes` and RN DevTools' JS profiler are **useless here** — they attach
+to the main JS runtime, and the engine runs in the Reanimated UI runtime.
+
+### iOS — xctrace (verified)
+
+`--attach <host pid>` fails with "Cannot find process": simulator processes need
+the device context. Attach **by name with `--device`**.
+
+```bash
+UDID=$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -1)
+xcrun xctrace record --template "Time Profiler" --device $UDID \
+  --attach LivelineExample --time-limit 20s --no-prompt --output /tmp/lv.trace
+xcrun xctrace export --input /tmp/lv.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > /tmp/tp.xml
+```
+
+**Parsing trap:** frame *and* thread names are interned — defined once as
+`id="N" name="..."`, then referenced as `ref="N"`. A naive regex filter matches
+only the first definition and silently reports n=1. Resolve both maps first:
+
+```python
+fnames = dict(re.findall(r'<frame id="(\d+)"[^>]*?name="([^"]*)"', xml))
+tnames = dict(re.findall(r'<thread id="(\d+)"[^>]*?fmt="([^"]*)"', xml))
+# per row: <thread (id=...fmt="X" | ref="N")>, frames likewise
+```
+
+On iOS the Reanimated UI runtime **is** the Main Thread — that thread is the
+engine. A separate `com.facebook.react.runtime.JavaScript` thread is the example
+app's own data generation, not library cost.
+
+Reference (2026-07-27, Candles, Debug): Main Thread 51-61%, JS thread 30-41%
+(varies with app activity). Within Main Thread the split is stable across
+traces — Hermes-only (worklet JS) **51-53%**, Skia-only **34%**, both 9-10%. Top Skia frames are Metal upload/renderpass, `aaa_fill_path`,
+`generate_distance_field_from_image`. Takeaway: past this point the engine thread
+is roughly half JS interpretation, so Skia call-count tuning has limited headroom.
+Debug inflates the Hermes share — treat 51% as an upper bound.
+
+### Android — simpleperf (UNVERIFIED: no SDK on this machine)
+
+No `adb`/`emulator`/`ANDROID_HOME` here as of 2026-07-27, so the below is written
+from the tool docs and has **not** been run. Verify before trusting it. A
+`liveline_test` AVD dir and prebuilt debug+release APKs exist under
+`example/android/app/build/outputs/apk/`.
+
+```bash
+PID=$(adb shell pidof com.liveline.example)
+adb shell simpleperf record -p $PID --call-graph fp --duration 20 \
+  -o /data/local/tmp/perf.data
+adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso,symbol
+```
+
+Needs unstripped `.so`/symfs for readable Skia frames. Perfetto covers the other
+half (frame timeline, thread states) and `adb shell dumpsys gfxinfo <pkg>
+framestats` is the cheap frame-time histogram. Part 2's CPU A/B ports directly —
+read `utime+stime` from `/proc/<pid>/stat` instead of `ps -o cputime`.
