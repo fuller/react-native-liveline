@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { AppState, type LayoutChangeEvent } from 'react-native';
-import { Skia, type SkPicture } from '@shopify/react-native-skia';
+import {
+  Skia,
+  type SkPicture,
+  type SkHostRect,
+} from '@shopify/react-native-skia';
 import {
   runOnJS,
   useFrameCallback,
@@ -201,6 +205,17 @@ export function useLivelineEngine(
   // (never read from JS); nothing subscribes to it, so plain worklet mutation
   // is enough — no .modify() needed.
   const skiaCache = useSharedValue<SkiaCache>(createSkiaCache());
+  // Reused SkRect for the picture recorder's cull rect (below) — built
+  // lazily on the UI thread on the first frame, then mutated in place via
+  // setXYWH every subsequent frame instead of a fresh Skia.XYWHRect(...)
+  // allocation. Safe to reuse across frames despite `recorder` being a new
+  // PictureRecorder every frame: SkPictureRecorder::beginRecording reads
+  // the bounds and copies them into its own state synchronously (confirmed
+  // against the binding's C++ source — same argument as canvas2d.ts's
+  // pooled rect), so mutating this object for the next frame can't affect
+  // a recording (or finished SkPicture) already produced from a prior
+  // value.
+  const cullRect = useSharedValue<SkHostRect | null>(null);
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
   const picture = useSharedValue<SkPicture>(makeEmptyPicture());
@@ -291,8 +306,13 @@ export function useLivelineEngine(
       return;
     }
 
+    if (cullRect.value === null) {
+      cullRect.value = Skia.XYWHRect(0, 0, w, h);
+    } else {
+      cullRect.value.setXYWH(0, 0, w, h);
+    }
     const recorder = Skia.PictureRecorder();
-    const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, w, h));
+    const canvas = recorder.beginRecording(cullRect.value);
     const ctx = createCanvas2D(canvas, fonts, skiaCache.value);
     const result = engineStep(
       ctx,

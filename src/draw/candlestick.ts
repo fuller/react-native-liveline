@@ -13,6 +13,16 @@ export type { CandlePoint } from '../types';
 const BULL = '#22c55e';
 const BEAR = '#ef4444';
 
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, and candlestick.test.ts
+// imports this file directly without it loaded — a real (non-type) import
+// from canvas2d.ts would drag Skia in and break that test under Jest,
+// which doesn't transform that package.
+const DASH_4_4: number[] = [4, 4];
+const EMPTY_DASH: number[] = [];
+
 // Pre-parsed RGB for fast interpolation
 const BULL_RGB = [34, 197, 94] as const;
 const BEAR_RGB = [239, 68, 68] as const;
@@ -452,7 +462,7 @@ export function drawClosePrice(
 
   const baseAlpha = ctx.globalAlpha;
   ctx.save();
-  ctx.setLineDash([4, 4]);
+  ctx.setLineDash(DASH_4_4);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1;
   ctx.globalAlpha = baseAlpha * (1 - scrubDim * 0.3) * 0.4;
@@ -460,7 +470,7 @@ export function drawClosePrice(
   ctx.moveTo(layout.pad.left, y);
   ctx.lineTo(layout.w - layout.pad.right, y);
   ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.setLineDash(EMPTY_DASH);
   ctx.restore();
 }
 

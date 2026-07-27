@@ -65,7 +65,7 @@ class FakeCtx implements Ctx2D {
       alpha: this.globalAlpha,
     });
   }
-  clip() {}
+  clipRect() {}
   fillRect() {}
   fillText() {}
   strokeText() {}

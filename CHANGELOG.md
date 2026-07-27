@@ -182,6 +182,38 @@ All notable changes to this project will be documented in this file.
   reusable buffers held on engine state, pruned when a series is removed. The
   candle-mode reverse-morph stash copies at the stash point rather than
   aliasing the frame's buffer.
+- **Draw-layer per-frame allocations pooled** — the time axis was the biggest
+  remaining one: unlike the grid, it has no composited-picture bypass, so it
+  rebuilt a target set, two container arrays, and one object per visible
+  label on every single frame. Those now refill buffers held on the axis
+  state. The grid's per-call target map is pooled the same way (lower impact,
+  since the grid picture cache already skips it in steady state), and the
+  orderbook stopped rebuilding a combined level array on every label spawn
+  (~25×/sec even when the book hasn't changed) and now caches its outline
+  color string against the palette RGB instead of rebuilding it per frame.
+  Weighted-pick distribution is unchanged — same scan order and totals.
+- **Clipping uses a non-antialiased rect instead of an antialiased path** —
+  every clip in the library is an axis-aligned rectangle, but all of them
+  went through `clipPath(..., doAntiAlias: true)`. An antialiased path clip
+  can't lower to a GPU scissor, so Skia falls back to a clip mask or analytic
+  AA coverage — substantially more expensive per draw call, and these clips
+  wrap the innermost, most-executed draws in the library (the line
+  stroke/fill and the entire candle body). They now use `clipRect` with
+  antialiasing off, which for an axis-aligned rect has no visual cost. The
+  `beginPath()`/`rect()` path construction those sites paid is gone too.
+- **The per-frame scratch path is marked volatile** — the pooled `SkPath`
+  that's rewound and refilled every frame now sets `isVolatile`, telling Skia
+  not to treat it as static geometry worth caching or uploading as a
+  long-lived resource. Deliberately applied only to that one path: the
+  cross-frame line, candle, and badge caches are long-lived by design and
+  benefit from exactly the caching volatility disables.
+- **Remaining shim allocations pooled** — constant dash patterns are hoisted
+  to module-level constants (they previously cost up to three array
+  allocations per use, per frame, between the inline literal and two
+  defensive copies), the linear-gradient descriptor is reused rather than
+  rebuilt as a fresh object plus two arrays plus a closure on each of its
+  ~2-3 calls per frame, and the `SkRect` handed to `rect`/`arc`/`fillRect`/
+  `clipRect` and to the picture recorder's cull rect is reused in place.
 
 ### Internal
 

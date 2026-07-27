@@ -54,6 +54,14 @@ const CROSSHAIR_FADE_MIN_PX = 5;
 // whichever is smaller.
 const SCRUB_FADE_MAX_PX = 80;
 const SCRUB_FADE_WIDTH_FRACTION = 0.3;
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, and some draw modules'
+// dedicated unit tests (e.g. candlestick.test.ts) import their module
+// directly without it loaded — kept local here too for consistency.
+const DASH_4_4: number[] = [4, 4];
+const EMPTY_DASH: number[] = [];
 
 /**
  * Shared scrub-fade opacity curve: 0 right next to the live dot/edge, ramps
@@ -791,7 +799,7 @@ export function drawCandleFrame(
       const dashY = layout.toY(closeSource.close);
       if (dashY >= pad.top && dashY <= h - pad.bottom) {
         ctx.save();
-        ctx.setLineDash([4, 4]);
+        ctx.setLineDash(DASH_4_4);
         ctx.strokeStyle = palette.dashLine;
         ctx.lineWidth = 1;
         ctx.globalAlpha = closeAlpha * lp * (1 - opts.scrubAmount * 0.2);
@@ -799,7 +807,7 @@ export function drawCandleFrame(
         ctx.moveTo(pad.left, dashY);
         ctx.lineTo(w - pad.right, dashY);
         ctx.stroke();
-        ctx.setLineDash([]);
+        ctx.setLineDash(EMPTY_DASH);
         ctx.restore();
       }
     }
@@ -831,9 +839,7 @@ export function drawCandleFrame(
         : opts.oldCandles;
 
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(pad.left - 1, pad.top, chartW + 2, chartH);
-    ctx.clip();
+    ctx.clipRect(pad.left - 1, pad.top, chartW + 2, chartH);
     const accentCol = lp > 0.01 ? palette.line : undefined;
     if (opts.morphT >= 0 && revealOld.length > 0) {
       ctx.globalAlpha = (1 - opts.morphT) * candleAlpha;

@@ -20,6 +20,16 @@ import {
   LOADING_SCROLL_SPEED,
 } from './loadingShape';
 
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, which some draw modules'
+// dedicated unit tests (e.g. candlestick.test.ts) import without it loaded
+// — a real (non-type) import from canvas2d.ts would drag Skia in and break
+// those tests under Jest, which doesn't transform that package.
+const DASH_4_4: number[] = [4, 4];
+const EMPTY_DASH: number[] = [];
+
 /** Parse a CSS color to [r, g, b, a]. Handles hex, rgb(), rgba(). */
 function parseRgba(color: string): [number, number, number, number] {
   'worklet';
@@ -381,16 +391,12 @@ export function drawLine(
   // lerps smoothly so the line may extend beyond the chart bounds.
   // Clipping keeps it tidy while the range catches up.
   ctx.save();
-  ctx.beginPath();
-  ctx.rect(pad.left - 1, pad.top, chartW + 2, chartH);
-  ctx.clip();
+  ctx.clipRect(pad.left - 1, pad.top, chartW + 2, chartH);
 
   if (isScrubbing) {
     // Full-opacity portion: clipped to LEFT of scrub point
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, scrubX!, h);
-    ctx.clip();
+    ctx.clipRect(0, 0, scrubX!, h);
     paintLineCurve(
       ctx,
       layout,
@@ -408,9 +414,7 @@ export function drawLine(
 
     // Dimmed portion: clipped to RIGHT of scrub point
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(scrubX!, 0, layout.w - scrubX!, h);
-    ctx.clip();
+    ctx.clipRect(scrubX!, 0, layout.w - scrubX!, h);
     ctx.globalAlpha = incomingAlpha * (1 - scrubAmount * 0.6);
     paintLineCurve(
       ctx,
@@ -456,7 +460,7 @@ export function drawLine(
       chartReveal < 1
         ? centerY + (realCurrentY - centerY) * chartReveal
         : realCurrentY;
-    ctx.setLineDash([4, 4]);
+    ctx.setLineDash(DASH_4_4);
     ctx.strokeStyle = palette.dashLine;
     ctx.lineWidth = 1;
     const dashBase = isScrubbing ? 1 - scrubAmount * 0.2 : 1;
@@ -466,7 +470,7 @@ export function drawLine(
     ctx.moveTo(pad.left, currentY);
     ctx.lineTo(layout.w - pad.right, currentY);
     ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.setLineDash(EMPTY_DASH);
   }
   ctx.globalAlpha = incomingAlpha;
 

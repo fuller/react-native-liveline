@@ -2,6 +2,16 @@ import type { LivelinePalette, ChartLayout } from '../types';
 import { lerp } from '../math/lerp';
 import type { Ctx2D } from './canvas2d';
 
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, which some draw modules'
+// dedicated unit tests (e.g. candlestick.test.ts) import without it loaded
+// — a real (non-type) import from canvas2d.ts would drag Skia in and break
+// those tests under Jest, which doesn't transform that package.
+const DASH_1_3: number[] = [1, 3];
+const EMPTY_DASH: number[] = [];
+
 /**
  * Pick a nice interval using TradingView's cycling divisor approach.
  * Hysteresis: once chosen, sticks until spacing falls outside [0.5×, 4×] of minGap.
@@ -127,7 +137,7 @@ export function drawGrid(
 
   // --- Phase 3: draw ---
   const baseAlpha = ctx.globalAlpha;
-  ctx.setLineDash([1, 3]);
+  ctx.setLineDash(DASH_1_3);
   ctx.lineWidth = 1;
   ctx.font = ctx.fonts.label;
   ctx.textAlign = 'left';
@@ -154,5 +164,5 @@ export function drawGrid(
     ctx.restore();
   }
 
-  ctx.setLineDash([]);
+  ctx.setLineDash(EMPTY_DASH);
 }

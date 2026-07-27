@@ -18,6 +18,7 @@ import type {
   SkPathEffect,
   SkMaskFilter,
   SkPicture,
+  SkHostRect,
 } from '@shopify/react-native-skia';
 import { Platform } from 'react-native';
 import type { LivelineFonts } from '../types';
@@ -117,7 +118,12 @@ export interface Ctx2D {
   rect(x: number, y: number, w: number, h: number): void;
   fill(): void;
   stroke(): void;
-  clip(): void;
+  /** Non-antialiased axis-aligned clip (Skia extension, no Canvas2D
+   * equivalent — Canvas2D only clips via an arbitrary path). Every call site
+   * in this codebase clips to an axis-aligned rect, and a non-AA rect clip
+   * lowers to a GPU scissor instead of the clip-mask/analytic-AA fallback an
+   * antialiased path clip forces; see clipRect() below for detail. */
+  clipRect(x: number, y: number, w: number, h: number): void;
   fillRect(x: number, y: number, w: number, h: number): void;
   fillText(text: string, x: number, y: number): void;
   strokeText(text: string, x: number, y: number): void;
@@ -195,6 +201,22 @@ export interface SkiaCache {
     fillPaint: SkPaint;
     strokePaint: SkPaint;
     shadowPaint: SkPaint;
+    // Reused Gradient2D descriptor for createLinearGradient — see that
+    // method for the safety argument (every call site builds, assigns, and
+    // consumes one before the next is ever created, so a single mutable
+    // instance can't alias two distinct gradients).
+    gradient: Gradient2D;
+    // Reused SkRect for rect()/arc()/fillRect()/clipRect() below. Safe to
+    // share across all of them (and across calls): every one of those
+    // methods calls `.setXYWH` and passes the rect into a native Skia call
+    // (addRect/addArc/drawRect/clipRect) in the same statement, and the
+    // native binding reads the rect's numeric fields and copies them into
+    // its own recorded/native state synchronously — confirmed against the
+    // binding's C++ source (JsiSkRect::fromValue + the JsiSkPath/JsiSkCanvas
+    // host functions all dereference `*rect` by value into the Skia call
+    // and never retain the JS-side object). There's no gradient-style
+    // "assign now, consume later" gap here to create aliasing risk.
+    rect: SkHostRect;
   } | null;
   colors: Record<string, SkColor>;
   colorCount: number;
@@ -478,14 +500,58 @@ export function createCanvas2D(
     pooledShadow.setAntiAlias(true);
     pooledShadow.setStyle(PaintStyle.Fill);
 
+    // isVolatile tells Skia this path's contents won't be reused as a
+    // static resource — appropriate here since it's rewound and refilled
+    // every frame (see below). Without it, Skia may treat the path as
+    // worth caching/uploading as if it were long-lived geometry, which is
+    // wasted work for something that never looks the same twice. This is
+    // the ONLY path in the codebase that should be volatile: lineCache.ts's
+    // prefix path, candleCache.ts's four body/wick paths, and badge.ts's
+    // pill path are all deliberately long-lived and benefit from the
+    // caching volatility disables — do not mark those volatile.
+    const pooledPath = Skia.Path.Make();
+    pooledPath.setIsVolatile(true);
+
+    // Pooled Gradient2D descriptor — see createLinearGradient below for why
+    // reusing a single mutable instance is safe (every call site fully
+    // consumes one before the next is created). `addColorStop` is defined
+    // once here rather than per-call, so pooling also removes a closure
+    // allocation on top of the two backing arrays.
+    const pooledGradient: Gradient2D = {
+      isGradient: true,
+      x0: 0,
+      y0: 0,
+      x1: 0,
+      y1: 0,
+      offsets: [],
+      colors: [],
+      addColorStop(offset: number, color: string) {
+        pooledGradient.offsets.push(offset);
+        pooledGradient.colors.push(color);
+      },
+    };
+
+    // Pooled SkRect — see the `rect` field comment on SkiaCache's `pool`
+    // type for why reuse across rect()/arc()/fillRect()/clipRect() is safe.
+    const pooledRect = Skia.XYWHRect(0, 0, 0, 0);
+
     cache.pool = {
-      path: Skia.Path.Make(),
+      path: pooledPath,
       fillPaint: pooledFill,
       strokePaint: pooledStroke,
       shadowPaint: pooledShadow,
+      gradient: pooledGradient,
+      rect: pooledRect,
     };
   }
-  const { path: ownPath, fillPaint, strokePaint, shadowPaint } = cache.pool;
+  const {
+    path: ownPath,
+    fillPaint,
+    strokePaint,
+    shadowPaint,
+    gradient: ownGradient,
+    rect: ownRect,
+  } = cache.pool;
   ownPath.rewind(); // discard last frame's verbs
   let path = ownPath;
   let lineDash: number[] = [];
@@ -580,7 +646,13 @@ export function createCanvas2D(
         shadowColor: this.shadowColor,
         shadowBlur: this.shadowBlur,
         shadowOffsetY: this.shadowOffsetY,
-        lineDash: lineDash.slice(),
+        // No defensive copy: every call site now passes a hoisted
+        // module-level constant array (or the shared EMPTY_DASH) rather
+        // than a fresh literal, and setLineDash below stores that reference
+        // as-is — see the invariant note there. Storing/restoring the same
+        // reference is safe as long as nothing ever mutates a dash array in
+        // place, which no caller in this codebase does.
+        lineDash,
       });
       canvas.save();
     },
@@ -641,8 +713,13 @@ export function createCanvas2D(
       if (Math.abs(sweep) >= Math.PI * 2 - 1e-6) {
         path.addCircle(x, y, radius);
       } else {
+        // Reuses the pooled rect (see SkiaCache's `pool.rect` comment) —
+        // addArc reads the bounds and writes verb data into `path`
+        // synchronously, so there's no window where a stale value could
+        // leak into a different call.
+        ownRect.setXYWH(x - radius, y - radius, radius * 2, radius * 2);
         path.addArc(
-          Skia.XYWHRect(x - radius, y - radius, radius * 2, radius * 2),
+          ownRect,
           (startAngle * 180) / Math.PI,
           (sweep * 180) / Math.PI
         );
@@ -654,7 +731,8 @@ export function createCanvas2D(
     },
 
     rect(x, y, w, h) {
-      path.addRect(Skia.XYWHRect(x, y, w, h));
+      ownRect.setXYWH(x, y, w, h);
+      path.addRect(ownRect);
     },
 
     fill() {
@@ -716,8 +794,18 @@ export function createCanvas2D(
       canvas.drawPath(path, paint);
     },
 
-    clip() {
-      canvas.clipPath(path, ClipOp.Intersect, true);
+    // Every call site clips to an axis-aligned rect built immediately before
+    // the clip call, so this always uses clipRect (a GPU scissor) rather
+    // than clipPath with doAntiAlias=true. An antialiased path clip can't be
+    // expressed as a scissor rect, so Skia falls back to a clip mask or
+    // analytic AA coverage — substantially more expensive per draw call, and
+    // these clips wrap the innermost, most-executed draws in the library
+    // (the line stroke/fill, the whole candle body). doAntiAlias is false
+    // here: an axis-aligned rect clip has no diagonal/curved edge to
+    // antialias, so there's no visual cost to the non-AA path.
+    clipRect(x, y, w, h) {
+      ownRect.setXYWH(x, y, w, h);
+      canvas.clipRect(ownRect, ClipOp.Intersect, false);
     },
 
     fillRect(x, y, w, h) {
@@ -728,7 +816,8 @@ export function createCanvas2D(
           ? BlendMode.DstOut
           : BlendMode.SrcOver
       );
-      canvas.drawRect(Skia.XYWHRect(x, y, w, h), paint);
+      ownRect.setXYWH(x, y, w, h);
+      canvas.drawRect(ownRect, paint);
     },
 
     fillText(text, x, y) {
@@ -773,24 +862,44 @@ export function createCanvas2D(
       return { width: cachedTextWidth(cache, fonts, this.font, text) };
     },
 
+    // No defensive copy: `segments` used to be sliced here because callers
+    // passed fresh array literals (`[4, 4]`, `[]`) that were free to mutate
+    // afterward. Callers now pass hoisted module-level constants instead
+    // (each draw module keeps its own — e.g. line.ts's DASH_4_4 and
+    // EMPTY_DASH, grid.ts's DASH_1_3 and EMPTY_DASH — rather than importing
+    // from here, since this module pulls in the native Skia binding at
+    // import time and several of those modules are unit-tested directly
+    // without it) specifically so this can store the reference directly and
+    // skip the per-call allocation. INVARIANT: nothing may mutate an array
+    // in place after passing it to setLineDash — every call site in this
+    // codebase passes a constant it never touches again.
     setLineDash(segments) {
-      lineDash = segments.slice();
+      lineDash = segments;
     },
 
+    // Reuses the pooled descriptor instead of allocating a fresh object +
+    // two arrays + an addColorStop closure on every call (this was ~4
+    // allocations per call, called 2-3x/frame). Safe because every call
+    // site in this codebase builds a gradient, assigns it to a style
+    // property, and consumes it via fill()/fillRect() (which read
+    // style.x0/y0/x1/y1/offsets/colors synchronously) before returning —
+    // never held across a save()/restore() or a nested draw call, and never
+    // two live at once. Every fill()/fillRect()/fillText() call site also
+    // assigns its style property immediately beforehand (grepped: none rely
+    // on a leftover ctx.fillStyle), so even a stale reference to this pooled
+    // object sitting in a save() snapshot is never read as a gradient after
+    // being overwritten by a later call. If a future call site ever holds a
+    // gradient across another createLinearGradient call before consuming
+    // it, this pooling breaks (silently wrong colors) — don't add one
+    // without re-checking this invariant.
     createLinearGradient(x0, y0, x1, y1) {
-      const grad: Gradient2D = {
-        isGradient: true,
-        x0,
-        y0,
-        x1,
-        y1,
-        offsets: [],
-        colors: [],
-        addColorStop(offset: number, color: string) {
-          grad.offsets.push(offset);
-          grad.colors.push(color);
-        },
-      };
+      const grad = ownGradient;
+      grad.x0 = x0;
+      grad.y0 = y0;
+      grad.x1 = x1;
+      grad.y1 = y1;
+      grad.offsets.length = 0;
+      grad.colors.length = 0;
       return grad;
     },
 
