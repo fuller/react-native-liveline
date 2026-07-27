@@ -47,6 +47,12 @@ function divisible(val: number, interval: number): boolean {
 export interface GridState {
   interval: number;
   labels: Map<number, number>; // key → alpha
+  /** Scratch map for Phase 1's per-call target-alpha computation — purely
+   * local to a single `drawGrid` call (read back in Phase 2, never held
+   * past this function), but rebuilt every call regardless, so it's
+   * persisted and `.clear()`-ed instead of reallocated 60x/sec. Same
+   * rationale as `EngineState.smoothValuesScratch`. */
+  targetsScratch: Map<number, number>;
 }
 
 const FADE_IN = 0.18;
@@ -87,7 +93,8 @@ export function drawGrid(
   };
 
   // --- Phase 1: compute target alpha for every current grid label ---
-  const targets = new Map<number, number>();
+  const targets = state.targetsScratch;
+  targets.clear();
   const first = Math.ceil(minVal / fine) * fine;
   for (let val = first; val <= maxVal; val += fine) {
     const y = toY(val);

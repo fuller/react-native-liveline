@@ -3,8 +3,44 @@ import { niceTimeInterval } from '../math/intervals';
 import { lerp } from '../math/lerp';
 import type { Ctx2D } from './canvas2d';
 
+/** Pooled entry for a single visible time-axis label — see
+ * `labelEntryPool` below for why this is reused rather than allocated
+ * fresh per label per frame. */
+interface TimeLabelEntry {
+  x: number;
+  alpha: number;
+  text: string;
+  w: number;
+}
+
 export interface TimeAxisState {
   labels: Map<number, { alpha: number; text: string }>;
+  /** Scratch set for the per-frame target-interval computation — purely
+   * local to a single `drawTimeAxis` call, but rebuilt unconditionally
+   * every frame (this function has no picture-cache bypass, unlike
+   * `drawGrid` — see the call site in draw/index.ts), so it's persisted
+   * and `.clear()`-ed instead of reallocated 60x/sec. Same rationale as
+   * `EngineState.smoothValuesScratch`. */
+  targetsScratch: Set<number>;
+  /** Reused container for this frame's "visible, sorted by X" label list.
+   * `.length = 0` at the top of each use instead of a fresh array — mirrors
+   * `EngineState.visibleScratch`. Holds references into `labelEntryPool`
+   * below, never its own objects. */
+  visibleLabelsScratch: TimeLabelEntry[];
+  /** Reused container for this frame's post-overlap-resolution draw list.
+   * Also holds references into `labelEntryPool`, never its own objects —
+   * `.length = 0` at the top of each use. */
+  drawnScratch: TimeLabelEntry[];
+  /** Growable pool of reusable `{x,alpha,text,w}` objects, indexed by
+   * position in this frame's visible-label scan (NOT by label key — a
+   * given index may back a different label on every frame, which is fine
+   * since every field is overwritten before use). Grows to the steady-state
+   * max distinct visible labels needed (capped by the `targets.size < 30`
+   * generation limit above, then further reduced by the alpha/visibility
+   * filter) and then stops growing. Indexed into directly — never iterated
+   * as a collection, since entries beyond this frame's fill count are
+   * stale leftovers from a frame with more visible labels. */
+  labelEntryPool: TimeLabelEntry[];
 }
 
 const FADE = 0.08;
@@ -59,7 +95,8 @@ export function drawTimeAxis(
   } else {
     firstTime = Math.ceil((leftEdge - interval) / interval) * interval;
   }
-  const targets = new Set<number>();
+  const targets = state.targetsScratch;
+  targets.clear();
   for (
     let t = firstTime;
     t <= rightEdge + interval && targets.size < 30;
@@ -110,21 +147,40 @@ export function drawTimeAxis(
 
   ctx.textAlign = 'center';
 
-  // Collect, sort by X, resolve overlaps by keeping the more-visible label
-  const labels: { x: number; alpha: number; text: string; w: number }[] = [];
+  // Collect, sort by X, resolve overlaps by keeping the more-visible label.
+  // `labels` and the per-entry objects it holds are pooled on state (see
+  // `visibleLabelsScratch`/`labelEntryPool` docs) instead of allocated
+  // fresh every frame — sorting a pooled-object array works exactly like
+  // sorting any array, since sort only reorders positions, not identities.
+  const labels = state.visibleLabelsScratch;
+  labels.length = 0;
+  let poolIdx = 0;
   for (const [key, label] of state.labels) {
     if (label.alpha < 0.02) continue;
     const x = toX(key / 100);
     if (x < chartLeft - 20 || x > chartRight) continue;
     const w = ctx.measureText(label.text).width;
-    labels.push({ x, alpha: label.alpha, text: label.text, w });
+    let entry = state.labelEntryPool[poolIdx];
+    if (!entry) {
+      entry = { x, alpha: label.alpha, text: label.text, w };
+      state.labelEntryPool[poolIdx] = entry;
+    } else {
+      entry.x = x;
+      entry.alpha = label.alpha;
+      entry.text = label.text;
+      entry.w = w;
+    }
+    poolIdx++;
+    labels.push(entry);
   }
   labels.sort((a, b) => a.x - b.x);
 
   // Resolve overlaps: when two labels collide, keep the higher-alpha one.
   // This gives a clean one-time crossover (no flickering) because one alpha
-  // is always rising while the other is falling.
-  const drawn: typeof labels = [];
+  // is always rising while the other is falling. `drawn` only ever holds
+  // references into the same pooled objects above — never its own.
+  const drawn = state.drawnScratch;
+  drawn.length = 0;
   for (const label of labels) {
     const left = label.x - label.w / 2;
     if (drawn.length > 0) {

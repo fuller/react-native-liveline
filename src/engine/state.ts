@@ -256,9 +256,17 @@ export function createEngineState(
       rangeToMax: 0,
     },
     arrowState: { up: 0, down: 0 },
-    gridState: { interval: 0, labels: new Map<number, number>() },
+    gridState: {
+      interval: 0,
+      labels: new Map<number, number>(),
+      targetsScratch: new Map<number, number>(),
+    },
     timeAxisState: {
       labels: new Map<number, { alpha: number; text: string }>(),
+      targetsScratch: new Set<number>(),
+      visibleLabelsScratch: [],
+      drawnScratch: [],
+      labelEntryPool: [],
     },
     orderbookState: createOrderbookState(),
     particleState: createParticleState(),
