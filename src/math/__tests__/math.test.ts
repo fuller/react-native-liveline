@@ -146,6 +146,48 @@ describe('filterVisiblePoints', () => {
     expect(result.map((p) => p.time)).toEqual([3]);
   });
 
+  // The window scan binary-searches for its start index (the buffer is
+  // time-ordered, an invariant dataDelta/candleAtX already rely on), so the
+  // boundary cases below are where an off-by-one would surface.
+  it('handles an empty buffer', () => {
+    expect(filterVisiblePoints([], 5, 10)).toEqual([]);
+  });
+
+  it('returns nothing when every point precedes the window', () => {
+    expect(filterVisiblePoints(pts([0, 1, 2]), 50, 60)).toEqual([]);
+  });
+
+  it('returns nothing when every point follows the window', () => {
+    expect(filterVisiblePoints(pts([50, 60]), 0, 10)).toEqual([]);
+  });
+
+  it('returns the whole buffer when it sits inside the window', () => {
+    const result = filterVisiblePoints(pts([10, 11, 12]), 0, 100);
+    expect(result.map((q) => q.time)).toEqual([10, 11, 12]);
+  });
+
+  it('picks the exact start index on a long buffer (binary-search boundary)', () => {
+    // 0..999; window [500,510] with the 2-unit epsilon => first kept is 498.
+    const long = pts(Array.from({ length: 1000 }, (_, i) => i));
+    const result = filterVisiblePoints(long, 500, 510);
+    expect(result[0]!.time).toBe(498);
+    expect(result[result.length - 1]!.time).toBe(510);
+  });
+
+  it('matches a brute-force linear scan across many random windows', () => {
+    const long = pts(Array.from({ length: 500 }, (_, i) => i * 3));
+    for (let k = 0; k < 60; k++) {
+      const l = Math.random() * 1500;
+      const r = l + Math.random() * 300;
+      const expected = long
+        .filter((q) => q.time >= l - 2 && q.time <= r)
+        .map((q) => q.time);
+      expect(filterVisiblePoints(long, l, r).map((q) => q.time)).toEqual(
+        expected
+      );
+    }
+  });
+
   it('excludes points after rightEdge', () => {
     const result = filterVisiblePoints(pts([9, 10, 11]), 0, 10);
     expect(result.map((p) => p.time)).toEqual([9, 10]);

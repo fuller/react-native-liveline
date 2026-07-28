@@ -259,18 +259,53 @@ export function engineStep(
     useMultiStash =
       !hasData && chartReveal > 0.005 && s.lastMultiSeries.length > 0;
     if (hasMultiData && cfg.multiSeries) {
-      s.lastMultiSeries = cfg.multiSeries.map((series) => ({
-        id: series.id,
-        // Copy — `multiData[series.id]` aliases the live per-series buffer
-        // (mutated in place by the JS-thread delta applier via
-        // `.modify()`), so a bare reference here would let future ticks
-        // silently rewrite this stash. Same reasoning as `s.lastData`
-        // above and `s.lastCandles` in the candle pipeline.
-        data: (multiData[series.id] ?? EMPTY_MULTI_POINTS).slice(),
-        value: series.value,
-        palette: series.palette,
-        label: series.label,
-      }));
+      // The point-array copy is revision-gated; the cheap fields are not.
+      // This stash is only *read* during the reverse morph (`useMultiStash`,
+      // i.e. `!hasData`), but it used to re-`.slice()` every series' whole
+      // buffer on every frame — four series of a couple thousand points at
+      // 60fps is ~half a million element copies a second, essentially all
+      // of it thrown away. The data only changes when that series' delta
+      // lands (a few times a second at most), which `multiRevs` now tells
+      // us exactly. `value`/`palette`/`label` are still refreshed every
+      // frame: they can change without the data changing (a theme or accent
+      // switch), and a stale palette here would show up as the wrong colour
+      // during a morph-back.
+      const stashRevs = s.lastMultiStashRevs;
+      const stashData = s.lastMultiStashData;
+      s.lastMultiSeries = cfg.multiSeries.map((series) => {
+        const rev = cfg.multiRevs?.[series.id] ?? 0;
+        let stashed = stashData.get(series.id);
+        if (stashed === undefined || stashRevs.get(series.id) !== rev) {
+          // Copy — `multiData[series.id]` aliases the live per-series buffer
+          // (mutated in place by the JS-thread delta applier via
+          // `.modify()`), so a bare reference here would let future ticks
+          // silently rewrite this stash. Same reasoning as `s.lastData`
+          // above and `s.lastCandles` in the candle pipeline.
+          stashed = (multiData[series.id] ?? EMPTY_MULTI_POINTS).slice();
+          stashData.set(series.id, stashed);
+          stashRevs.set(series.id, rev);
+        }
+        return {
+          id: series.id,
+          data: stashed,
+          value: series.value,
+          palette: series.palette,
+          label: series.label,
+        };
+      });
+      // Prune bookkeeping for removed series (same shape as the
+      // `displayValues`/`lineCaches` cleanup in the multi pipeline below —
+      // the size check makes the steady state allocation- and iteration-free).
+      if (stashData.size > cfg.multiSeries.length) {
+        const live = new Set<string>();
+        for (const series of cfg.multiSeries) live.add(series.id);
+        for (const id of stashData.keys()) {
+          if (!live.has(id)) {
+            stashData.delete(id);
+            stashRevs.delete(id);
+          }
+        }
+      }
     }
     // Clear multi stash when single-series data arrives
     if (hasData && !cfg.isMultiSeries) s.lastMultiSeries = [];
@@ -283,7 +318,18 @@ export function engineStep(
     // Copy — `points` may alias the live data buffer (mutated in place by
     // the JS-thread delta applier via `.modify()`), so a bare reference
     // here would let future ticks silently rewrite this stash.
-    if (hasData && !cfg.isMultiSeries) s.lastData = points.slice();
+    //
+    // Revision-gated for the same reason as the multi-series stash above:
+    // this is only read during the reverse morph, but copying the whole
+    // buffer every frame meant ~120k element copies a second on a 2000-point
+    // feed to maintain something that changes a few times a second.
+    // `dataRev` moves exactly when the buffer does. (`points` is
+    // `s.pausedData ?? data`; while paused the snapshot is frozen, so its
+    // contents match what was already stashed and skipping is still correct.)
+    if (hasData && !cfg.isMultiSeries && s.lastDataStashRev !== cfg.dataRev) {
+      s.lastData = points.slice();
+      s.lastDataStashRev = cfg.dataRev;
+    }
   }
 
   // Update lineModeProg even during early return — prevents the

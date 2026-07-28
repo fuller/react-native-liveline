@@ -153,6 +153,16 @@ export interface EngineState {
   // Data stash for reverse morph (chart → flat line when data disappears)
   lastData: LivelinePoint[];
   lastMultiSeries: StashedSeries[];
+  /** `cfg.dataRev` the `lastData` stash was copied at, so the copy is
+   * skipped on the ~17 of every 18 frames where the buffer hasn't changed.
+   * -1 (never a real revision) forces the first copy. */
+  lastDataStashRev: number;
+  /** Same idea per series id, plus the copied arrays themselves so an
+   * unchanged series can be re-used by reference instead of re-sliced.
+   * The stash's cheap fields (value/palette/label) are still refreshed
+   * every frame — only the point-array copy is revision-gated. */
+  lastMultiStashRevs: Map<string, number>;
+  lastMultiStashData: Map<string, LivelinePoint[]>;
   frozenNow: number;
 
   // Pause data snapshot — freeze visible data when pausing to prevent
@@ -298,6 +308,9 @@ export function createEngineState(
 
     lastData: [],
     lastMultiSeries: [],
+    lastDataStashRev: -1,
+    lastMultiStashRevs: new Map<string, number>(),
+    lastMultiStashData: new Map<string, LivelinePoint[]>(),
     frozenNow: 0,
 
     pausedData: null,

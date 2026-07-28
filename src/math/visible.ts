@@ -29,6 +29,29 @@ const LEFT_EDGE_EPSILON = 2;
  * >= leftEdge`) — those test a different, width-adjusted left bound and are
  * intentionally left as their own thing.
  */
+/**
+ * First index whose `.time` is >= `t`, by binary search.
+ *
+ * Relies on `points` being time-ordered ascending. That invariant is already
+ * load-bearing elsewhere in the library — `engine/dataDelta.ts`'s
+ * `findByTime` and `engine/candleHelpers.ts`'s `candleAtX` both binary-search
+ * caller-supplied data the same way — so this doesn't introduce a new
+ * assumption, it reuses an existing one. Out-of-order input would make the
+ * window under-select rather than crash.
+ */
+function lowerBoundByTime(points: LivelinePoint[], t: number): number {
+  'worklet';
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    // eslint-disable-next-line no-bitwise
+    const mid = (lo + hi) >> 1;
+    if (points[mid]!.time < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 export function filterVisiblePoints(
   points: LivelinePoint[],
   leftEdge: number,
@@ -37,10 +60,10 @@ export function filterVisiblePoints(
   'worklet';
   const out: LivelinePoint[] = [];
   const minTime = leftEdge - LEFT_EDGE_EPSILON;
-  for (const p of points) {
-    if (p.time >= minTime && p.time <= rightEdge) {
-      out.push(p);
-    }
+  for (let i = lowerBoundByTime(points, minTime); i < points.length; i++) {
+    const p = points[i]!;
+    if (p.time > rightEdge) break;
+    out.push(p);
   }
   return out;
 }
@@ -66,9 +89,9 @@ export function filterVisiblePointsInto(
   'worklet';
   out.length = 0;
   const minTime = leftEdge - LEFT_EDGE_EPSILON;
-  for (const p of points) {
-    if (p.time >= minTime && p.time <= rightEdge) {
-      out.push(p);
-    }
+  for (let i = lowerBoundByTime(points, minTime); i < points.length; i++) {
+    const p = points[i]!;
+    if (p.time > rightEdge) break;
+    out.push(p);
   }
 }

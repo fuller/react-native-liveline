@@ -192,6 +192,27 @@ All notable changes to this project will be documented in this file.
   (~25×/sec even when the book hasn't changed) and now caches its outline
   color string against the palette RGB instead of rebuilding it per frame.
   Weighted-pick distribution is unchanged — same scan order and totals.
+- **The per-frame drawing context is built once, not rebuilt every frame** —
+  the Canvas2D shim's context object (23 method closures, 14 properties, a
+  style stack and three helper closures) was constructed inside the frame
+  callback, ~27 allocations per frame before anything was drawn. Only the
+  recording canvas actually varies per frame, so the context is now built
+  once and cached, with the canvas rebound and every piece of mutable state
+  reset each frame. Measured ~10% lower process CPU on the iOS simulator,
+  though the host was too noisy to pin the figure tightly.
+- **The reverse-morph stash stopped copying whole buffers every frame** —
+  the stash that keeps a chart drawable while data disappears was rebuilt on
+  every frame, re-copying every series' entire point array (~half a million
+  element copies a second on a four-series feed) to maintain something read
+  only during that transition. It now refreshes when the data revision
+  actually moves. The stash's colour/label/value fields are still refreshed
+  per frame, since those can change without the data changing.
+- **Visible-window selection uses binary search** — finding the on-screen
+  points scanned the entire buffer every frame, per series; it now binary
+  searches for the window's start (the buffer is time-ordered, an invariant
+  `computeDelta` and `candleAtX` already rely on) and stops at its end. On a
+  short window over a long buffer that is a couple of thousand comparisons
+  replaced by about a dozen.
 - **Live dot stopped parsing a color string it usually discarded** — the dot
   parsed `badgeOuterBg` (a regex match, three `parseInt`s and a match array)
   on every frame, but only used the result while scrub-dimming. Both parses
