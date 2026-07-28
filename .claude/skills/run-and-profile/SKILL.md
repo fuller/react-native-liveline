@@ -125,6 +125,30 @@ traces — Hermes-only (worklet JS) **51-53%**, Skia-only **34%**, both 9-10%. T
 is roughly half JS interpretation, so Skia call-count tuning has limited headroom.
 Debug inflates the Hermes share — treat 51% as an upper bound.
 
+### Don't "optimize" for...of into indexed loops (measured, refuted)
+
+Hermes has no JIT, so the folk wisdom is that `for (const x of arr)` pays the
+iterator protocol and an indexed loop is faster. **Measured in the real worklet
+runtime on 2026-07-27: false, and backwards.** Over a 2000-element array of
+`{time,value}` objects, 300 reps x 5 alternating rounds:
+
+| arm | run 1 | run 2 |
+|---|---|---|
+| `for...of` | 152ms | 163ms |
+| indexed (`i < arr.length`) | 200ms | 202ms |
+| indexed, length hoisted | 184ms | 196ms |
+
+`for...of` wins at **0.83x** against even the hoisted-length arm, identically
+across runs. Hermes optimizes array iteration; the indexed form pays for
+bounds-checked element access instead. Converting the ~47 `for...of` loops in
+`draw/`+`engine/` would be a pessimization.
+
+Method, if this needs re-testing: a temp component calling `runOnUI` with the
+arms as worklets, warmed up then alternated round-robin so drift hits both
+equally, logging via `console.log` and read from the Metro log. **Do not
+benchmark this in jest** — that's Node/V8, which optimizes `for...of` very
+differently from Hermes and would answer a different question.
+
 ### Android — simpleperf (verified)
 
 SDK is at `/opt/homebrew/share/android-commandlinetools` (exported from
