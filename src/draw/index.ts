@@ -13,6 +13,7 @@ import type { Ctx2D } from './canvas2d';
 import { drawGrid, type GridState } from './grid';
 import type { GridLayerSlot } from './gridLayer';
 import { drawLine } from './line';
+import { lineOverlayPresence, LINE_OVERLAY_MIN_PRESENCE } from './lineOverlay';
 import {
   createLineCacheSlot,
   type LineCacheRef,
@@ -727,13 +728,10 @@ export function drawCandleFrame(
   const fullLineMode = opts.lineModeProg >= 0.99;
 
   // Line presence (lp): during the reveal, the morph line smoothly
-  // transforms from the loading squiggly into data positions. In candle
-  // mode it fades much faster (cubed) so candles become dominant early
-  // and the morphing line never looks like a "line chart."
-  const revealLine = fullLineMode
-    ? 1 - reveal
-    : (1 - reveal) * (1 - reveal) * (1 - reveal);
-  const lp = Math.max(opts.lineModeProg, revealLine);
+  // transforms from the loading squiggly into data positions. See
+  // draw/lineOverlay.ts — `engineStep` gates *building* the overlay's point
+  // array on the companion predicate there, so the two must stay in step.
+  const lp = lineOverlayPresence(opts.lineModeProg, reveal);
 
   // colorBlend: when reveal drives lp, force grey (loading squiggly color).
   // When the user's lineModeProg drives lp, use accent color.
@@ -755,7 +753,7 @@ export function drawCandleFrame(
   // 2. Line — morph line that transforms from loading squiggly into data.
   //    Returns pts for dot position.
   let linePts: [number, number][] | undefined;
-  if (lp > 0.01 && opts.lineVisible.length >= 2) {
+  if (lp > LINE_OVERLAY_MIN_PRESENCE && opts.lineVisible.length >= 2) {
     const scrubX = opts.scrubAmount > 0.05 ? opts.hoverX : null;
     ctx.save();
     ctx.globalAlpha = lp;
@@ -800,7 +798,7 @@ export function drawCandleFrame(
     }
     // Accent-colored dash line (fades in with lineModeProg)
     // Skip when fully in line mode — drawLine draws its own morphing dash
-    if (lp > 0.01 && !fullLineMode) {
+    if (lp > LINE_OVERLAY_MIN_PRESENCE && !fullLineMode) {
       const dashY = layout.toY(closeSource.close);
       if (dashY >= pad.top && dashY <= h - pad.bottom) {
         ctx.save();
@@ -845,7 +843,7 @@ export function drawCandleFrame(
 
     ctx.save();
     ctx.clipRect(pad.left - 1, pad.top, chartW + 2, chartH);
-    const accentCol = lp > 0.01 ? palette.line : undefined;
+    const accentCol = lp > LINE_OVERLAY_MIN_PRESENCE ? palette.line : undefined;
     if (opts.morphT >= 0 && revealOld.length > 0) {
       ctx.globalAlpha = (1 - opts.morphT) * candleAlpha;
       drawCandlesticks(

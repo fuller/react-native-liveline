@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Candle mode skips building an unused line-overlay array** — in steady
+  candle mode the engine was assembling the line-mode point array (one
+  object per visible candle, or per visible tick during a density blend)
+  on every frame, which the draw layer then discarded because the line
+  overlay isn't drawn unless a line-mode or reveal transition is active.
+  It's now built only when it will actually be used. Internal only, no
+  visual change. Measured no CPU delta on a Debug simulator build — this
+  removes provably dead work rather than making live work faster.
+- **Line-overlay presence logic consolidated** — the draw layer's "is the
+  candle-mode line overlay visible this frame" calculation and the engine's
+  companion "should I build its points" check previously lived as separate
+  inline expressions sharing a hardcoded threshold. Both now live in
+  `draw/lineOverlay.ts`, with a test asserting the invariant that keeps them
+  safe (the builder may only ever skip frames the drawer would ignore).
+  Behavior is unchanged — the extracted presence function is bit-identical
+  to the previous inline expression across the full input domain.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

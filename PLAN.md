@@ -200,6 +200,10 @@ and published-package Metro transform: consumer-side, deferred as planned.
   `scrubActivationDelay` (example "Scroll" section) needs a real finger —
   synthetic input can't reach RNGH Pan gestures on the sim.
 - CI runs on GitHub once repo is pushed (workflows already scaffolded).
+- Maintainability: see `PLAN_MAINT.md` (written 2026-07-28, not started) — a
+  seven-item structural pass over `src/`, the largest being the ~1700-line
+  `engineStep` and its three duplicated inline pipelines. Separate workstream
+  from this doc and from `PLAN_PERF.md`; explicitly *not* a perf pass.
 
 ## Task list mapping (session task tool)
 #1–#5 phases 0–4 complete; #6 = remaining candle/orderbook runtime polish

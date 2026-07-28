@@ -234,3 +234,12 @@ a manual on-device check via the example app (iOS sim and/or Android
 emulator — see `PLAN.md` for the device-testing workflow already established
 during the original port). Commit each item separately rather than bundling
 all four into one commit, so a regression in one is easy to bisect.
+
+## Follow-on workstream
+
+The structural debt this batch worked *around* rather than fixed is catalogued
+in `PLAN_MAINT.md` (2026-07-28). Relevant to anyone resuming perf work: item 4
+there (positional-parameter soup) already blocked one perf change — pooled
+decimation scratch needed a 17th positional parameter on `drawLine` and was
+reverted rather than pay that cost, to be redone once the signature takes an
+options object.

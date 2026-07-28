@@ -20,6 +20,7 @@ import {
   drawEdgeFade,
   type MultiSeriesEntry,
 } from '../draw';
+import { shouldBuildLineOverlay } from '../draw/lineOverlay';
 import { drawLoading } from '../draw/loading';
 import { drawEmpty } from '../draw/empty';
 import type { EngineConfigStep } from './types';
@@ -85,6 +86,13 @@ function dataSourceOf(useStash: boolean, hasPausedSnapshot: boolean): number {
 /** Shared empty-array fallback — avoids a fresh `[]` allocation at every
  * lookup miss below (mirrors `EMPTY_CANDLES` in useLivelineEngine.ts). */
 const EMPTY_MULTI_POINTS: LivelinePoint[] = [];
+
+/** Stable empty array handed to `drawCandleFrame` as `lineVisible` on the
+ * frames where the line overlay provably isn't drawn — see the
+ * `wantLineVisible` gate in the candle pipeline below. Separate from
+ * `EMPTY_MULTI_POINTS` purely so neither const's purpose has to be inferred
+ * from the other's call sites; both are read-only. */
+const EMPTY_LINE_POINTS: LivelinePoint[] = [];
 
 /**
  * Look up a multi-series entry's data points. `series` is either a live
@@ -869,46 +877,64 @@ export function engineStep(
     // is still at ~30% opacity, causing a visible shape jump.
     let lineVisible: LivelinePoint[];
     let lineSmoothValue: number;
+    // Is the line overlay actually going to be drawn this frame? In steady
+    // candle mode — the common case, held for as long as the chart is on
+    // screen — it isn't, and the arrays built below are per-frame garbage the
+    // drawer immediately ignores: one object per visible candle on the else
+    // branch, one per visible tick (plus `closeRefs`) on the density-blend
+    // branch, every frame at 60fps. The predicate and the drawer's own
+    // presence test live together in draw/lineOverlay.ts, which documents
+    // (and lineOverlay.test.ts enforces) the invariant that this can only
+    // ever skip frames the drawer was going to ignore anyway.
+    //
+    // `lineSmoothValue` stays unconditional in both branches: it's a scalar,
+    // and computing it here rather than under the gate keeps this change to
+    // the allocation and leaves the value's derivation byte-for-byte as it was.
+    const wantLineVisible = shouldBuildLineOverlay(lineModeProg, chartReveal);
     if (
       effectiveLineData &&
       effectiveLineData.length > 0 &&
       (lineDensityProg > 0.01 || lineModeProg > 0.05)
     ) {
-      // Density transition: blend candle-close values toward tick values
-      const closeRefs: { t: number; v: number }[] = [];
-      for (const c of drawCandles) {
-        closeRefs.push({ t: c.time + displayCandleWidth / 2, v: c.close });
-      }
-      if (drawLive) closeRefs.push({ t: now, v: drawLive.close });
+      if (!wantLineVisible) {
+        lineVisible = EMPTY_LINE_POINTS;
+      } else {
+        // Density transition: blend candle-close values toward tick values
+        const closeRefs: { t: number; v: number }[] = [];
+        for (const c of drawCandles) {
+          closeRefs.push({ t: c.time + displayCandleWidth / 2, v: c.close });
+        }
+        if (drawLive) closeRefs.push({ t: now, v: drawLive.close });
 
-      lineVisible = [];
-      let refIdx = 0;
-      for (const pt of effectiveLineData) {
-        if (pt.time < leftEdge || pt.time > rightEdge) continue;
-        while (
-          refIdx < closeRefs.length - 2 &&
-          closeRefs[refIdx + 1]!.t < pt.time
-        ) {
-          refIdx++;
+        lineVisible = [];
+        let refIdx = 0;
+        for (const pt of effectiveLineData) {
+          if (pt.time < leftEdge || pt.time > rightEdge) continue;
+          while (
+            refIdx < closeRefs.length - 2 &&
+            closeRefs[refIdx + 1]!.t < pt.time
+          ) {
+            refIdx++;
+          }
+          let interpClose: number;
+          if (closeRefs.length === 0) {
+            interpClose = pt.value;
+          } else if (closeRefs.length === 1 || pt.time <= closeRefs[0]!.t) {
+            interpClose = closeRefs[0]!.v;
+          } else if (refIdx >= closeRefs.length - 1) {
+            interpClose = closeRefs[closeRefs.length - 1]!.v;
+          } else {
+            const a = closeRefs[refIdx]!;
+            const b = closeRefs[refIdx + 1]!;
+            const span = b.t - a.t;
+            const frac =
+              span > 0 ? Math.max(0, Math.min(1, (pt.time - a.t) / span)) : 0;
+            interpClose = a.v + (b.v - a.v) * frac;
+          }
+          const blended =
+            interpClose + (pt.value - interpClose) * lineDensityProg;
+          lineVisible.push({ time: pt.time, value: blended });
         }
-        let interpClose: number;
-        if (closeRefs.length === 0) {
-          interpClose = pt.value;
-        } else if (closeRefs.length === 1 || pt.time <= closeRefs[0]!.t) {
-          interpClose = closeRefs[0]!.v;
-        } else if (refIdx >= closeRefs.length - 1) {
-          interpClose = closeRefs[closeRefs.length - 1]!.v;
-        } else {
-          const a = closeRefs[refIdx]!;
-          const b = closeRefs[refIdx + 1]!;
-          const span = b.t - a.t;
-          const frac =
-            span > 0 ? Math.max(0, Math.min(1, (pt.time - a.t) / span)) : 0;
-          interpClose = a.v + (b.v - a.v) * frac;
-        }
-        const blended =
-          interpClose + (pt.value - interpClose) * lineDensityProg;
-        lineVisible.push({ time: pt.time, value: blended });
       }
 
       const smoothTick = s.lineTickSmoothInited
@@ -920,10 +946,12 @@ export function engineStep(
         s.lineSmoothClose + (smoothTick - s.lineSmoothClose) * lineDensityProg;
     } else {
       // Candle-close resolution — no live tip; drawLine appends one at toX(now)
-      lineVisible = drawCandles.map((c) => ({
-        time: c.time + displayCandleWidth / 2,
-        value: c.close,
-      }));
+      lineVisible = wantLineVisible
+        ? drawCandles.map((c) => ({
+            time: c.time + displayCandleWidth / 2,
+            value: c.close,
+          }))
+        : EMPTY_LINE_POINTS;
       lineSmoothValue = s.lineSmoothInited
         ? s.lineSmoothClose
         : (drawLive?.close ?? drawCandles[drawCandles.length - 1]?.close ?? 0);
