@@ -192,6 +192,17 @@ All notable changes to this project will be documented in this file.
   (~25×/sec even when the book hasn't changed) and now caches its outline
   color string against the palette RGB instead of rebuilding it per frame.
   Weighted-pick distribution is unchanged — same scan order and totals.
+- **Multi-series data no longer crosses the runtime boundary whole** — `data`
+  and `candles` were long ago pulled out of the mirrored config and given their
+  own delta-synced buffers, because re-serializing large point arrays into the
+  UI runtime on every commit was expensive. Multi-series data never got the
+  same treatment: each series' full point array rode along inside the config
+  and was deep-copied on every commit (four series of a few thousand points,
+  several times a second). Each series now syncs through its own
+  delta-updated, id-keyed buffer, so a tick sends only the changed tail. The
+  per-series cache revisions added above are now derived from those deltas
+  rather than an array-reference check, which also catches a value-equal but
+  recreated array. Internal only — the `multiSeries` prop is unchanged.
 - **Multi-series line caches get a real data revision** — they passed a
   hardcoded `dataRev: 0` and relied entirely on a length/first-time/last-time/
   last-value heuristic, which cannot see a consumer revising an *interior*

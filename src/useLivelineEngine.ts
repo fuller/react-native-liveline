@@ -28,14 +28,23 @@ import {
 } from './draw/canvas2d';
 import { engineStep } from './engine/step';
 import { createEngineState, type EngineState } from './engine/state';
-import type { EngineConfig, EngineConfigStep } from './engine/types';
+import type {
+  EngineConfig,
+  EngineConfigStep,
+  MultiSeriesConfigEntry,
+} from './engine/types';
 import { isQuiescentCandidate } from './engine/quiescence';
 import {
   MAX_DELTA_MS,
   QUIESCENT_FRAME_THRESHOLD,
   MIN_FRAME_INTERVAL_MS,
 } from './engine/constants';
-import { computeDelta, pointsEqual, candlesEqual } from './engine/dataDelta';
+import {
+  computeDelta,
+  pointsEqual,
+  candlesEqual,
+  type DeltaResult,
+} from './engine/dataDelta';
 import type {
   HoverPoint,
   LivelineFonts,
@@ -51,11 +60,16 @@ export type { EngineConfig } from './engine/types';
 // reports 'same' every commit instead of a spurious 'reset' (which a
 // fresh `[]` literal on every render would otherwise cause).
 const EMPTY_CANDLES: CandlePoint[] = [];
+// Same idea as EMPTY_CANDLES, for a single multi-series entry with no
+// previously-seen data (a series appearing for the first time).
+const EMPTY_POINTS: LivelinePoint[] = [];
 
 /**
  * Strip `data`/`candles` off the caller's config for mirroring into `cfg`
  * — they're synced through their own delta-updated shared values instead
- * (see `useLivelineEngine`'s mirror effect).
+ * (see `useLivelineEngine`'s mirror effect). Same treatment per multi-series
+ * entry: each one's `data` is dropped too, synced instead through
+ * `multiDataBuf` below.
  */
 function toStepConfig(
   config: Omit<EngineConfig, 'hasOnHover' | 'noMotion'>,
@@ -66,8 +80,36 @@ function toStepConfig(
   multiRevs: Record<string, number> | undefined
 ): EngineConfigStep {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to omit them below
-  const { data, candles, ...rest } = config;
-  return { ...rest, hasOnHover, noMotion, dataRev, candlesRev, multiRevs };
+  const { data, candles, multiSeries, ...rest } = config;
+  return {
+    ...rest,
+    hasOnHover,
+    noMotion,
+    dataRev,
+    candlesRev,
+    multiRevs,
+    multiSeries: multiSeries?.map(({ id, value, palette, label }) => ({
+      id,
+      value,
+      palette,
+      label,
+    })),
+  };
+}
+
+/**
+ * Seed `multiDataBuf`'s initial value from the caller's initial
+ * `multiSeries` prop — mirrors `dataBuf`/`candlesBuf`'s mount-time seeding
+ * above (see the comment there for why: the frame loop can start ticking on
+ * the UI thread before the mount commit's mirror effect below has run).
+ */
+function buildInitialMultiData(
+  multiSeries: MultiSeriesConfigEntry[] | undefined
+): Record<string, LivelinePoint[]> {
+  if (!multiSeries || multiSeries.length === 0) return {};
+  const out: Record<string, LivelinePoint[]> = {};
+  for (const series of multiSeries) out[series.id] = series.data.slice();
+  return out;
 }
 
 /** A 0×0 picture used before the first frame is recorded. */
@@ -127,6 +169,13 @@ export function useLivelineEngine(
   const candlesBuf = useSharedValue<CandlePoint[]>(
     (config.candles ?? EMPTY_CANDLES).slice()
   );
+  // Multi-series points, keyed by series id — one delta-synced buffer per
+  // series instead of a single array, since series are added/removed
+  // independently of each other's data changing. Seeded at mount for the
+  // same reason as dataBuf/candlesBuf above.
+  const multiDataBuf = useSharedValue<Record<string, LivelinePoint[]>>(
+    buildInitialMultiData(config.multiSeries)
+  );
   const prevDataRef = useRef<LivelinePoint[]>(config.data);
   const prevCandlesRef = useRef<CandlePoint[]>(config.candles ?? EMPTY_CANDLES);
   // Bumped whenever the data buffer actually changes (delta or reset) —
@@ -138,21 +187,14 @@ export function useLivelineEngine(
   // already-closed candle in place (a late trade correcting the previous
   // bar's OHLC): the heuristic fields don't move, but this does.
   const candlesRevRef = useRef(0);
-  // Per-series revision counters for multi-series mode, plus the previous
-  // `data` array reference each one was computed against. Unlike `data` and
-  // `candles`, multi-series data isn't delta-synced through its own buffer —
-  // it rides along inside the mirrored config — so there's no computeDelta
-  // result to key off. A reference comparison is used instead, which is
-  // deliberately as strong as (and no stronger than) the single-series path:
-  // it catches the realistic corruption case, a caller handing us a NEW array
-  // whose interior differs, which the cache's len/firstT/lastT/lastV
-  // heuristic cannot see. It does not catch a caller mutating the SAME array
-  // object in place — but neither does `dataRev`, since computeDelta returns
-  // 'same' for a reference-equal array and never bumps either. These live on
-  // the JS thread on purpose: array identity is stable here, whereas the
-  // worklet boundary deep-copies on every commit, so a reference check on the
-  // UI thread would report "changed" every single frame.
+  // Per-series previous-`data`-array reference, used purely as computeDelta's
+  // `prev` argument for that series (mirrors prevDataRef/prevCandlesRef,
+  // just keyed by series id instead of a single slot).
   const prevMultiDataRef = useRef<Map<string, LivelinePoint[]>>(new Map());
+  // Per-series revision counters, bumped whenever that series' computeDelta
+  // result isn't 'same' — consumed by the UI-thread multi-series line caches
+  // as an exact per-series data identity, exactly like dataRevRef/
+  // candlesRevRef above (see the EngineConfigStep.multiRevs doc comment).
   const multiRevsRef = useRef<Map<string, number>>(new Map());
 
   // Mirror the latest props every commit — the frame worklet reads cfg.value.
@@ -174,30 +216,61 @@ export function useLivelineEngine(
     );
     if (candlesDelta.kind !== 'same') candlesRevRef.current++;
 
-    // Same "diff before the config write" rule as above, for multi-series.
-    // Rebuilt as a plain object each commit (small — one number per series)
-    // so it can cross into the worklet runtime alongside the rest of cfg.
+    // Same "diff before the config write" rule as above, for multi-series —
+    // one computeDelta per series, keyed by id. `multiRevs` is rebuilt as a
+    // plain object each commit (small — one number per series) so it can
+    // cross into the worklet runtime alongside the rest of cfg; the deltas
+    // themselves are applied to `multiDataBuf` after the cfg.value write
+    // below, mirroring the data/candles ordering.
     let multiRevs: Record<string, number> | undefined;
     const multi = config.multiSeries;
+    const prevMultiData = prevMultiDataRef.current;
+    const multiRevsMap = multiRevsRef.current;
+    const multiDeltas: {
+      id: string;
+      delta: DeltaResult<LivelinePoint>;
+      data: LivelinePoint[];
+    }[] = [];
+    // Series ids to drop from multiDataBuf below — either individual series
+    // removed from a still-active multi-series config, or every series at
+    // once when the chart leaves multi-series mode entirely.
+    let removedMultiIds: string[] | null = null;
+
     if (multi !== undefined && multi.length > 0) {
-      const prevData = prevMultiDataRef.current;
-      const revs = multiRevsRef.current;
       multiRevs = {};
       for (const series of multi) {
-        if (prevData.get(series.id) !== series.data) {
-          revs.set(series.id, (revs.get(series.id) ?? 0) + 1);
-          prevData.set(series.id, series.data);
+        const prev = prevMultiData.get(series.id) ?? EMPTY_POINTS;
+        const delta = computeDelta(prev, series.data, pointsEqual);
+        if (delta.kind !== 'same') {
+          multiRevsMap.set(series.id, (multiRevsMap.get(series.id) ?? 0) + 1);
         }
-        multiRevs[series.id] = revs.get(series.id) ?? 0;
+        multiRevs[series.id] = multiRevsMap.get(series.id) ?? 0;
+        multiDeltas.push({ id: series.id, delta, data: series.data });
+        prevMultiData.set(series.id, series.data);
       }
-      // Drop bookkeeping for series that no longer exist, so both maps can't
-      // grow without bound across a long-lived chart whose series churn.
-      if (prevData.size > multi.length) {
+      // Drop bookkeeping (and buffered data) for series that no longer
+      // exist, so none of prevMultiData/multiRevsMap/multiDataBuf can grow
+      // without bound across a long-lived chart whose series churn.
+      if (prevMultiData.size > multi.length) {
         const live = new Set(multi.map((s) => s.id));
-        for (const id of prevData.keys())
-          if (!live.has(id)) prevData.delete(id);
-        for (const id of revs.keys()) if (!live.has(id)) revs.delete(id);
+        removedMultiIds = [];
+        for (const id of prevMultiData.keys()) {
+          if (!live.has(id)) {
+            removedMultiIds.push(id);
+            prevMultiData.delete(id);
+          }
+        }
+        for (const id of multiRevsMap.keys())
+          if (!live.has(id)) multiRevsMap.delete(id);
       }
+    } else if (prevMultiData.size > 0) {
+      // Left multi-series mode entirely (or the array emptied out) — drop
+      // all per-series bookkeeping and buffered data so switching briefly
+      // into multi-series and back doesn't leak previously-tracked series
+      // forever.
+      removedMultiIds = Array.from(prevMultiData.keys());
+      prevMultiData.clear();
+      multiRevsMap.clear();
     }
 
     cfg.value = toStepConfig(
@@ -236,6 +309,41 @@ export function useLivelineEngine(
       candlesBuf.value = candlesNext.slice();
     }
     prevCandlesRef.current = candlesNext;
+
+    // Apply this commit's per-series deltas (and any removed-series
+    // cleanup) to multiDataBuf in a single `.modify()` call — one UI-thread
+    // write for the whole commit instead of one per series.
+    if (multiDeltas.length > 0 || removedMultiIds) {
+      multiDataBuf.modify(
+        <T extends Record<string, LivelinePoint[]>>(value: T): T => {
+          'worklet';
+          // `.modify()`'s modifier type is itself generic (`<T extends
+          // Value>(value: T) => T`), which TS won't let us index-assign into
+          // directly (TS2862) — `buf` is the same object under a concrete,
+          // writable type purely so the loop below can assign into it.
+          const buf: Record<string, LivelinePoint[]> = value;
+          for (const { id, delta, data: fullData } of multiDeltas) {
+            if (delta.kind === 'delta') {
+              const { drop, keep, tail } = delta;
+              let arr = buf[id];
+              if (arr === undefined) {
+                arr = [];
+                buf[id] = arr;
+              }
+              arr.splice(0, drop);
+              arr.length = keep;
+              for (const item of tail) arr.push(item);
+            } else if (delta.kind === 'reset') {
+              buf[id] = fullData.slice();
+            }
+          }
+          if (removedMultiIds) {
+            for (const id of removedMultiIds) delete buf[id];
+          }
+          return value;
+        }
+      );
+    }
   });
 
   const state = useSharedValue<EngineState | null>(null);
@@ -369,7 +477,8 @@ export function useLivelineEngine(
       now_ms,
       fonts,
       dataBuf.value,
-      candlesBuf.value
+      candlesBuf.value,
+      multiDataBuf.value
     );
     picture.value = recorder.finishRecordingAsPicture();
     s.lastRecordedW = w;

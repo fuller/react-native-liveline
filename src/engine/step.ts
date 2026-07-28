@@ -82,6 +82,27 @@ function dataSourceOf(useStash: boolean, hasPausedSnapshot: boolean): number {
   return useStash ? 2 : hasPausedSnapshot ? 1 : 0;
 }
 
+/** Shared empty-array fallback — avoids a fresh `[]` allocation at every
+ * lookup miss below (mirrors `EMPTY_CANDLES` in useLivelineEngine.ts). */
+const EMPTY_MULTI_POINTS: LivelinePoint[] = [];
+
+/**
+ * Look up a multi-series entry's data points. `series` is either a live
+ * `cfg.multiSeries` entry (no `.data` — its points live in `multiData`,
+ * keyed by id, synced via its own delta-updated buffer) or a reverse-morph
+ * stash entry from `s.lastMultiSeries` (a `StashedSeries`, which carries its
+ * own `.data` copy directly — see the doc comment on `StashedSeries` in
+ * state.ts). Checking `.data` first covers both without the caller needing
+ * to know which one it has.
+ */
+function multiSeriesData(
+  series: { id: string; data?: LivelinePoint[] },
+  multiData: Record<string, LivelinePoint[]>
+): LivelinePoint[] {
+  'worklet';
+  return series.data ?? multiData[series.id] ?? EMPTY_MULTI_POINTS;
+}
+
 /**
  * One frame of the liveline engine — a direct port of the web version's
  * rAF `draw` callback, minus the DOM (badge and live value are handled via
@@ -104,7 +125,14 @@ export function engineStep(
   /** Candles — synced via its own delta-updated shared value; empty array
    * (never undefined) when there is no candle data, matching the `?? []`
    * fallback this replaces at every read site below. */
-  candles: CandlePoint[]
+  candles: CandlePoint[],
+  /** Multi-series data points, keyed by series id — synced via its own
+   * delta-updated shared value (one buffer per series), same rationale as
+   * `data`/`candles` above but keyed since series can be added/removed
+   * independently. `cfg.multiSeries` entries carry id/value/palette/label
+   * only; look up a series' points here (or via `multiSeriesData` below,
+   * which also handles the reverse-morph stash case). */
+  multiData: Record<string, LivelinePoint[]>
 ): StepOutput {
   'worklet';
   const out: StepOutput = { valueText: null, valueColor: null };
@@ -132,9 +160,10 @@ export function engineStep(
     if (cfg.paused && s.pausedMultiData === null) {
       const snap = new Map<string, { data: LivelinePoint[]; value: number }>();
       for (const series of cfg.multiSeries) {
-        if (series.data.length >= 2) {
+        const seriesData = multiData[series.id] ?? EMPTY_MULTI_POINTS;
+        if (seriesData.length >= 2) {
           snap.set(series.id, {
-            data: series.data.slice(),
+            data: seriesData.slice(),
             value: series.value,
           });
         }
@@ -157,7 +186,9 @@ export function engineStep(
   const effectiveCandles = isCandle ? (s.pausedCandles ?? candles) : [];
   const hasMultiData =
     cfg.isMultiSeries && cfg.multiSeries
-      ? cfg.multiSeries.some((series) => series.data.length >= 2)
+      ? cfg.multiSeries.some(
+          (series) => (multiData[series.id] ?? EMPTY_MULTI_POINTS).length >= 2
+        )
       : false;
   const hasData = isCandle
     ? effectiveCandles.length >= 2
@@ -230,7 +261,12 @@ export function engineStep(
     if (hasMultiData && cfg.multiSeries) {
       s.lastMultiSeries = cfg.multiSeries.map((series) => ({
         id: series.id,
-        data: series.data.slice(),
+        // Copy — `multiData[series.id]` aliases the live per-series buffer
+        // (mutated in place by the JS-thread delta applier via
+        // `.modify()`), so a bare reference here would let future ticks
+        // silently rewrite this stash. Same reasoning as `s.lastData`
+        // above and `s.lastCandles` in the candle pipeline.
+        data: (multiData[series.id] ?? EMPTY_MULTI_POINTS).slice(),
         value: series.value,
         palette: series.palette,
         label: series.label,
@@ -1056,7 +1092,8 @@ export function engineStep(
 
     // Window transition — seed with all series data for accurate range
     const firstData =
-      s.pausedMultiData?.get(firstSeries.id)?.data ?? firstSeries.data;
+      s.pausedMultiData?.get(firstSeries.id)?.data ??
+      multiSeriesData(firstSeries, multiData);
     const windowResult = updateWindowTransition(
       cfg,
       transition,
@@ -1081,7 +1118,9 @@ export function engineStep(
       // below, then moved past; nothing needs its own copy.
       const targetVisible = s.multiUnionVisibleScratch;
       for (const series of effectiveMultiSeries) {
-        const sData = s.pausedMultiData?.get(series.id)?.data ?? series.data;
+        const sData =
+          s.pausedMultiData?.get(series.id)?.data ??
+          multiSeriesData(series, multiData);
         const sv = smoothValues.get(series.id) ?? series.value;
         filterVisiblePointsInto(
           sData,
@@ -1132,7 +1171,7 @@ export function engineStep(
     let globalMax = -Infinity;
     for (const series of effectiveMultiSeries) {
       const snap = s.pausedMultiData?.get(series.id);
-      const seriesData = snap?.data ?? series.data;
+      const seriesData = snap?.data ?? multiSeriesData(series, multiData);
       let visible = s.multiVisibleScratch.get(series.id);
       if (visible === undefined) {
         visible = [];
