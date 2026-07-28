@@ -50,9 +50,6 @@ export function drawDot(
     }
   }
 
-  // Outer bg color for blending
-  const outerRgb = parseColorRgb(palette.badgeOuterBg);
-
   // White outer circle with subtle shadow
   ctx.save();
   ctx.globalAlpha = baseAlpha;
@@ -70,7 +67,13 @@ export function drawDot(
   ctx.beginPath();
   ctx.arc(x, y, 3.5, 0, Math.PI * 2);
   if (dim > 0.01) {
+    // Both parses live inside this branch on purpose: they're only needed
+    // while scrub-dimming, but `badgeOuterBg` used to be parsed once per
+    // frame unconditionally (a regex match + 3 parseInt + the match array)
+    // and thrown away on every non-scrubbing frame, which is nearly all of
+    // them.
     const lineRgb = parseColorRgb(palette.line);
+    const outerRgb = parseColorRgb(palette.badgeOuterBg);
     ctx.fillStyle = lerpColor(lineRgb, outerRgb, dim);
   } else {
     ctx.fillStyle = palette.line;

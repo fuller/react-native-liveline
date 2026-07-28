@@ -192,6 +192,13 @@ All notable changes to this project will be documented in this file.
   (~25×/sec even when the book hasn't changed) and now caches its outline
   color string against the palette RGB instead of rebuilding it per frame.
   Weighted-pick distribution is unchanged — same scan order and totals.
+- **Live dot stopped parsing a color string it usually discarded** — the dot
+  parsed `badgeOuterBg` (a regex match, three `parseInt`s and a match array)
+  on every frame, but only used the result while scrub-dimming. Both parses
+  now sit inside that branch. Investigated while checking whether the pulse
+  ring was a frame-rate cost: measured with the ring toggled on and off, it
+  isn't — it draws for 900ms of every 1500ms cycle and costs one `addCircle`
+  plus one stroke when it does.
 - **Multi-series data no longer crosses the runtime boundary whole** — `data`
   and `candles` were long ago pulled out of the mirrored config and given their
   own delta-synced buffers, because re-serializing large point arrays into the
