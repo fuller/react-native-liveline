@@ -125,6 +125,26 @@ traces — Hermes-only (worklet JS) **51-53%**, Skia-only **34%**, both 9-10%. T
 is roughly half JS interpretation, so Skia call-count tuning has limited headroom.
 Debug inflates the Hermes share — treat 51% as an upper bound.
 
+### You cannot store a JS closure on a SharedValue object (tried, reverted)
+
+`SkiaCache` lives inside a `useSharedValue`. An attempt to hoist the per-frame
+`Ctx2D` by caching it there (`cache.ctx`, `cache.resetFrame`) shipped green
+tests, clean tsc/eslint, and passing screenshots — then failed on the *second
+frame* in a fresh launch with `TypeError: cache.resetFrame is not a function
+(it is undefined)`. Diagnostic on the UI thread:
+
+    [DIAG] ctx=object reset=object pool=object keys=15
+
+`typeof resetFrame === 'object'`, not `'function'`. Reanimated converts closures
+assigned onto a shared-value object into non-callable shareable handles. Frame 1
+works because the freshly-built object is returned directly; frame 2 reads the
+mangled one back. Skia host objects (`cache.pool`) survive fine — this is
+specific to JS functions.
+
+**Tests cannot catch this** — jest never exercises the worklet runtime. Only
+launching the app does, and only past the first frame. If you cache anything
+callable for the UI thread, it must not round-trip through a SharedValue.
+
 ### Don't "optimize" for...of into indexed loops (measured, refuted)
 
 Hermes has no JIT, so the folk wisdom is that `for (const x of arr)` pays the
