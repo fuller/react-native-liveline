@@ -1,17 +1,18 @@
 import { Skia } from '@shopify/react-native-skia';
 import type { ChartLayout, Momentum } from '../types';
 import { lerp } from '../math/lerp';
-import type { Ctx2D } from '../draw/canvas2d';
+import { rgbColor } from '../math/color';
+import type { Ctx2D, Style2D } from '../draw/canvas2d';
+import { ensured } from '../draw/pathCache';
 import {
-  badgeSvgPath,
-  badgePillOnly,
+  buildBadgePillPath,
   BADGE_PAD_X,
   BADGE_PAD_Y,
   BADGE_TAIL_LEN,
   BADGE_TAIL_SPREAD,
   BADGE_LINE_H,
 } from '../draw/badge';
-import type { EngineConfig } from './types';
+import type { EngineConfigStep } from './types';
 import type { BadgeState } from './state';
 import {
   BADGE_WIDTH_LERP,
@@ -27,14 +28,14 @@ import {
  *
  * The web version renders the badge as a DOM/SVG overlay updated per frame
  * (`updateBadgeDOM`); geometry, lerps, and colors here match it exactly —
- * the pill path comes from the same badgeSvgPath generator via
- * Skia.Path.MakeFromSVGString.
+ * the pill shape comes from `buildBadgePillPath`, a direct port of the same
+ * geometry the web version's SVG path uses.
  *
  * Mutates `badge` (width/Y/color lerp state). Returns nothing.
  */
 export function drawBadge(
   ctx: Ctx2D,
-  cfg: EngineConfig,
+  cfg: EngineConfigStep,
   badge: BadgeState,
   smoothValue: number,
   layout: ChartLayout,
@@ -97,7 +98,7 @@ export function drawBadge(
   const badgeTop = badge.y - pillH / 2;
 
   // Pill fill color
-  let fillColor: string;
+  let fillColor: Style2D;
   let textColor: string;
   let shadow = false;
   if (cfg.badgeVariant === 'minimal') {
@@ -126,17 +127,36 @@ export function drawBadge(
       const bb = Math.round(
         MOMENTUM_RED[2] + (MOMENTUM_GREEN[2] - MOMENTUM_RED[2]) * g
       );
-      fillColor = `rgb(${rr},${gg},${bb})`;
+      fillColor = rgbColor(rr, gg, bb);
     }
   }
 
-  // Build the pill path (SVG path string → SkPath), positioned at badge origin
-  const d = cfg.badgeTail
-    ? badgeSvgPath(pillW, pillH, BADGE_TAIL_LEN, BADGE_TAIL_SPREAD)
-    : badgePillOnly(pillW, pillH);
-  const path = Skia.Path.MakeFromSVGString(d);
-  if (!path) return;
-  path.offset(badgeLeft, badgeTop);
+  // Rebuild the pill path only when its geometry actually changed — pillW
+  // settles quickly (the width lerp snaps), so on almost every frame this
+  // reuses the cached path instead of re-emitting it. Same lazy-alloc +
+  // rewind-and-rebuild-in-place mechanism as the line spline cache (see
+  // draw/lineCache.ts) — `ensured()` never allocates a new native path
+  // object on a rebuild, only refills the one already live. The cached
+  // path is origin-anchored and positioned with a canvas translate below.
+  const wantTail = !!cfg.badgeTail;
+  if (
+    badge.path === null ||
+    badge.pathW !== pillW ||
+    badge.pathTail !== wantTail
+  ) {
+    badge.path = ensured(badge.path, () => Skia.Path.Make());
+    badge.path.rewind();
+    buildBadgePillPath(
+      badge.path,
+      pillW,
+      pillH,
+      BADGE_TAIL_LEN,
+      BADGE_TAIL_SPREAD,
+      wantTail
+    );
+    badge.pathW = pillW;
+    badge.pathTail = wantTail;
+  }
 
   ctx.save();
   ctx.globalAlpha = badgeOpacity;
@@ -147,12 +167,18 @@ export function drawBadge(
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 1;
   }
-
-  // Fill the pill via the shim's current path so shadow handling applies
-  ctx.beginPathFrom(path);
+  // Fill the pill via the shim's current path so shadow handling applies.
+  // Manually undo the translate and reset shadowBlur afterward (matching
+  // fill()'s own "no shadow" default) instead of an inner save/restore —
+  // this runs every frame the badge is visible, and save() allocates a
+  // StyleSnapshot object + a lineDash array copy that a scoped fill/translate
+  // doesn't need.
+  ctx.translate(badgeLeft, badgeTop);
+  ctx.beginPathFrom(badge.path);
   ctx.fillStyle = fillColor;
   ctx.fill();
   ctx.shadowBlur = 0;
+  ctx.translate(-badgeLeft, -badgeTop);
 
   // Text — left-aligned inside the pill (matches the DOM span's padding box)
   ctx.font = ctx.fonts.label;

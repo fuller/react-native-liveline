@@ -1,22 +1,48 @@
 import type { ChartLayout, LivelinePalette, CandlePoint } from '../types';
+import { rgbColor } from '../math/color';
+import type { SkColor, SkPath } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
+import {
+  updateCandleCache,
+  type CandleCacheRef,
+  type CachePath,
+} from './candleCache';
 
 export type { CandlePoint } from '../types';
 
 const BULL = '#22c55e';
 const BEAR = '#ef4444';
 
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, and candlestick.test.ts
+// imports this file directly without it loaded — a real (non-type) import
+// from canvas2d.ts would drag Skia in and break that test under Jest,
+// which doesn't transform that package.
+const DASH_4_4: number[] = [4, 4];
+const EMPTY_DASH: number[] = [];
+
 // Pre-parsed RGB for fast interpolation
 const BULL_RGB = [34, 197, 94] as const;
 const BEAR_RGB = [239, 68, 68] as const;
 
-/** Blend bear→bull by t (0=bear, 1=bull). */
-function blendColor(t: number): string {
+/** Blend bear→bull by t (0=bear, 1=bull), as an RGB tuple — lets a caller
+ * (the live candle) combine this with a further accent blend without a
+ * lossy SkColor→RGB round-trip. */
+function blendRgb(t: number): [number, number, number] {
   'worklet';
   const r = Math.round(BEAR_RGB[0] + (BULL_RGB[0] - BEAR_RGB[0]) * t);
   const g = Math.round(BEAR_RGB[1] + (BULL_RGB[1] - BEAR_RGB[1]) * t);
   const b = Math.round(BEAR_RGB[2] + (BULL_RGB[2] - BEAR_RGB[2]) * t);
-  return `rgb(${r},${g},${b})`;
+  return [r, g, b];
+}
+
+/** Blend bear→bull by t (0=bear, 1=bull). */
+function blendColor(t: number): SkColor {
+  'worklet';
+  const [r, g, b] = blendRgb(t);
+  return rgbColor(r, g, b);
 }
 
 /** Parse "#rrggbb" or "rgb(r,g,b)" to [r,g,b]. */
@@ -36,21 +62,21 @@ function parseRgb(color: string): [number, number, number] {
   return [128, 128, 128];
 }
 
-/** Blend a candle color toward an accent color by t. */
+/** Blend a candle's base RGB toward an accent color (a CSS string,
+ * parsed once) by t. */
 function blendToAccent(
-  candleColor: string,
+  candleRgb: readonly [number, number, number],
   accentColor: string,
   t: number
-): string {
+): SkColor {
   'worklet';
-  if (t <= 0) return candleColor;
-  if (t >= 1) return accentColor;
-  const [r1, g1, b1] = parseRgb(candleColor);
+  if (t <= 0) return rgbColor(candleRgb[0], candleRgb[1], candleRgb[2]);
   const [r2, g2, b2] = parseRgb(accentColor);
-  const r = Math.round(r1 + (r2 - r1) * t);
-  const g = Math.round(g1 + (g2 - g1) * t);
-  const b = Math.round(b1 + (b2 - b1) * t);
-  return `rgb(${r},${g},${b})`;
+  if (t >= 1) return rgbColor(r2, g2, b2);
+  const r = Math.round(candleRgb[0] + (r2 - candleRgb[0]) * t);
+  const g = Math.round(candleRgb[1] + (g2 - candleRgb[1]) * t);
+  const b = Math.round(candleRgb[2] + (b2 - candleRgb[2]) * t);
+  return rgbColor(r, g, b);
 }
 
 /**
@@ -97,6 +123,19 @@ function roundedRect(
 /**
  * Draw OHLC candlesticks with live candle glow + scrub dimming.
  * Respects incoming ctx.globalAlpha for cross-fade/reveal support.
+ *
+ * Every non-live candle is exactly one of two colors (bull/bear, uniformly
+ * accent-blended if a mode-morph is in progress — the blend is the same
+ * for every candle sharing a base color, so there are still only two
+ * results). Outside of scrub dimming, every non-live candle also shares
+ * the same alpha (1). Both are precomputed once and the non-live candles
+ * are batched into two combined paths (one fill + one stroke call each)
+ * instead of up to 3 native calls per candle — for a chart with M candles,
+ * a handful of calls instead of up to 3M. Scrub dimming gives each candle
+ * its own continuous alpha (a spatial fade from the cursor), which can't
+ * be expressed as one paint-level alpha for a combined path, so batching
+ * is skipped and candles are drawn individually in that case — the same
+ * per-candle logic this function used before batching, unchanged.
  */
 export function drawCandlesticks(
   ctx: Ctx2D,
@@ -105,12 +144,26 @@ export function drawCandlesticks(
   candleWidthSecs: number,
   liveTime: number,
   now_ms: number,
+  pauseProgress: number,
   scrubX: number,
   scrubDim: number,
   liveAlpha: number = 1,
   liveBullBlend: number = -1,
   accentColor?: string,
-  accentBlend: number = 0
+  accentBlend: number = 0,
+  /** Cross-frame cache for closed-candle body+wick geometry (see
+   * draw/candleCache.ts). Only consulted along the canBatch fast path —
+   * caller must not pass this during scrub-dimming (canBatch is already
+   * false then), candle-width morph, mid line-mode-morph, or the reveal
+   * OHLC-collapse window; see draw/index.ts's drawCandleFrame for where
+   * those bypasses are wired. */
+  cache?: CandleCacheRef,
+  /** Real SkPath factory, supplied by the caller so this Skia-adjacent-but-
+   * import-free module never imports the real `Skia` object itself (this
+   * file is exercised directly by candlestick.test.ts under jest, which
+   * can't parse @shopify/react-native-skia's ESM build — see draw/index.ts,
+   * which owns the runtime import, same as line.ts does for the line cache). */
+  makePath?: () => CachePath
 ) {
   'worklet';
   if (candles.length === 0) return;
@@ -121,85 +174,270 @@ export function drawCandlesticks(
   const padL = layout.pad.left;
   const padR = layout.pad.left + layout.chartW;
 
-  // Live pulse: subtle brightness cycle
-  const livePulse = 0.12 + Math.sin(now_ms * 0.004) * 0.08;
+  // Live pulse: subtle brightness cycle. Gated off past the same pause
+  // threshold the dot's pulse ring uses (draw/index.ts) — without this,
+  // this Math.sin(now_ms) term never settles, and candle mode could never
+  // reach quiescence (see engine/quiescence.ts).
+  const showLivePulse = pauseProgress < 0.5;
+  const livePulse = showLivePulse ? 0.12 + Math.sin(now_ms * 0.004) * 0.08 : 0;
+  const baseAlpha = ctx.globalAlpha;
+  const hasAccent = !!accentColor && accentBlend > 0.01;
+  const canBatch = !(scrubDim > 0.01 && scrubX > 0);
 
-  for (const c of candles) {
-    const cx = toX(c.time + candleWidthSecs / 2);
-    if (cx + halfBody < padL || cx - halfBody > padR) continue;
+  const bullColor: SkColor = hasAccent
+    ? blendToAccent(BULL_RGB, accentColor!, accentBlend)
+    : rgbColor(BULL_RGB[0], BULL_RGB[1], BULL_RGB[2]);
+  const bearColor: SkColor = hasAccent
+    ? blendToAccent(BEAR_RGB, accentColor!, accentBlend)
+    : rgbColor(BEAR_RGB[0], BEAR_RGB[1], BEAR_RGB[2]);
 
-    const isBull = c.close >= c.open;
-    const isLive = c.time === liveTime;
-    let color =
-      isLive && liveBullBlend >= 0
-        ? blendColor(liveBullBlend)
-        : isBull
-          ? BULL
-          : BEAR;
-    if (accentColor && accentBlend > 0.01) {
-      color = blendToAccent(color, accentColor, accentBlend);
-    }
+  const bodyRect = (cx: number, bodyTop: number, bodyH: number) => {
+    roundedRect(ctx, cx - halfBody, bodyTop, bodyW, bodyH, radius);
+  };
+  const spatialDim = (cx: number): number => {
+    const dist = cx - scrubX;
+    if (dist <= 0) return 1;
+    const dimT = Math.min(dist / (bodyW * 1.5), 1);
+    return 1 - scrubDim * 0.5 * dimT;
+  };
 
-    // Scrub dimming: smooth spatial gradient from cursor position
-    let candleAlpha = isLive ? liveAlpha : 1;
-    if (scrubDim > 0.01 && scrubX > 0) {
-      const dist = cx - scrubX;
-      if (dist > 0) {
-        const fadeZone = bodyW * 1.5;
-        const dimT = Math.min(dist / fadeZone, 1);
-        candleAlpha *= 1 - scrubDim * 0.5 * dimT;
+  let liveCandle: CandlePoint | null = null;
+
+  if (canBatch) {
+    ctx.globalAlpha = baseAlpha; // non-live candleAlpha is always 1 here
+    ctx.lineCap = 'round';
+    ctx.lineWidth = wickW;
+
+    const cacheReady =
+      cache !== undefined &&
+      makePath !== undefined &&
+      updateCandleCache(
+        cache.slot,
+        makePath,
+        layout,
+        candles,
+        candleWidthSecs,
+        liveTime,
+        bodyW,
+        radius,
+        cache.dataSource,
+        cache.candlesRev
+      );
+
+    if (cacheReady) {
+      // Closed-candle geometry came from the cache (built once, translated
+      // cross-frame — see draw/candleCache.ts) instead of being rebuilt by
+      // the loops below. Still need to find the live candle, which is never
+      // part of the cache and is drawn separately further down.
+      for (const c of candles) {
+        if (c.time === liveTime) {
+          liveCandle = c;
+          break;
+        }
+      }
+      const slot = cache!.slot;
+      const dx = layout.toX(slot.tRef) - slot.xRefAtBuild;
+      // save()/restore() would only be scoping this translate — replace
+      // with the inverse translate instead, since save() pushes a 13-field
+      // snapshot object plus a lineDash.slice() array (two allocations) on
+      // this hot per-frame draw path for no benefit: the only ctx state
+      // mutated below is fillStyle/strokeStyle, which the legacy fallback
+      // branch below doesn't save/restore either, and the live-candle block
+      // further down re-sets both before use.
+      if (dx !== 0) ctx.translate(dx, 0);
+      if (slot.hasBullBodies) {
+        ctx.beginPathFrom(slot.bullBodies as SkPath);
+        ctx.fillStyle = bullColor;
+        ctx.fill();
+      }
+      if (slot.hasBullWicks) {
+        ctx.beginPathFrom(slot.bullWicks as SkPath);
+        ctx.strokeStyle = bullColor;
+        ctx.stroke();
+      }
+      if (slot.hasBearBodies) {
+        ctx.beginPathFrom(slot.bearBodies as SkPath);
+        ctx.fillStyle = bearColor;
+        ctx.fill();
+      }
+      if (slot.hasBearWicks) {
+        ctx.beginPathFrom(slot.bearWicks as SkPath);
+        ctx.strokeStyle = bearColor;
+        ctx.stroke();
+      }
+      if (dx !== 0) ctx.translate(-dx, 0);
+      // Release the cache-owned path adopted by the last beginPathFrom()
+      // above back to the pooled path. Every other exit from this function
+      // passes through a ctx.beginPath() in the live-candle block below —
+      // but that block is skipped when there's no live candle, or when it's
+      // off-screen, which would otherwise leave a cache-owned path current
+      // on the ctx. Any downstream moveTo/rect without a preceding
+      // beginPath would then append into — and permanently corrupt — that
+      // cached path (it's only ever rewind()'d on a key miss). See the
+      // beginPathFrom contract in canvas2d.ts.
+      ctx.beginPath();
+    } else {
+      for (const isBull of [true, false] as const) {
+        const groupColor = isBull ? bullColor : bearColor;
+
+        let bodyCount = 0;
+        ctx.beginPath();
+        for (const c of candles) {
+          if (c.time === liveTime) {
+            liveCandle = c;
+            continue;
+          }
+          if (c.close >= c.open !== isBull) continue;
+          const cx = toX(c.time + candleWidthSecs / 2);
+          if (cx + halfBody < padL || cx - halfBody > padR) continue;
+          const bodyTop = toY(Math.max(c.open, c.close));
+          const bodyBottom = toY(Math.min(c.open, c.close));
+          bodyRect(cx, bodyTop, Math.max(1, bodyBottom - bodyTop));
+          bodyCount++;
+        }
+        if (bodyCount > 0) {
+          ctx.fillStyle = groupColor;
+          ctx.fill();
+        }
+
+        let wickCount = 0;
+        ctx.beginPath();
+        for (const c of candles) {
+          if (c.time === liveTime) continue;
+          if (c.close >= c.open !== isBull) continue;
+          const cx = toX(c.time + candleWidthSecs / 2);
+          if (cx + halfBody < padL || cx - halfBody > padR) continue;
+          const bodyTop = toY(Math.max(c.open, c.close));
+          const bodyBottom = toY(Math.min(c.open, c.close));
+          const wickTop = toY(c.high);
+          const wickBottom = toY(c.low);
+          if (bodyTop - wickTop > 0.5) {
+            ctx.moveTo(cx, bodyTop);
+            ctx.lineTo(cx, wickTop);
+            wickCount++;
+          }
+          if (wickBottom - bodyBottom > 0.5) {
+            ctx.moveTo(cx, bodyBottom);
+            ctx.lineTo(cx, wickBottom);
+            wickCount++;
+          }
+        }
+        if (wickCount > 0) {
+          ctx.strokeStyle = groupColor;
+          ctx.stroke();
+        }
       }
     }
+  } else {
+    // Fallback: per-candle draw, exactly as before batching — needed
+    // because scrub dimming gives each candle its own continuous alpha.
+    for (const c of candles) {
+      if (c.time === liveTime) {
+        liveCandle = c;
+        continue;
+      }
+      const cx = toX(c.time + candleWidthSecs / 2);
+      if (cx + halfBody < padL || cx - halfBody > padR) continue;
 
-    const baseAlpha = ctx.globalAlpha;
-    ctx.globalAlpha = baseAlpha * candleAlpha;
+      const isBull = c.close >= c.open;
+      const color = isBull ? bullColor : bearColor;
+      ctx.globalAlpha = baseAlpha * spatialDim(cx);
 
-    // Body geometry
-    const bodyTop = toY(Math.max(c.open, c.close));
-    const bodyBottom = toY(Math.min(c.open, c.close));
-    const bodyH = Math.max(1, bodyBottom - bodyTop);
+      const bodyTop = toY(Math.max(c.open, c.close));
+      const bodyBottom = toY(Math.min(c.open, c.close));
+      const wickTop = toY(c.high);
+      const wickBottom = toY(c.low);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = color;
 
-    // Wicks
-    const wickTop = toY(c.high);
-    const wickBottom = toY(c.low);
-    ctx.lineCap = 'round';
-    ctx.strokeStyle = color;
+      if (bodyTop - wickTop > 0.5) {
+        ctx.beginPath();
+        ctx.moveTo(cx, bodyTop);
+        ctx.lineTo(cx, wickTop);
+        ctx.lineWidth = wickW;
+        ctx.stroke();
+      }
+      if (wickBottom - bodyBottom > 0.5) {
+        ctx.beginPath();
+        ctx.moveTo(cx, bodyBottom);
+        ctx.lineTo(cx, wickBottom);
+        ctx.lineWidth = wickW;
+        ctx.stroke();
+      }
 
-    if (bodyTop - wickTop > 0.5) {
-      ctx.beginPath();
-      ctx.moveTo(cx, bodyTop);
-      ctx.lineTo(cx, wickTop);
-      ctx.lineWidth = wickW;
-      ctx.stroke();
-    }
-    if (wickBottom - bodyBottom > 0.5) {
-      ctx.beginPath();
-      ctx.moveTo(cx, bodyBottom);
-      ctx.lineTo(cx, wickBottom);
-      ctx.lineWidth = wickW;
-      ctx.stroke();
-    }
-
-    // Body
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    roundedRect(ctx, cx - halfBody, bodyTop, bodyW, bodyH, radius);
-    ctx.fill();
-
-    // Live candle glow
-    if (isLive) {
-      ctx.save();
-      ctx.globalAlpha = baseAlpha * candleAlpha * livePulse;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 8;
       ctx.fillStyle = color;
       ctx.beginPath();
-      roundedRect(ctx, cx - halfBody, bodyTop, bodyW, bodyH, radius);
+      bodyRect(cx, bodyTop, Math.max(1, bodyBottom - bodyTop));
       ctx.fill();
-      ctx.restore();
-    }
 
-    ctx.globalAlpha = baseAlpha;
+      ctx.globalAlpha = baseAlpha;
+    }
+  }
+
+  // Live candle — always drawn individually (own color/alpha/glow), after
+  // the batched/fallback groups. Z-order among candles doesn't matter
+  // visually (bodies never overlap horizontally), so drawing it last is
+  // just the simplest place, matching where it fell in the original
+  // chronological per-candle loop for a trailing live candle.
+  if (liveCandle) {
+    const cx = toX(liveCandle.time + candleWidthSecs / 2);
+    if (cx + halfBody >= padL && cx - halfBody <= padR) {
+      const liveIsBull = liveCandle.close >= liveCandle.open;
+      const liveBaseRgb: [number, number, number] =
+        liveBullBlend >= 0
+          ? blendRgb(liveBullBlend)
+          : liveIsBull
+            ? [BULL_RGB[0], BULL_RGB[1], BULL_RGB[2]]
+            : [BEAR_RGB[0], BEAR_RGB[1], BEAR_RGB[2]];
+      const liveColor: SkColor = hasAccent
+        ? blendToAccent(liveBaseRgb, accentColor!, accentBlend)
+        : rgbColor(liveBaseRgb[0], liveBaseRgb[1], liveBaseRgb[2]);
+
+      const bodyTop = toY(Math.max(liveCandle.open, liveCandle.close));
+      const bodyBottom = toY(Math.min(liveCandle.open, liveCandle.close));
+      const bodyH = Math.max(1, bodyBottom - bodyTop);
+      const wickTop = toY(liveCandle.high);
+      const wickBottom = toY(liveCandle.low);
+
+      const candleAlpha = canBatch ? liveAlpha : liveAlpha * spatialDim(cx);
+      ctx.globalAlpha = baseAlpha * candleAlpha;
+
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = liveColor;
+      if (bodyTop - wickTop > 0.5) {
+        ctx.beginPath();
+        ctx.moveTo(cx, bodyTop);
+        ctx.lineTo(cx, wickTop);
+        ctx.lineWidth = wickW;
+        ctx.stroke();
+      }
+      if (wickBottom - bodyBottom > 0.5) {
+        ctx.beginPath();
+        ctx.moveTo(cx, bodyBottom);
+        ctx.lineTo(cx, wickBottom);
+        ctx.lineWidth = wickW;
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = liveColor;
+      ctx.beginPath();
+      bodyRect(cx, bodyTop, bodyH);
+      ctx.fill();
+
+      if (showLivePulse) {
+        ctx.save();
+        ctx.globalAlpha = baseAlpha * candleAlpha * livePulse;
+        ctx.shadowColor = liveColor;
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = liveColor;
+        ctx.beginPath();
+        bodyRect(cx, bodyTop, bodyH);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.globalAlpha = baseAlpha;
+    }
   }
 }
 
@@ -224,7 +462,7 @@ export function drawClosePrice(
 
   const baseAlpha = ctx.globalAlpha;
   ctx.save();
-  ctx.setLineDash([4, 4]);
+  ctx.setLineDash(DASH_4_4);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1;
   ctx.globalAlpha = baseAlpha * (1 - scrubDim * 0.3) * 0.4;
@@ -232,7 +470,7 @@ export function drawClosePrice(
   ctx.moveTo(layout.pad.left, y);
   ctx.lineTo(layout.w - layout.pad.right, y);
   ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.setLineDash(EMPTY_DASH);
   ctx.restore();
 }
 

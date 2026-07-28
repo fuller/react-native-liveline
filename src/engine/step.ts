@@ -4,24 +4,28 @@ import type {
   Momentum,
   HoverPoint,
   CandlePoint,
+  LivelineFonts,
 } from '../types';
 import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
 import { detectMomentum } from '../math/momentum';
 import { interpolateAtTime } from '../math/interpolate';
+import { easeInOutCos } from '../math/ease';
+import { filterVisiblePointsInto } from '../math/visible';
 import type { Ctx2D } from '../draw/canvas2d';
 import {
   drawFrame,
   drawMultiFrame,
   drawCandleFrame,
-  FADE_EDGE_WIDTH,
+  drawEdgeFade,
   type MultiSeriesEntry,
 } from '../draw';
 import { drawLoading } from '../draw/loading';
 import { drawEmpty } from '../draw/empty';
-import type { EngineConfig } from './types';
+import type { EngineConfigStep } from './types';
 import type { EngineState } from './state';
 import { drawBadge } from './badge';
+import { updateGridLayer } from './gridLayer';
 import {
   computeAdaptiveSpeed,
   updateWindowTransition,
@@ -49,6 +53,7 @@ import {
   SERIES_TOGGLE_SPEED,
   LINE_MORPH_MS,
   CANDLE_LERP_SPEED,
+  CANDLE_SNAP_THRESHOLD,
   CANDLE_WIDTH_TRANS_MS,
   CLOSE_LINE_LERP_SPEED,
   LINE_DENSITY_MS,
@@ -67,22 +72,35 @@ export interface StepOutput {
   valueColor: string | null;
 }
 
-/** Left-edge fade used by the loading/empty fallback branches. */
-function drawEdgeFade(ctx: Ctx2D, padLeft: number, h: number): void {
+/**
+ * Which backing array a draw pipeline's points came from this frame, for
+ * the line path cache's invalidation key (see draw/lineCache.ts):
+ * 0 = live buffer, 1 = paused snapshot, 2 = reverse-morph stash.
+ */
+function dataSourceOf(useStash: boolean, hasPausedSnapshot: boolean): number {
   'worklet';
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  const fadeGrad = ctx.createLinearGradient(
-    padLeft,
-    0,
-    padLeft + FADE_EDGE_WIDTH,
-    0
-  );
-  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  ctx.fillStyle = fadeGrad;
-  ctx.fillRect(0, 0, padLeft + FADE_EDGE_WIDTH, h);
-  ctx.restore();
+  return useStash ? 2 : hasPausedSnapshot ? 1 : 0;
+}
+
+/** Shared empty-array fallback — avoids a fresh `[]` allocation at every
+ * lookup miss below (mirrors `EMPTY_CANDLES` in useLivelineEngine.ts). */
+const EMPTY_MULTI_POINTS: LivelinePoint[] = [];
+
+/**
+ * Look up a multi-series entry's data points. `series` is either a live
+ * `cfg.multiSeries` entry (no `.data` — its points live in `multiData`,
+ * keyed by id, synced via its own delta-updated buffer) or a reverse-morph
+ * stash entry from `s.lastMultiSeries` (a `StashedSeries`, which carries its
+ * own `.data` copy directly — see the doc comment on `StashedSeries` in
+ * state.ts). Checking `.data` first covers both without the caller needing
+ * to know which one it has.
+ */
+function multiSeriesData(
+  series: { id: string; data?: LivelinePoint[] },
+  multiData: Record<string, LivelinePoint[]>
+): LivelinePoint[] {
+  'worklet';
+  return series.data ?? multiData[series.id] ?? EMPTY_MULTI_POINTS;
 }
 
 /**
@@ -94,13 +112,27 @@ function drawEdgeFade(ctx: Ctx2D, padLeft: number, h: number): void {
  */
 export function engineStep(
   ctx: Ctx2D,
-  cfg: EngineConfig,
+  cfg: EngineConfigStep,
   s: EngineState,
   w: number,
   h: number,
   hoverPixelXRaw: number | null,
   dt: number,
-  now_ms: number
+  now_ms: number,
+  fonts: LivelineFonts,
+  /** Line-mode data points — synced via its own delta-updated shared value. */
+  data: LivelinePoint[],
+  /** Candles — synced via its own delta-updated shared value; empty array
+   * (never undefined) when there is no candle data, matching the `?? []`
+   * fallback this replaces at every read site below. */
+  candles: CandlePoint[],
+  /** Multi-series data points, keyed by series id — synced via its own
+   * delta-updated shared value (one buffer per series), same rationale as
+   * `data`/`candles` above but keyed since series can be added/removed
+   * independently. `cfg.multiSeries` entries carry id/value/palette/label
+   * only; look up a series' points here (or via `multiSeriesData` below,
+   * which also handles the reverse-morph stash case). */
+  multiData: Record<string, LivelinePoint[]>
 ): StepOutput {
   'worklet';
   const out: StepOutput = { valueText: null, valueColor: null };
@@ -112,12 +144,8 @@ export function engineStep(
   const isCandle = cfg.mode === 'candle';
 
   if (isCandle) {
-    if (
-      cfg.paused &&
-      s.pausedCandles === null &&
-      (cfg.candles?.length ?? 0) > 0
-    ) {
-      s.pausedCandles = cfg.candles!.slice();
+    if (cfg.paused && s.pausedCandles === null && candles.length > 0) {
+      s.pausedCandles = candles.slice();
       s.pausedLive = cfg.liveCandle ?? null;
       s.pausedLineData = cfg.lineData?.slice() ?? null;
       s.pausedLineValue = cfg.lineValue ?? null;
@@ -132,9 +160,10 @@ export function engineStep(
     if (cfg.paused && s.pausedMultiData === null) {
       const snap = new Map<string, { data: LivelinePoint[]; value: number }>();
       for (const series of cfg.multiSeries) {
-        if (series.data.length >= 2) {
+        const seriesData = multiData[series.id] ?? EMPTY_MULTI_POINTS;
+        if (seriesData.length >= 2) {
           snap.set(series.id, {
-            data: series.data.slice(),
+            data: seriesData.slice(),
             value: series.value,
           });
         }
@@ -145,23 +174,21 @@ export function engineStep(
       s.pausedMultiData = null;
     }
   } else {
-    if (cfg.paused && s.pausedData === null && cfg.data.length >= 2) {
-      s.pausedData = cfg.data.slice();
+    if (cfg.paused && s.pausedData === null && data.length >= 2) {
+      s.pausedData = data.slice();
     }
     if (!cfg.paused) {
       s.pausedData = null;
     }
   }
 
-  const points = isCandle
-    ? ([] as LivelinePoint[])
-    : (s.pausedData ?? cfg.data);
-  const effectiveCandles = isCandle
-    ? (s.pausedCandles ?? cfg.candles ?? [])
-    : [];
+  const points = isCandle ? ([] as LivelinePoint[]) : (s.pausedData ?? data);
+  const effectiveCandles = isCandle ? (s.pausedCandles ?? candles) : [];
   const hasMultiData =
     cfg.isMultiSeries && cfg.multiSeries
-      ? cfg.multiSeries.some((series) => series.data.length >= 2)
+      ? cfg.multiSeries.some(
+          (series) => (multiData[series.id] ?? EMPTY_MULTI_POINTS).length >= 2
+        )
       : false;
   const hasData = isCandle
     ? effectiveCandles.length >= 2
@@ -232,13 +259,53 @@ export function engineStep(
     useMultiStash =
       !hasData && chartReveal > 0.005 && s.lastMultiSeries.length > 0;
     if (hasMultiData && cfg.multiSeries) {
-      s.lastMultiSeries = cfg.multiSeries.map((series) => ({
-        id: series.id,
-        data: series.data.slice(),
-        value: series.value,
-        palette: series.palette,
-        label: series.label,
-      }));
+      // The point-array copy is revision-gated; the cheap fields are not.
+      // This stash is only *read* during the reverse morph (`useMultiStash`,
+      // i.e. `!hasData`), but it used to re-`.slice()` every series' whole
+      // buffer on every frame — four series of a couple thousand points at
+      // 60fps is ~half a million element copies a second, essentially all
+      // of it thrown away. The data only changes when that series' delta
+      // lands (a few times a second at most), which `multiRevs` now tells
+      // us exactly. `value`/`palette`/`label` are still refreshed every
+      // frame: they can change without the data changing (a theme or accent
+      // switch), and a stale palette here would show up as the wrong colour
+      // during a morph-back.
+      const stashRevs = s.lastMultiStashRevs;
+      const stashData = s.lastMultiStashData;
+      s.lastMultiSeries = cfg.multiSeries.map((series) => {
+        const rev = cfg.multiRevs?.[series.id] ?? 0;
+        let stashed = stashData.get(series.id);
+        if (stashed === undefined || stashRevs.get(series.id) !== rev) {
+          // Copy — `multiData[series.id]` aliases the live per-series buffer
+          // (mutated in place by the JS-thread delta applier via
+          // `.modify()`), so a bare reference here would let future ticks
+          // silently rewrite this stash. Same reasoning as `s.lastData`
+          // above and `s.lastCandles` in the candle pipeline.
+          stashed = (multiData[series.id] ?? EMPTY_MULTI_POINTS).slice();
+          stashData.set(series.id, stashed);
+          stashRevs.set(series.id, rev);
+        }
+        return {
+          id: series.id,
+          data: stashed,
+          value: series.value,
+          palette: series.palette,
+          label: series.label,
+        };
+      });
+      // Prune bookkeeping for removed series (same shape as the
+      // `displayValues`/`lineCaches` cleanup in the multi pipeline below —
+      // the size check makes the steady state allocation- and iteration-free).
+      if (stashData.size > cfg.multiSeries.length) {
+        const live = new Set<string>();
+        for (const series of cfg.multiSeries) live.add(series.id);
+        for (const id of stashData.keys()) {
+          if (!live.has(id)) {
+            stashData.delete(id);
+            stashRevs.delete(id);
+          }
+        }
+      }
     }
     // Clear multi stash when single-series data arrives
     if (hasData && !cfg.isMultiSeries) s.lastMultiSeries = [];
@@ -248,7 +315,21 @@ export function engineStep(
       !hasData &&
       chartReveal > 0.005 &&
       s.lastData.length >= 2;
-    if (hasData && !cfg.isMultiSeries) s.lastData = points;
+    // Copy — `points` may alias the live data buffer (mutated in place by
+    // the JS-thread delta applier via `.modify()`), so a bare reference
+    // here would let future ticks silently rewrite this stash.
+    //
+    // Revision-gated for the same reason as the multi-series stash above:
+    // this is only read during the reverse morph, but copying the whole
+    // buffer every frame meant ~120k element copies a second on a 2000-point
+    // feed to maintain something that changes a few times a second.
+    // `dataRev` moves exactly when the buffer does. (`points` is
+    // `s.pausedData ?? data`; while paused the snapshot is frozen, so its
+    // contents match what was already stashed and skipping is still correct.)
+    if (hasData && !cfg.isMultiSeries && s.lastDataStashRev !== cfg.dataRev) {
+      s.lastData = points.slice();
+      s.lastDataStashRev = cfg.dataRev;
+    }
   }
 
   // Update lineModeProg even during early return — prevents the
@@ -265,8 +346,7 @@ export function engineStep(
     if (lmt.startMs > 0) {
       const elapsed = now_ms - lmt.startMs;
       const t = Math.min(elapsed / LINE_MORPH_MS, 1);
-      s.lineModeProg =
-        lmt.from + (lmt.to - lmt.from) * ((1 - Math.cos(t * Math.PI)) / 2);
+      s.lineModeProg = lmt.from + (lmt.to - lmt.from) * easeInOutCos(t);
       if (t >= 1) {
         s.lineModeProg = lmt.to;
         lmt.startMs = 0;
@@ -350,7 +430,7 @@ export function engineStep(
     if (cwt.startMs > 0) {
       const elapsed = now_ms - cwt.startMs;
       const t = Math.min(elapsed / CANDLE_WIDTH_TRANS_MS, 1);
-      morphT = (1 - Math.cos(t * Math.PI)) / 2;
+      morphT = easeInOutCos(t);
       displayCandleWidth = Math.exp(
         Math.log(cwt.fromWidth) +
           (Math.log(cwt.toWidth) - Math.log(cwt.fromWidth)) * morphT
@@ -389,7 +469,11 @@ export function engineStep(
         cwt.rangeToMax = s.displayMax;
       }
     }
-    s.prevCandleData = { candles: cfg.candles ?? [], width: candleWidthSecs };
+    // Copy — `candles` is the live candle buffer (mutated in place by the
+    // JS-thread delta applier via `.modify()`); stashing a bare reference
+    // would let a later tick silently rewrite `cwt.oldCandles` (read on a
+    // future candle-width-change frame) out from under this snapshot.
+    s.prevCandleData = { candles: candles.slice(), width: candleWidthSecs };
 
     // lineModeProg is updated before the early return (see above).
     const lineModeProg = s.lineModeProg;
@@ -461,6 +545,40 @@ export function engineStep(
         dc.high = lerp(dc.high, rawLive.high, CANDLE_LERP_SPEED, pausedDt);
         dc.low = lerp(dc.low, rawLive.low, CANDLE_LERP_SPEED, pausedDt);
         dc.close = lerp(dc.close, rawLive.close, CANDLE_LERP_SPEED, pausedDt);
+        // Exact snap once each component is within an epsilon of its
+        // target — every sibling lerp in this codebase does this (see
+        // updateCandleRange's pxThreshold, LINE_SNAP_THRESHOLD/
+        // VALUE_SNAP_THRESHOLD elsewhere in this file). Without it, high/low
+        // never becomes bit-exact with rawLive; since computeCandleRange
+        // scans the live candle too, that epsilon drift keeps nudging
+        // displayMax/displayMin whenever the live candle holds the visible
+        // extreme, which mismatches the candle cache's kMinVal/kMaxVal and
+        // forces a full geometry rebuild every frame.
+        const prevRange = s.displayMax - s.displayMin || 1;
+        if (
+          Math.abs(dc.open - rawLive.open) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.open = rawLive.open;
+        }
+        if (
+          Math.abs(dc.high - rawLive.high) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.high = rawLive.high;
+        }
+        if (
+          Math.abs(dc.low - rawLive.low) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.low = rawLive.low;
+        }
+        if (
+          Math.abs(dc.close - rawLive.close) <
+          prevRange * CANDLE_SNAP_THRESHOLD
+        ) {
+          dc.close = rawLive.close;
+        }
       }
       s.liveBirthAlpha = lerp(s.liveBirthAlpha, 1, 0.2, pausedDt);
       if (s.liveBirthAlpha > 0.99) s.liveBirthAlpha = 1;
@@ -551,7 +669,10 @@ export function engineStep(
     }
 
     // --- Build visible candles ---
-    const visible: CandlePoint[] = [];
+    // Reused scratch array (see EngineState.candleVisibleScratch) instead of
+    // a fresh allocation every frame — same rationale as visibleScratch.
+    const visible: CandlePoint[] = s.candleVisibleScratch;
+    visible.length = 0;
     for (const c of effectiveCandles) {
       if (c.time + candleWidthSecs >= leftEdge && c.time <= rightEdge) {
         visible.push(c);
@@ -573,9 +694,15 @@ export function engineStep(
       }
     }
 
-    // Stash visible candles for reverse morph
+    // Stash visible candles for reverse morph. Copy — `visible` above is a
+    // reused scratch array (`candleVisibleScratch`), refilled in place next
+    // frame; a bare reference here (the old behavior, back when `visible`
+    // was a fresh array every frame) would let next frame's refill silently
+    // corrupt this stash out from under the reverse morph. Mirrors the
+    // `s.lastData = points.slice()` copy above and its comment, for the
+    // same reason.
     if (hasData) {
-      s.lastCandles = visible;
+      s.lastCandles = visible.slice();
       s.lastLive = smoothLive ?? null;
     }
     const effectiveVisible = useStash ? s.lastCandles : visible;
@@ -636,6 +763,26 @@ export function engineStep(
         pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
       toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
     };
+
+    // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
+    // while the reveal morph is animating: ctx.drawPicture ignores
+    // globalAlpha, so compositing a cached picture during the fade-in
+    // would visibly snap to full opacity instead of ramping. Uses
+    // pausedDt (not dt) to match the dt this branch's own drawGrid call
+    // (via CandleDrawOptions.dt below) already uses, so label fades
+    // freeze/resume with pause exactly as they did before this cache.
+    if (cfg.showGrid && chartReveal >= 1) {
+      updateGridLayer(
+        s.gridLayer,
+        s.gridState,
+        layout,
+        cfg.palette,
+        cfg.formatValue,
+        pausedDt,
+        s.gridLayerCache,
+        fonts
+      );
+    }
 
     // --- Hover + scrub ---
     const hoverPx = hoverPixelX;
@@ -842,6 +989,12 @@ export function engineStep(
       // loading→live (where loadingAlpha starts at ~1), while still
       // allowing smooth fade-out during empty→live (loadingAlpha is 0).
       showEmptyOverlay: !(cfg.loading ?? false) && loadingAlpha < 0.01,
+      gridLayer: s.gridLayer,
+      candleCache: {
+        slot: s.candleCache,
+        dataSource: dataSourceOf(useStash, s.pausedCandles !== null),
+        candlesRev: cfg.candlesRev,
+      },
     });
 
     // Badge in candle mode — only when in line mode (lineModeProg > 0.5)
@@ -896,12 +1049,40 @@ export function engineStep(
     const chartW = w - pad.left - pad.right - labelReserve;
     const buffer = cfg.showBadge ? WINDOW_BUFFER : WINDOW_BUFFER_NO_BADGE;
 
-    // Clean stale entries from displayValues (series that were removed)
-    if (!useMultiStash) {
-      const currentIds: string[] = [];
-      for (const series of effectiveMultiSeries) currentIds.push(series.id);
+    // Clean stale entries from displayValues (series that were removed).
+    // Guarded on a size check so the steady state (series count unchanged
+    // frame-to-frame, the overwhelming common case) allocates and iterates
+    // nothing: every current series gets `s.displayValues.set(series.id, dv)`
+    // below (when `!useMultiStash`), so by the end of any frame that ran
+    // this block, displayValues.size === effectiveMultiSeries.length for
+    // *that* frame's series set. A size mismatch at the top of the next
+    // frame therefore only happens when the set actually shrank (removals) —
+    // growth alone (an id added, none removed) leaves size <= length and is
+    // correctly skipped, since there's nothing stale to clean. Note this is
+    // a cheap proxy, not exact identity: a same-size id swap (series A
+    // replaced by series B in one commit, count unchanged) slips through
+    // undetected until a future size change catches it — rare in practice
+    // (call sites keep ids stable across renders) and harmless when it does
+    // happen (the stale entry just sits unused in the map).
+    if (!useMultiStash && s.displayValues.size > effectiveMultiSeries.length) {
+      const currentIds = new Set<string>();
+      for (const series of effectiveMultiSeries) currentIds.add(series.id);
       for (const key of s.displayValues.keys()) {
-        if (currentIds.indexOf(key) < 0) s.displayValues.delete(key);
+        if (!currentIds.has(key)) s.displayValues.delete(key);
+      }
+      for (const key of s.lineCaches.keys()) {
+        if (!currentIds.has(key)) s.lineCaches.delete(key);
+      }
+      // Same pruning for the per-series visible-array and MultiSeriesEntry
+      // pools (see EngineState.multiVisibleScratch/multiSeriesEntryScratch)
+      // — both are keyed and repopulated exactly like lineCaches above, so
+      // they need the same cleanup-on-removal treatment to avoid leaking a
+      // growing set of dead series ids forever.
+      for (const key of s.multiVisibleScratch.keys()) {
+        if (!currentIds.has(key)) s.multiVisibleScratch.delete(key);
+      }
+      for (const key of s.multiSeriesEntryScratch.keys()) {
+        if (!currentIds.has(key)) s.multiSeriesEntryScratch.delete(key);
       }
     }
 
@@ -911,8 +1092,10 @@ export function engineStep(
     if (hasData) s.frozenNow = Date.now() / 1000 - s.timeDebt;
     const now = useMultiStash ? s.frozenNow : Date.now() / 1000 - s.timeDebt;
 
-    // Per-series smooth values (freeze when using stash)
-    const smoothValues = new Map<string, number>();
+    // Per-series smooth values (freeze when using stash). Reused across
+    // frames (cleared, not reallocated) — see EngineState.smoothValuesScratch.
+    const smoothValues = s.smoothValuesScratch;
+    smoothValues.clear();
     for (const series of effectiveMultiSeries) {
       let dv = s.displayValues.get(series.id);
       if (dv === undefined) dv = series.value;
@@ -935,7 +1118,11 @@ export function engineStep(
       smoothValues.set(series.id, dv);
     }
 
-    // Per-series visibility alpha (lerp toward 0 for hidden, 1 for visible)
+    // Per-series visibility alpha (lerp toward 0 for hidden, 1 for visible).
+    // Deliberately no `new Set(hiddenIds)` here: N is a handful of hidden
+    // series ids at most, and building + hashing into a Set every frame
+    // costs strictly more than the linear scan it would replace — don't
+    // "optimize" this back to a Set.
     const hiddenIds = cfg.hiddenSeriesIds;
     const seriesAlphas = s.seriesAlpha;
     for (const series of effectiveMultiSeries) {
@@ -951,7 +1138,8 @@ export function engineStep(
 
     // Window transition — seed with all series data for accurate range
     const firstData =
-      s.pausedMultiData?.get(firstSeries.id)?.data ?? firstSeries.data;
+      s.pausedMultiData?.get(firstSeries.id)?.data ??
+      multiSeriesData(firstSeries, multiData);
     const windowResult = updateWindowTransition(
       cfg,
       transition,
@@ -971,15 +1159,21 @@ export function engineStep(
       const targetLeftEdge = targetRightEdge - cfg.windowSecs;
       let unionMin = Infinity;
       let unionMax = -Infinity;
+      // Reused across iterations (see EngineState.multiUnionVisibleScratch)
+      // — each series is filtered, read synchronously by computeRange right
+      // below, then moved past; nothing needs its own copy.
+      const targetVisible = s.multiUnionVisibleScratch;
       for (const series of effectiveMultiSeries) {
-        const sData = s.pausedMultiData?.get(series.id)?.data ?? series.data;
+        const sData =
+          s.pausedMultiData?.get(series.id)?.data ??
+          multiSeriesData(series, multiData);
         const sv = smoothValues.get(series.id) ?? series.value;
-        const targetVisible: LivelinePoint[] = [];
-        for (const p of sData) {
-          if (p.time >= targetLeftEdge - 2 && p.time <= targetRightEdge) {
-            targetVisible.push(p);
-          }
-        }
+        filterVisiblePointsInto(
+          sData,
+          targetLeftEdge,
+          targetRightEdge,
+          targetVisible
+        );
         if (targetVisible.length > 0) {
           const range = computeRange(
             targetVisible,
@@ -1008,16 +1202,28 @@ export function engineStep(
     // Build per-series visible arrays and compute global range
     // Use paused snapshots when available to prevent left-edge erosion
     // Exclude hidden series (alpha < 0.01) from range so Y-axis adjusts
-    const seriesEntries: MultiSeriesEntry[] = [];
+    //
+    // Both the per-series `visible` arrays and the `MultiSeriesEntry`
+    // objects that wrap them are pooled on EngineState, keyed by series id
+    // (multiVisibleScratch / multiSeriesEntryScratch — see their doc
+    // comments), rather than allocated fresh every frame. Confirmed safe:
+    // drawMultiFrame (draw/index.ts) only reads each entry synchronously
+    // while building its own output; it never retains the entry or its
+    // `.visible` array past the call. `seriesEntries` itself reuses
+    // `seriesEntriesScratch` the same way `visibleScratch` is reused below.
+    const seriesEntries: MultiSeriesEntry[] = s.seriesEntriesScratch;
+    seriesEntries.length = 0;
     let globalMin = Infinity;
     let globalMax = -Infinity;
     for (const series of effectiveMultiSeries) {
       const snap = s.pausedMultiData?.get(series.id);
-      const seriesData = snap?.data ?? series.data;
-      const visible: LivelinePoint[] = [];
-      for (const p of seriesData) {
-        if (p.time >= leftEdge - 2 && p.time <= filterRight) visible.push(p);
+      const seriesData = snap?.data ?? multiSeriesData(series, multiData);
+      let visible = s.multiVisibleScratch.get(series.id);
+      if (visible === undefined) {
+        visible = [];
+        s.multiVisibleScratch.set(series.id, visible);
       }
+      filterVisiblePointsInto(seriesData, leftEdge, filterRight, visible);
       const sv = smoothValues.get(series.id) ?? series.value;
       const alpha = seriesAlphas.get(series.id) ?? 1;
       if (visible.length >= 2) {
@@ -1033,13 +1239,31 @@ export function engineStep(
           if (range.max > globalMax) globalMax = range.max;
         }
         // Always push to entries (drawMultiFrame skips via alpha)
-        seriesEntries.push({
-          visible,
-          smoothValue: sv,
-          palette: series.palette,
-          label: series.label,
-          alpha,
-        });
+        // 0 when the caller's config predates multiRevs (or the series is
+        // brand new this frame) — that just falls back to the previous
+        // value-heuristic-only cache key rather than misbehaving.
+        const seriesRev = cfg.multiRevs?.[series.id] ?? 0;
+        let entry = s.multiSeriesEntryScratch.get(series.id);
+        if (entry === undefined) {
+          entry = {
+            id: series.id,
+            visible,
+            smoothValue: sv,
+            palette: series.palette,
+            label: series.label,
+            alpha,
+            dataRev: seriesRev,
+          };
+          s.multiSeriesEntryScratch.set(series.id, entry);
+        } else {
+          entry.visible = visible;
+          entry.smoothValue = sv;
+          entry.palette = series.palette;
+          entry.label = series.label;
+          entry.alpha = alpha;
+          entry.dataRev = seriesRev;
+        }
+        seriesEntries.push(entry);
       }
     }
 
@@ -1118,6 +1342,22 @@ export function engineStep(
       toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
     };
 
+    // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
+    // while the reveal morph is animating (ctx.drawPicture ignores
+    // globalAlpha; see the candle-mode branch above for the full reason).
+    if (cfg.showGrid && chartReveal >= 1) {
+      updateGridLayer(
+        s.gridLayer,
+        s.gridState,
+        layout,
+        cfg.palette,
+        cfg.formatValue,
+        dt,
+        s.gridLayerCache,
+        fonts
+      );
+    }
+
     // Hover — interpolate value at hover time for each series
     const hoverPx = hoverPixelX;
     let drawHoverX: number | null = null;
@@ -1153,14 +1393,25 @@ export function engineStep(
       };
       s.lastHoverEntries = hoverEntries;
       if (cfg.hasOnHover) {
-        out.emitHover = {
-          time: t,
-          value: hoverEntries[0]?.value ?? 0,
-          x: clampedX,
-          y: layout.toY(hoverEntries[0]?.value ?? 0),
-        };
+        // Emit only when the hovered point actually changed — a stationary
+        // finger must not fire runOnJS every frame.
+        const ev = hoverEntries[0]?.value ?? 0;
+        if (
+          s.lastEmitHover === null ||
+          s.lastEmitHover.time !== t ||
+          s.lastEmitHover.value !== ev
+        ) {
+          s.lastEmitHover = { time: t, value: ev };
+          out.emitHover = {
+            time: t,
+            value: ev,
+            x: clampedX,
+            y: layout.toY(ev),
+          };
+        }
       }
     }
+    if (!isActiveHover) s.lastEmitHover = null;
 
     // Scrub amount
     const scrubTarget = isActiveHover ? 1 : 0;
@@ -1203,6 +1454,9 @@ export function engineStep(
       pauseProgress,
       now_ms,
       primaryPalette: cfg.palette,
+      lineCaches: s.lineCaches,
+      multiDataSource: dataSourceOf(useMultiStash, s.pausedMultiData !== null),
+      gridLayer: s.gridLayer,
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text
@@ -1297,12 +1551,14 @@ export function engineStep(
     // Filter visible points — when pausing, contract right edge to `now`
     // so new data (with real-time timestamps) can't appear past the live dot
     const filterRight = rightEdge - (rightEdge - now) * pauseProgress;
-    const visible: LivelinePoint[] = [];
-    for (const p of effectivePoints) {
-      if (p.time >= leftEdge - 2 && p.time <= filterRight) {
-        visible.push(p);
-      }
-    }
+    // Reused scratch array (see EngineState.visibleScratch) instead of a
+    // fresh allocation every frame. Safe: nothing in this pipeline stashes
+    // `visible` itself past this frame (contrast candle mode's
+    // `lastCandles`, which does and therefore copies at the stash point —
+    // see the comment there); drawFrame/drawLine only read it synchronously
+    // while building this frame's picture.
+    const visible = s.visibleScratch;
+    filterVisiblePointsInto(effectivePoints, leftEdge, filterRight, visible);
 
     if (visible.length < 2) {
       return out;
@@ -1353,6 +1609,22 @@ export function engineStep(
       toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
     };
 
+    // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
+    // while the reveal morph is animating (ctx.drawPicture ignores
+    // globalAlpha; see the candle-mode branch above for the full reason).
+    if (cfg.showGrid && chartReveal >= 1) {
+      updateGridLayer(
+        s.gridLayer,
+        s.gridState,
+        layout,
+        cfg.palette,
+        cfg.formatValue,
+        dt,
+        s.gridLayerCache,
+        fonts
+      );
+    }
+
     // Momentum
     const momentum: Momentum = cfg.momentumOverride ?? detectMomentum(visible);
 
@@ -1374,8 +1646,19 @@ export function engineStep(
     s.scrubAmount = hoverResult.scrubAmount;
     s.lastHover = hoverResult.lastHover;
     if (cfg.hasOnHover && hoverResult.emitPoint) {
-      out.emitHover = hoverResult.emitPoint;
+      // Emit only when the hovered point actually changed — a stationary
+      // finger must not fire runOnJS every frame.
+      const ep = hoverResult.emitPoint;
+      if (
+        s.lastEmitHover === null ||
+        s.lastEmitHover.time !== ep.time ||
+        s.lastEmitHover.value !== ep.value
+      ) {
+        s.lastEmitHover = { time: ep.time, value: ep.value };
+        out.emitHover = ep;
+      }
     }
+    if (!hoverResult.isActiveHover) s.lastEmitHover = null;
     const {
       hoverX: drawHoverX,
       hoverValue: drawHoverValue,
@@ -1415,7 +1698,19 @@ export function engineStep(
       formatTime: cfg.formatTime,
       gridState: s.gridState,
       timeAxisState: s.timeAxisState,
-      dt,
+      // pausedDt (not dt) — this pipeline is the only one that reaches
+      // drawOrderbook (see draw/index.ts drawFrame), whose label spawn/
+      // movement is otherwise driven purely by raw dt + Math.random() with
+      // no pause gate of its own. Using pausedDt here freezes it at full
+      // pause, matching the candle pipeline's existing precedent (step.ts,
+      // drawCandleFrame call) and making orderbook charts eligible for
+      // engine quiescence (see engine/quiescence.ts). The other opts.dt
+      // consumers in drawFrame (grid/time-axis fade, shake decay, arrows,
+      // particles) are unaffected by this: they're either already
+      // pause-gated to zero effect or gated off entirely via
+      // cfg.degenOptions, so freezing dt here doesn't change their
+      // behavior at full pause.
+      dt: pausedDt,
       targetWindowSecs: cfg.windowSecs,
       tooltipY: cfg.tooltipY,
       tooltipOutline: cfg.tooltipOutline,
@@ -1428,6 +1723,12 @@ export function engineStep(
       chartReveal,
       pauseProgress,
       now_ms,
+      lineCache: {
+        slot: s.lineCache,
+        dataRev: cfg.dataRev,
+        dataSource: dataSourceOf(useStash, s.pausedData !== null),
+      },
+      gridLayer: s.gridLayer,
     });
 
     // During morph (chart ↔ empty), overlay the gradient gap + text on

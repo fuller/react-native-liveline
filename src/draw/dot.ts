@@ -2,6 +2,8 @@ import type { Momentum, LivelinePalette } from '../types';
 import type { ArrowState } from './index';
 import { parseColorRgb } from '../theme';
 import { lerp } from '../math/lerp';
+import { rgbColor } from '../math/color';
+import type { SkColor } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 
 const PULSE_INTERVAL = 1500;
@@ -11,12 +13,12 @@ function lerpColor(
   a: [number, number, number],
   b: [number, number, number],
   t: number
-): string {
+): SkColor {
   'worklet';
   const r = Math.round(a[0] + (b[0] - a[0]) * t);
   const g = Math.round(a[1] + (b[1] - a[1]) * t);
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
-  return `rgb(${r},${g},${bl})`;
+  return rgbColor(r, g, bl);
 }
 
 /** Draw the live dot: expanding ring pulse, white outer circle, colored inner dot. */
@@ -48,9 +50,6 @@ export function drawDot(
     }
   }
 
-  // Outer bg color for blending
-  const outerRgb = parseColorRgb(palette.badgeOuterBg);
-
   // White outer circle with subtle shadow
   ctx.save();
   ctx.globalAlpha = baseAlpha;
@@ -68,7 +67,13 @@ export function drawDot(
   ctx.beginPath();
   ctx.arc(x, y, 3.5, 0, Math.PI * 2);
   if (dim > 0.01) {
+    // Both parses live inside this branch on purpose: they're only needed
+    // while scrub-dimming, but `badgeOuterBg` used to be parsed once per
+    // frame unconditionally (a regex match + 3 parseInt + the match array)
+    // and thrown away on every non-scrubbing frame, which is nearly all of
+    // them.
     const lineRgb = parseColorRgb(palette.line);
+    const outerRgb = parseColorRgb(palette.badgeOuterBg);
     ctx.fillStyle = lerpColor(lineRgb, outerRgb, dim);
   } else {
     ctx.fillStyle = palette.line;

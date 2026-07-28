@@ -2,6 +2,7 @@
   "name": "@ajfuller/react-native-liveline",
   "version": "0.1.0",
   "description": "Real-time animated charts for React Native. Line, multi-series, and candlestick modes, Skia-rendered, 60fps.",
+  "sideEffects": false,
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
   "exports": {

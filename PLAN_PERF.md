@@ -1,5 +1,12 @@
 # react-native-liveline — Perf/best-practice hardening vs. react-native-graph
 
+**STATUS: COMPLETE (2026-07-18).** All four items landed as separate commits —
+#1 paint pooling `27b0dfc`, #2 min-max decimation `7c3c668`, #3
+`scrubActivationDelay` `413af2d`, #4 `active` prop `6347873` — each gated on
+typecheck/lint/test plus an iOS-sim check (incl. Block JS 2s). Only open
+thread: the scrub-vs-scroll feel of #3 needs a manual finger check (synthetic
+input can't reach RNGH Pan on the sim; see the example "Scroll" section).
+
 **Read this first when resuming work.** This is a standalone follow-up
 workstream, separate from `PLAN.md` (the original web→RN port plan, which is
 fully shipped as of v0.1.0 — don't relitigate anything marked done there).

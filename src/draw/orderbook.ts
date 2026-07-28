@@ -1,4 +1,6 @@
 import type { LivelinePalette, ChartLayout, OrderbookData } from '../types';
+import { rgbColor } from '../math/color';
+import type { SkColor } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 
 // Green: rgb(34, 197, 94), Red: rgb(239, 68, 68)
@@ -22,6 +24,14 @@ export interface OrderbookState {
   prevBidTotal: number;
   prevAskTotal: number;
   churnRate: number; // smoothed 0-1, how much the book is changing
+  // outlineColor cache: rebuilding a template string every frame is wasted
+  // work since palette.bgRgb only changes on a theme swap. Flat numeric
+  // fields (not a tuple/array) so the hit check is alloc-free, matching the
+  // LineCacheSlot / badge pill path cache style used elsewhere.
+  outlineColorR: number;
+  outlineColorG: number;
+  outlineColorB: number;
+  outlineColor: string;
 }
 
 // NOTE: these consts MUST be declared above createOrderbookState. The
@@ -45,6 +55,12 @@ export function createOrderbookState(): OrderbookState {
     prevBidTotal: 0,
     prevAskTotal: 0,
     churnRate: 0,
+    // -1 is not a valid RGB channel value, so the first frame always misses
+    // and builds outlineColor for real.
+    outlineColorR: -1,
+    outlineColorG: -1,
+    outlineColorB: -1,
+    outlineColor: '',
   };
 }
 
@@ -52,12 +68,12 @@ function mixColor(
   from: [number, number, number],
   to: [number, number, number],
   t: number
-): string {
+): SkColor {
   'worklet';
   const r = Math.round(from[0] + (to[0] - from[0]) * t);
   const g = Math.round(from[1] + (to[1] - from[1]) * t);
   const b = Math.round(from[2] + (to[2] - from[2]) * t);
-  return `rgb(${r},${g},${b})`;
+  return rgbColor(r, g, b);
 }
 
 function formatSize(size: number): string {
@@ -116,8 +132,13 @@ export function drawOrderbook(
   state.prevBidTotal = bidTotal;
   state.prevAskTotal = askTotal;
 
-  // Smooth the churn rate (fast attack, slower decay)
-  const churnLerp = churnSignal > state.churnRate ? 0.3 : 0.05;
+  // Smooth the churn rate (fast attack, slower decay). Converted to the
+  // same continuous-decay form as speedLerp below — a fixed per-call blend
+  // factor would smooth more slowly in wall-clock terms whenever a frame
+  // gets skipped (frame pacing, a stalled JS thread, ...) since it's
+  // applied once per call, not once per unit time.
+  const churnRateTarget = churnSignal > state.churnRate ? 0.3 : 0.05;
+  const churnLerp = 1 - Math.pow(1 - churnRateTarget, dt / 16.67);
   state.churnRate += (churnSignal - state.churnRate) * churnLerp;
 
   // Activity = max of price momentum and orderbook churn
@@ -152,30 +173,48 @@ export function drawOrderbook(
     }
     if (tooClose) break;
 
-    // Weighted random pick
-    const allLevels: { size: number; green: boolean }[] = [];
-    for (const [, size] of orderbook.bids)
-      allLevels.push({ size, green: true });
-    for (const [, size] of orderbook.asks)
-      allLevels.push({ size, green: false });
-
-    let totalWeight = 0;
-    for (const l of allLevels) totalWeight += l.size;
+    // Weighted random pick. Walk bids then asks directly instead of
+    // building a combined `{size, green}` scratch array first — bidTotal
+    // and askTotal are already computed above, so totalWeight is free, and
+    // this spawn loop runs up to ~25x/sec even when the book itself hasn't
+    // changed between spawns, so avoiding the per-spawn array/object churn
+    // matters. Scan order (bids first, then asks) and the <= 0 tie-break
+    // match the original allLevels construction exactly, so the weighted
+    // distribution is unchanged.
+    const totalWeight = bidTotal + askTotal;
     let r = Math.random() * totalWeight;
-    let picked = allLevels[0]!;
-    for (const l of allLevels) {
-      r -= l.size;
+    // Fallback matches the old `allLevels[0]` default (only reached if
+    // float rounding means r never drops to <=0 in the walk below): first
+    // bid if any exist, else first ask.
+    let pickedSize = orderbook.bids[0]?.[1] ?? orderbook.asks[0]?.[1] ?? 0;
+    let pickedGreen = orderbook.bids.length > 0;
+    let found = false;
+    for (const [, size] of orderbook.bids) {
+      r -= size;
       if (r <= 0) {
-        picked = l;
+        pickedSize = size;
+        pickedGreen = true;
+        found = true;
         break;
       }
     }
+    if (!found) {
+      for (const [, size] of orderbook.asks) {
+        r -= size;
+        if (r <= 0) {
+          pickedSize = size;
+          pickedGreen = false;
+          found = true;
+          break;
+        }
+      }
+    }
 
-    const sizeRatio = picked.size / maxSize;
+    const sizeRatio = pickedSize / maxSize;
     state.labels.push({
       y: bottomY,
-      text: `+ ${formatSize(picked.size)}`,
-      green: picked.green,
+      text: `+ ${formatSize(pickedSize)}`,
+      green: pickedGreen,
       life: LABEL_LIFETIME,
       maxLife: LABEL_LIFETIME,
       intensity: 0.5 + sizeRatio * 0.5,
@@ -204,7 +243,22 @@ export function drawOrderbook(
   ctx.textBaseline = 'middle';
   ctx.globalAlpha = baseAlpha;
 
-  const outlineColor = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  // Cache the outline color template string keyed on the RGB triple it was
+  // built from — bg (palette.bgRgb) only changes on a theme swap, but this
+  // draw path runs every frame the orderbook is on screen, so rebuilding
+  // the string unconditionally wastes an allocation on every one of those
+  // frames.
+  if (
+    state.outlineColorR !== bg[0] ||
+    state.outlineColorG !== bg[1] ||
+    state.outlineColorB !== bg[2]
+  ) {
+    state.outlineColorR = bg[0];
+    state.outlineColorG = bg[1];
+    state.outlineColorB = bg[2];
+    state.outlineColor = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  }
+  const outlineColor = state.outlineColor;
 
   for (let i = 0; i < state.labels.length; i++) {
     const l = state.labels[i]!;

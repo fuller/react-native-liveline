@@ -8,9 +8,17 @@ import type {
   DegenOptions,
   CandlePoint,
 } from '../types';
+import { Skia, type SkPicture } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 import { drawGrid, type GridState } from './grid';
+import type { GridLayerSlot } from './gridLayer';
 import { drawLine } from './line';
+import {
+  createLineCacheSlot,
+  type LineCacheRef,
+  type LineCacheSlot,
+} from './lineCache';
+import type { CandleCacheRef, CachePath } from './candleCache';
 import { drawDot, drawArrows, drawSimpleDot, drawMultiDot } from './dot';
 import { drawCrosshair, drawMultiCrosshair } from './crosshair';
 import type { MultiSeriesHoverEntry } from './crosshair';
@@ -25,12 +33,63 @@ import {
   drawLineModeCrosshair,
 } from './candlestick';
 import { drawEmpty } from './empty';
+import { smoothstepRamp } from '../math/ramp';
+
+/** Real SkPath factory for the candle cache — SkPath satisfies CachePath
+ * structurally (mirrors line.ts's own makeSkPath). Lives here rather than in
+ * candlestick.ts because candlestick.ts is exercised directly by
+ * candlestick.test.ts under jest, which can't parse the Skia package's ESM
+ * build; this module is never imported by a test, same as line.ts. */
+function makeCandlePath(): CachePath {
+  'worklet';
+  return Skia.Path.Make();
+}
 
 // Constants
 const SHAKE_DECAY_RATE = 0.002;
 const SHAKE_MIN_AMPLITUDE = 0.2;
 export const FADE_EDGE_WIDTH = 40;
 const CROSSHAIR_FADE_MIN_PX = 5;
+// Fade zone caps out at 80px, or 30% of chart width for narrow charts —
+// whichever is smaller.
+const SCRUB_FADE_MAX_PX = 80;
+const SCRUB_FADE_WIDTH_FRACTION = 0.3;
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, and some draw modules'
+// dedicated unit tests (e.g. candlestick.test.ts) import their module
+// directly without it loaded — kept local here too for consistency.
+const DASH_4_4: number[] = [4, 4];
+const EMPTY_DASH: number[] = [];
+
+/**
+ * Shared scrub-fade opacity curve: 0 right next to the live dot/edge, ramps
+ * linearly up to `scrubAmount` over the fade zone, and holds at
+ * `scrubAmount` beyond it. Used by every element that fades out as the
+ * scrub crosshair approaches the live point — the dot, the single-series
+ * crosshair, and the multi-series crosshair — so a future tweak to the fade
+ * zone (the 80px cap or the 30%-of-width fraction) can't desync one of them
+ * from the others.
+ */
+function scrubFadeOpacity(
+  distToLive: number,
+  scrubAmount: number,
+  chartW: number
+): number {
+  'worklet';
+  const fadeStart = Math.min(
+    SCRUB_FADE_MAX_PX,
+    chartW * SCRUB_FADE_WIDTH_FRACTION
+  );
+  return distToLive < CROSSHAIR_FADE_MIN_PX
+    ? 0
+    : distToLive >= fadeStart
+      ? scrubAmount
+      : ((distToLive - CROSSHAIR_FADE_MIN_PX) /
+          (fadeStart - CROSSHAIR_FADE_MIN_PX)) *
+        scrubAmount;
+}
 
 export interface ArrowState {
   up: number;
@@ -44,6 +103,32 @@ export interface ShakeState {
 export function createShakeState(): ShakeState {
   'worklet';
   return { amplitude: 0 };
+}
+
+/**
+ * Left-edge fade — erases a gradient strip at the chart's left padding edge
+ * via `destination-out`, so data scrolling in from offscreen fades in
+ * rather than popping in with a hard vertical cut. Shared by `drawFrame`,
+ * `drawMultiFrame`, `drawCandleFrame` (all three below), and by
+ * `engine/step.ts`'s loading/empty early-return paths — a single
+ * implementation so the gradient stops and fillRect bounds can't drift
+ * between the four call sites.
+ */
+export function drawEdgeFade(ctx: Ctx2D, padLeft: number, h: number): void {
+  'worklet';
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  const fadeGrad = ctx.createLinearGradient(
+    padLeft,
+    0,
+    padLeft + FADE_EDGE_WIDTH,
+    0
+  );
+  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = fadeGrad;
+  ctx.fillRect(0, 0, padLeft + FADE_EDGE_WIDTH, h);
+  ctx.restore();
 }
 
 export interface DrawOptions {
@@ -79,6 +164,10 @@ export interface DrawOptions {
   chartReveal: number; // 0 = loading/morphing from center, 1 = fully revealed
   pauseProgress: number; // 0 = playing, 1 = fully paused
   now_ms: number; // performance.now() for breathing animation timing
+  /** Cross-frame line path cache (see draw/lineCache) */
+  lineCache?: LineCacheRef;
+  /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
+  gridLayer?: GridLayerSlot<SkPicture>;
 }
 
 /**
@@ -112,12 +201,6 @@ export function drawFrame(
   const reveal = opts.chartReveal;
   const pause = opts.pauseProgress;
 
-  // Smoothstep helper for staggered reveal
-  const revealRamp = (start: number, end: number) => {
-    const t = Math.max(0, Math.min(1, (reveal - start) / (end - start)));
-    return t * t * (3 - 2 * t);
-  };
-
   // 1. Reference line (behind everything) — fades with reveal
   if (opts.referenceLine && reveal > 0.01) {
     ctx.save();
@@ -128,11 +211,22 @@ export function drawFrame(
 
   // 2. Grid — fades in delayed (15%–70% of reveal)
   if (opts.showGrid) {
-    const gridAlpha = reveal < 1 ? revealRamp(0.15, 0.7) : 1;
+    const gridAlpha = reveal < 1 ? smoothstepRamp(reveal, 0.15, 0.7) : 1;
     if (gridAlpha > 0.01) {
       ctx.save();
-      if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
-      drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+      if (opts.gridLayer?.picture && reveal >= 1) {
+        ctx.drawPicture(opts.gridLayer.picture);
+      } else {
+        if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+        drawGrid(
+          ctx,
+          layout,
+          palette,
+          opts.formatValue,
+          opts.gridState,
+          opts.dt
+        );
+      }
       ctx.restore();
     }
   }
@@ -166,12 +260,16 @@ export function drawFrame(
     scrubX,
     opts.scrubAmount,
     reveal,
-    opts.now_ms
+    opts.now_ms,
+    1,
+    false,
+    1,
+    opts.lineCache
   );
 
   // 4. Time axis — same timing as grid
   {
-    const timeAlpha = reveal < 1 ? revealRamp(0.15, 0.7) : 1;
+    const timeAlpha = reveal < 1 ? smoothstepRamp(reveal, 0.15, 0.7) : 1;
     if (timeAlpha > 0.01) {
       ctx.save();
       if (timeAlpha < 1) ctx.globalAlpha = timeAlpha;
@@ -196,15 +294,7 @@ export function drawFrame(
     let dotScrub = opts.scrubAmount;
     if (opts.hoverX !== null && dotScrub > 0) {
       const distToLive = lastPt[0] - opts.hoverX;
-      const fadeStart = Math.min(80, layout.chartW * 0.3);
-      dotScrub =
-        distToLive < CROSSHAIR_FADE_MIN_PX
-          ? 0
-          : distToLive >= fadeStart
-            ? opts.scrubAmount
-            : ((distToLive - CROSSHAIR_FADE_MIN_PX) /
-                (fadeStart - CROSSHAIR_FADE_MIN_PX)) *
-              opts.scrubAmount;
+      dotScrub = scrubFadeOpacity(distToLive, opts.scrubAmount, layout.chartW);
     }
 
     // Dot appears once shape is recognizable (reveal > 0.3)
@@ -227,7 +317,7 @@ export function drawFrame(
 
     // 5b. Arrows — appear late in reveal (60%+), fade with pause
     if (opts.showMomentum) {
-      const arrowReveal = reveal < 1 ? revealRamp(0.6, 1) : 1;
+      const arrowReveal = reveal < 1 ? smoothstepRamp(reveal, 0.6, 1) : 1;
       const arrowAlpha = arrowReveal * (1 - pause);
       if (arrowAlpha > 0.01) {
         ctx.save();
@@ -266,20 +356,7 @@ export function drawFrame(
   }
 
   // 7. Left edge fade — gradient erase
-  const fadeW = FADE_EDGE_WIDTH;
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  const fadeGrad = ctx.createLinearGradient(
-    layout.pad.left,
-    0,
-    layout.pad.left + fadeW,
-    0
-  );
-  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  ctx.fillStyle = fadeGrad;
-  ctx.fillRect(0, 0, layout.pad.left + fadeW, layout.h);
-  ctx.restore();
+  drawEdgeFade(ctx, layout.pad.left, layout.h);
 
   // 8. Crosshair — fade out well before reaching live dot
   if (
@@ -291,15 +368,11 @@ export function drawFrame(
   ) {
     const lastPt = pts[pts.length - 1]!;
     const distToLive = lastPt[0] - opts.hoverX;
-    const fadeStart = Math.min(80, layout.chartW * 0.3);
-    const scrubOpacity =
-      distToLive < CROSSHAIR_FADE_MIN_PX
-        ? 0
-        : distToLive >= fadeStart
-          ? opts.scrubAmount
-          : ((distToLive - CROSSHAIR_FADE_MIN_PX) /
-              (fadeStart - CROSSHAIR_FADE_MIN_PX)) *
-            opts.scrubAmount;
+    const scrubOpacity = scrubFadeOpacity(
+      distToLive,
+      opts.scrubAmount,
+      layout.chartW
+    );
 
     if (scrubOpacity > 0.01) {
       drawCrosshair(
@@ -328,11 +401,16 @@ export function drawFrame(
 // ─── Multi-series draw orchestration ──────────────────────────────────────
 
 export interface MultiSeriesEntry {
+  id: string;
   visible: LivelinePoint[];
   smoothValue: number;
   palette: LivelinePalette;
   label?: string;
   alpha?: number; // series visibility alpha (0 = hidden, 1 = visible)
+  /** Per-series data revision for this series' line cache key — see
+   * EngineConfigStep.multiRevs. 0 when unavailable, which degrades to the
+   * old value-heuristic-only behavior rather than breaking. */
+  dataRev: number;
 }
 
 export interface MultiSeriesDrawOptions {
@@ -359,6 +437,12 @@ export interface MultiSeriesDrawOptions {
   now_ms: number;
   /** Primary palette (from first series) for grid/axis/crosshair colors */
   primaryPalette: LivelinePalette;
+  /** Per-series line path caches, keyed by series id (see draw/lineCache) */
+  lineCaches?: Map<string, LineCacheSlot>;
+  /** Which backing arrays series data came from: 0 live / 1 paused / 2 stash */
+  multiDataSource?: number;
+  /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
+  gridLayer?: GridLayerSlot<SkPicture>;
 }
 
 /**
@@ -374,11 +458,6 @@ export function drawMultiFrame(
   const palette = opts.primaryPalette;
   const reveal = opts.chartReveal;
 
-  const revealRamp = (start: number, end: number) => {
-    const t = Math.max(0, Math.min(1, (reveal - start) / (end - start)));
-    return t * t * (3 - 2 * t);
-  };
-
   // 1. Reference line
   if (opts.referenceLine && reveal > 0.01) {
     ctx.save();
@@ -389,11 +468,22 @@ export function drawMultiFrame(
 
   // 2. Grid
   if (opts.showGrid) {
-    const gridAlpha = reveal < 1 ? revealRamp(0.15, 0.7) : 1;
+    const gridAlpha = reveal < 1 ? smoothstepRamp(reveal, 0.15, 0.7) : 1;
     if (gridAlpha > 0.01) {
       ctx.save();
-      if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
-      drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+      if (opts.gridLayer?.picture && reveal >= 1) {
+        ctx.drawPicture(opts.gridLayer.picture);
+      } else {
+        if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+        drawGrid(
+          ctx,
+          layout,
+          palette,
+          opts.formatValue,
+          opts.gridState,
+          opts.dt
+        );
+      }
       ctx.restore();
     }
   }
@@ -415,6 +505,23 @@ export function drawMultiFrame(
     const secondaryFade = si > 0 && reveal < 1 ? Math.min(1, reveal * 2) : 1;
     const combinedAlpha = secondaryFade * seriesAlpha;
     if (combinedAlpha < 0.01) continue;
+    // Per-series path cache slot, created on demand. `s.dataRev` is that
+    // series' own revision counter (see EngineConfigStep.multiRevs), so an
+    // interior revision invalidates just that series' cache — the key's
+    // len/firstT/lastT/lastV heuristic can't see interior changes on its own.
+    let cacheRef: LineCacheRef | undefined;
+    if (opts.lineCaches !== undefined) {
+      let slot = opts.lineCaches.get(s.id);
+      if (slot === undefined) {
+        slot = createLineCacheSlot();
+        opts.lineCaches.set(s.id, slot);
+      }
+      cacheRef = {
+        slot,
+        dataRev: s.dataRev,
+        dataSource: opts.multiDataSource ?? 0,
+      };
+    }
     ctx.save();
     if (combinedAlpha < 1) ctx.globalAlpha = combinedAlpha;
     const pts = drawLine(
@@ -428,7 +535,11 @@ export function drawMultiFrame(
       scrubX,
       opts.scrubAmount,
       reveal,
-      opts.now_ms
+      opts.now_ms,
+      1,
+      false,
+      1,
+      cacheRef
     );
     ctx.restore();
     if (pts && pts.length > 0) {
@@ -443,7 +554,7 @@ export function drawMultiFrame(
 
   // 4. Time axis
   {
-    const timeAlpha = reveal < 1 ? revealRamp(0.15, 0.7) : 1;
+    const timeAlpha = reveal < 1 ? smoothstepRamp(reveal, 0.15, 0.7) : 1;
     if (timeAlpha > 0.01) {
       ctx.save();
       if (timeAlpha < 1) ctx.globalAlpha = timeAlpha;
@@ -472,6 +583,7 @@ export function drawMultiFrame(
     for (const entry of allPts) {
       if (entry.alpha < 0.01) continue;
       const lastPt = entry.pts[entry.pts.length - 1]!;
+      const lineColor = entry.palette.line;
 
       ctx.save();
       ctx.globalAlpha = dotAlpha * entry.alpha;
@@ -482,20 +594,20 @@ export function drawMultiFrame(
           ctx,
           lastPt[0],
           lastPt[1],
-          entry.palette.line,
+          lineColor,
           true,
           opts.now_ms,
           3
         );
       } else {
-        drawSimpleDot(ctx, lastPt[0], lastPt[1], entry.palette.line, 3);
+        drawSimpleDot(ctx, lastPt[0], lastPt[1], lineColor, 3);
       }
 
       // Label at endpoint (right of dot — layout reserves space via labelReserve)
       if (entry.label) {
         ctx.font = ctx.fonts.seriesLabel;
         ctx.textAlign = 'left';
-        ctx.fillStyle = entry.palette.line;
+        ctx.fillStyle = lineColor;
         ctx.fillText(entry.label, lastPt[0] + 6, lastPt[1] + 3.5);
       }
       ctx.restore();
@@ -503,19 +615,7 @@ export function drawMultiFrame(
   }
 
   // 6. Left edge fade
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  const fadeGrad = ctx.createLinearGradient(
-    layout.pad.left,
-    0,
-    layout.pad.left + FADE_EDGE_WIDTH,
-    0
-  );
-  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  ctx.fillStyle = fadeGrad;
-  ctx.fillRect(0, 0, layout.pad.left + FADE_EDGE_WIDTH, layout.h);
-  ctx.restore();
+  drawEdgeFade(ctx, layout.pad.left, layout.h);
 
   // 7. Multi-series crosshair — fade out near live dots (same logic as single-series)
   if (
@@ -534,15 +634,11 @@ export function drawMultiFrame(
     }
 
     const distToLive = maxLiveDotX - opts.hoverX;
-    const fadeStart = Math.min(80, layout.chartW * 0.3);
-    const scrubOpacity =
-      distToLive < CROSSHAIR_FADE_MIN_PX
-        ? 0
-        : distToLive >= fadeStart
-          ? opts.scrubAmount
-          : ((distToLive - CROSSHAIR_FADE_MIN_PX) /
-              (fadeStart - CROSSHAIR_FADE_MIN_PX)) *
-            opts.scrubAmount;
+    const scrubOpacity = scrubFadeOpacity(
+      distToLive,
+      opts.scrubAmount,
+      layout.chartW
+    );
 
     if (scrubOpacity > 0.01) {
       drawMultiCrosshair(
@@ -602,6 +698,14 @@ export interface CandleDrawOptions {
   emptyText?: string;
   loadingAlpha: number;
   showEmptyOverlay: boolean; // true only when collapsing to empty (not loading, not forward morph)
+  /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
+  gridLayer?: GridLayerSlot<SkPicture>;
+  /** Cross-frame closed-candle body+wick path cache (see draw/candleCache).
+   * Only actually used when the steady-state (non-width-morph) branch below
+   * is drawing candles with no reveal OHLC-collapse and no active
+   * line-mode morph in progress — see the gating right before the
+   * drawCandlesticks call in the `else` branch. */
+  candleCache?: CandleCacheRef;
 }
 
 /**
@@ -635,18 +739,16 @@ export function drawCandleFrame(
   // When the user's lineModeProg drives lp, use accent color.
   const colorBlend = lp > 0.001 ? opts.lineModeProg / lp : 1;
 
-  // Smoothstep helper for staggered reveal
-  const revealRamp = (start: number, end: number) => {
-    const t = Math.max(0, Math.min(1, (reveal - start) / (end - start)));
-    return t * t * (3 - 2 * t);
-  };
-
   // 1. Grid — fades in (25%–60% of reveal)
-  const gridAlpha = revealRamp(0.25, 0.6);
+  const gridAlpha = smoothstepRamp(reveal, 0.25, 0.6);
   if (opts.showGrid && gridAlpha > 0.01) {
     ctx.save();
-    if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
-    drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+    if (opts.gridLayer?.picture && reveal >= 1) {
+      ctx.drawPicture(opts.gridLayer.picture);
+    } else {
+      if (gridAlpha < 1) ctx.globalAlpha = gridAlpha;
+      drawGrid(ctx, layout, palette, opts.formatValue, opts.gridState, opts.dt);
+    }
     ctx.restore();
   }
 
@@ -679,7 +781,7 @@ export function drawCandleFrame(
   // 3. Close price line — fades in (40%–80% of reveal)
   //    Uses closePriceCandle (pre-blend) so the dashed line isn't affected
   //    by line mode morph or OHLC collapse.
-  const closeAlpha = revealRamp(0.4, 0.8);
+  const closeAlpha = smoothstepRamp(reveal, 0.4, 0.8);
   const closeSource = opts.closePriceCandle ?? opts.liveCandle;
   if (closeSource && closeAlpha > 0.01) {
     // Candle-colored close line (fades out with lineModeProg)
@@ -702,7 +804,7 @@ export function drawCandleFrame(
       const dashY = layout.toY(closeSource.close);
       if (dashY >= pad.top && dashY <= h - pad.bottom) {
         ctx.save();
-        ctx.setLineDash([4, 4]);
+        ctx.setLineDash(DASH_4_4);
         ctx.strokeStyle = palette.dashLine;
         ctx.lineWidth = 1;
         ctx.globalAlpha = closeAlpha * lp * (1 - opts.scrubAmount * 0.2);
@@ -710,7 +812,7 @@ export function drawCandleFrame(
         ctx.moveTo(pad.left, dashY);
         ctx.lineTo(w - pad.right, dashY);
         ctx.stroke();
-        ctx.setLineDash([]);
+        ctx.setLineDash(EMPTY_DASH);
         ctx.restore();
       }
     }
@@ -742,9 +844,7 @@ export function drawCandleFrame(
         : opts.oldCandles;
 
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(pad.left - 1, pad.top, chartW + 2, chartH);
-    ctx.clip();
+    ctx.clipRect(pad.left - 1, pad.top, chartW + 2, chartH);
     const accentCol = lp > 0.01 ? palette.line : undefined;
     if (opts.morphT >= 0 && revealOld.length > 0) {
       ctx.globalAlpha = (1 - opts.morphT) * candleAlpha;
@@ -755,6 +855,7 @@ export function drawCandleFrame(
         opts.oldWidth,
         -1,
         opts.now_ms,
+        opts.pauseProgress,
         opts.hoverX ?? 0,
         opts.scrubAmount,
         1,
@@ -770,6 +871,7 @@ export function drawCandleFrame(
         opts.displayCandleWidth,
         opts.liveCandle?.time ?? -1,
         opts.now_ms,
+        opts.pauseProgress,
         opts.hoverX ?? 0,
         opts.scrubAmount,
         opts.liveBirthAlpha,
@@ -780,6 +882,21 @@ export function drawCandleFrame(
       ctx.globalAlpha = 1;
     } else {
       if (candleAlpha < 1) ctx.globalAlpha = candleAlpha;
+      // Cache only applies in this steady-state branch, and only when this
+      // frame isn't reshaping every candle's OHLC: `revealCandles !==
+      // opts.candles` means the reveal collapse above remapped them, and
+      // lineModeProg strictly between 0 and ~1 means engine/step.ts's own
+      // OHLC collapse (for the line↔candle morph) remapped them upstream.
+      // Both change geometry every frame in ways the cache's key doesn't
+      // track, so it must sit out entirely — same as it already does during
+      // the candle-width morph branch above (cache is simply never passed
+      // there).
+      const lineModeSettled =
+        opts.lineModeProg <= 0.01 || opts.lineModeProg >= 0.99;
+      const candleCache =
+        opts.candleCache && revealCandles === opts.candles && lineModeSettled
+          ? opts.candleCache
+          : undefined;
       drawCandlesticks(
         ctx,
         layout,
@@ -787,12 +904,15 @@ export function drawCandleFrame(
         opts.displayCandleWidth,
         opts.liveCandle?.time ?? -1,
         opts.now_ms,
+        opts.pauseProgress,
         opts.hoverX ?? 0,
         opts.scrubAmount,
         opts.liveBirthAlpha,
         opts.liveBullBlend,
         accentCol,
-        lp
+        lp,
+        candleCache,
+        candleCache ? makeCandlePath : undefined
       );
     }
     ctx.restore();
@@ -802,7 +922,7 @@ export function drawCandleFrame(
   if (lp > 0.5 && linePts && linePts.length > 0 && reveal > 0.3) {
     const lastPt = linePts[linePts.length - 1]!;
     const dotAlpha = (lp - 0.5) * 2 * ((reveal - 0.3) / 0.7);
-    const showPulse = lp > 0.8 && reveal > 0.6;
+    const showPulse = lp > 0.8 && reveal > 0.6 && opts.pauseProgress < 0.5;
     if (dotAlpha > 0.01) {
       ctx.save();
       ctx.globalAlpha = dotAlpha;
@@ -820,7 +940,7 @@ export function drawCandleFrame(
   }
 
   // 6. Time axis — fades in (25%–60% of reveal)
-  const timeAlpha = revealRamp(0.25, 0.6);
+  const timeAlpha = smoothstepRamp(reveal, 0.25, 0.6);
   if (timeAlpha > 0.01) {
     ctx.save();
     if (timeAlpha < 1) ctx.globalAlpha = timeAlpha;
@@ -838,19 +958,7 @@ export function drawCandleFrame(
   }
 
   // 7. Left edge fade — gradient erase
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  const fadeGrad = ctx.createLinearGradient(
-    pad.left,
-    0,
-    pad.left + FADE_EDGE_WIDTH,
-    0
-  );
-  fadeGrad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-  fadeGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  ctx.fillStyle = fadeGrad;
-  ctx.fillRect(0, 0, pad.left + FADE_EDGE_WIDTH, h);
-  ctx.restore();
+  drawEdgeFade(ctx, pad.left, h);
 
   // 8. Reverse morph empty overlay — only when collapsing to empty state
   //    (not during forward morph or loading), matching line mode's

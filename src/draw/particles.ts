@@ -112,6 +112,12 @@ export function drawParticles(
   if (state.particles.length === 0) return;
 
   const dtSec = dt / 1000;
+  // Frame-rate-independent drag: a fixed per-call multiplier would decay
+  // slower in wall-clock terms whenever a frame gets skipped (frame pacing,
+  // a stalled JS thread, ...) since it's applied once per call, not once
+  // per unit time. Converted to the same continuous-decay form used
+  // throughout the engine (see math/lerp.ts).
+  const drag = Math.pow(0.95, dt / 16.67);
 
   ctx.save();
 
@@ -123,8 +129,8 @@ export function drawParticles(
 
     p.x += p.vx * dtSec;
     p.y += p.vy * dtSec;
-    p.vx *= 0.95; // less drag — particles travel further
-    p.vy *= 0.95;
+    p.vx *= drag; // less drag — particles travel further
+    p.vy *= drag;
 
     ctx.globalAlpha = p.life * 0.55;
     ctx.fillStyle = p.color;

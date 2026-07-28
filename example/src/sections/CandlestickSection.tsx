@@ -1,5 +1,12 @@
 /* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived, mirrors upstream web demo controls */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import { Text, View } from 'react-native';
 import { Liveline } from '@ajfuller/react-native-liveline';
 import type {
@@ -22,7 +29,6 @@ import {
 import {
   Btn,
   ChartFrame,
-  fg,
   Label,
   ScreenTitle,
   Section,
@@ -30,6 +36,7 @@ import {
   StatusBar,
   Toggle,
 } from '../ui';
+import { fg } from '../uiStyle';
 
 type Preset = 'dev' | 'crypto';
 type Scenario = 'loading' | 'loading-hold' | 'live' | 'empty';
@@ -37,42 +44,94 @@ type ChartType = 'line' | 'candle';
 
 const CRYPTO_COLOR = '#f7931a';
 
-export function CandlestickSection() {
-  const { isDark, accent } = useAppTheme();
-  const theme = isDark ? 'dark' : 'light';
+// Candle array retention — independent of the tick/`data` buffer size below.
+// The widest window either preset actually displays is crypto's 3600s at
+// 60s candles (60 candles) or dev's 300s at 2s candles (150 candles); 400
+// gives generous headroom without dragging the full 1200/4000-tick buffer
+// size across the delta-mirror boundary and re-filtering it every frame.
+const MAX_CANDLES = 400;
 
-  const [preset, setPreset] = useState<Preset>('dev');
+/** The subset of settings that always reset together on a preset switch. */
+interface ConfigState {
+  startValue: number;
+  tickRate: number;
+  candleSecs: number;
+  windowSecs: number;
+  volatility: Volatility;
+  chartType: ChartType;
+}
+
+const PRESET_CONFIG: Record<Preset, ConfigState> = {
+  dev: {
+    startValue: 100,
+    tickRate: 300,
+    candleSecs: 2,
+    windowSecs: 30,
+    volatility: 'normal',
+    chartType: 'candle',
+  },
+  crypto: {
+    startValue: 65000,
+    tickRate: 1000,
+    candleSecs: 60,
+    windowSecs: 300,
+    volatility: 'calm',
+    chartType: 'candle',
+  },
+};
+
+type ConfigAction =
+  | { type: 'preset'; preset: Preset }
+  | { type: 'set'; patch: Partial<ConfigState> };
+
+function configReducer(state: ConfigState, action: ConfigAction): ConfigState {
+  switch (action.type) {
+    case 'preset':
+      return PRESET_CONFIG[action.preset];
+    case 'set':
+      return { ...state, ...action.patch };
+  }
+}
+
+/**
+ * Simulated live tick + OHLC candle feed for the Candlestick demo.
+ * Encapsulates the setInterval-driven generator, its scenario/preset
+ * lifecycle, and the refs that let the interval callback read fresh
+ * config without restarting the interval every render.
+ */
+function useCandlestickFeed() {
+  const [config, dispatchConfig] = useReducer(configReducer, PRESET_CONFIG.dev);
+  const { startValue, tickRate, candleSecs, volatility } = config;
+
   const [data, setData] = useState<LivelinePoint[]>([]);
   const [value, setValue] = useState(100);
   const [loading, setLoading] = useState(true);
-  const [paused, setPaused] = useState(false);
   const [scenario, setScenario] = useState<Scenario>('loading');
-
-  const [windowSecs, setWindowSecs] = useState(30);
-  const [grid, setGrid] = useState(true);
-  const [scrub, setScrub] = useState(true);
-
-  const [volatility, setVolatility] = useState<Volatility>('normal');
-  const [tickRate, setTickRate] = useState(300);
-
-  const [chartType, setChartType] = useState<ChartType>('candle');
-  const [candleSecs, setCandleSecs] = useState(2);
   const [candles, setCandles] = useState<CandlePoint[]>([]);
   const [liveCandle, setLiveCandle] = useState<CandlePoint | null>(null);
 
   const candleSecsRef = useRef(candleSecs);
-  candleSecsRef.current = candleSecs;
-  const [startValue, setStartValue] = useState(100);
   const lastValueRef = useRef(100);
   const liveCandleRef = useRef<CandlePoint | null>(null);
   const dataRef = useRef<LivelinePoint[]>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval>>(0);
   const volatilityRef = useRef(volatility);
-  volatilityRef.current = volatility;
   const startValueRef = useRef(startValue);
-  startValueRef.current = startValue;
   // Tick buffer covers widest window: crypto 1h=3600 ticks, dev 5m≈1000 ticks
   const maxTicksRef = useRef(1200);
+
+  useEffect(() => {
+    candleSecsRef.current = candleSecs;
+  }, [candleSecs]);
+  useEffect(() => {
+    volatilityRef.current = volatility;
+  }, [volatility]);
+  useEffect(() => {
+    startValueRef.current = startValue;
+  }, [startValue]);
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   const tickAndAggregate = (pt: LivelinePoint) => {
     const width = candleSecsRef.current;
@@ -91,9 +150,7 @@ export function CandlestickSection() {
       const committed = { ...lc };
       setCandles((prev) => {
         const next = [...prev, committed];
-        return next.length > maxTicksRef.current
-          ? next.slice(-maxTicksRef.current)
-          : next;
+        return next.length > MAX_CANDLES ? next.slice(-MAX_CANDLES) : next;
       });
       const slot = Math.floor(pt.time / width) * width;
       liveCandleRef.current = {
@@ -156,12 +213,9 @@ export function CandlestickSection() {
       setValue(pt.value);
       setData((prev) => {
         const next = [...prev, pt];
-        const trimmed =
-          next.length > maxTicksRef.current
-            ? next.slice(-maxTicksRef.current)
-            : next;
-        dataRef.current = trimmed;
-        return trimmed;
+        return next.length > maxTicksRef.current
+          ? next.slice(-maxTicksRef.current)
+          : next;
       });
       tickAndAggregate(pt);
     }, tickRate);
@@ -221,12 +275,9 @@ export function CandlestickSection() {
       setValue(pt.value);
       setData((prev) => {
         const next = [...prev, pt];
-        const trimmed =
-          next.length > maxTicksRef.current
-            ? next.slice(-maxTicksRef.current)
-            : next;
-        dataRef.current = trimmed;
-        return trimmed;
+        return next.length > maxTicksRef.current
+          ? next.slice(-maxTicksRef.current)
+          : next;
       });
       tickAndAggregate(pt);
     }, tickRate);
@@ -241,62 +292,84 @@ export function CandlestickSection() {
     liveCandleRef.current = agg.live ? { ...agg.live } : null;
   }, [candleSecs, scenario]);
 
-  // Preset switch — reset all dependent state
-  useEffect(() => {
-    if (preset === 'crypto') {
-      setStartValue(65000);
-      startValueRef.current = 65000;
-      setTickRate(1000);
-      setCandleSecs(60);
-      candleSecsRef.current = 60;
-      setWindowSecs(300);
-      setVolatility('calm');
-      setChartType('candle');
-      maxTicksRef.current = 4000; // covers 1h window at 1 tick/sec
-    } else {
-      setStartValue(100);
-      startValueRef.current = 100;
-      setTickRate(300);
-      setCandleSecs(2);
-      candleSecsRef.current = 2;
-      setWindowSecs(30);
-      setVolatility('normal');
-      setChartType('candle');
-      maxTicksRef.current = 1200; // covers 5m window at ~3 ticks/sec
-    }
+  // Preset switch — reset all dependent state. Called directly from the
+  // event handler that changes preset (not a useEffect keyed on it) so the
+  // reset applies in the same commit as the switch, with no stale-frame
+  // flash of the previous preset's data.
+  const applyPreset = useCallback((preset: Preset) => {
+    dispatchConfig({ type: 'preset', preset });
     setData([]);
     dataRef.current = [];
     setCandles([]);
     setLiveCandle(null);
     liveCandleRef.current = null;
     lastValueRef.current = preset === 'crypto' ? 65000 : 100;
+    maxTicksRef.current = preset === 'crypto' ? 4000 : 1200;
     clearInterval(intervalRef.current);
     setLoading(true);
     setScenario('loading');
-  }, [preset]);
+  }, []);
 
-  // Deliberate correction of an upstream demo bug: web dev/demo.tsx's Window
-  // control panel always maps over TIME_WINDOWS regardless of preset, so in
-  // crypto mode it shows 10s/30s/1m/5m buttons that don't match the
-  // 300/900/3600s window values actually in play. We switch the panel's
-  // window buttons by preset here; the in-chart pills (below) still follow
-  // web exactly (crypto-only, via the chart's own `windows` prop).
-  const windows = preset === 'crypto' ? CRYPTO_WINDOWS : TIME_WINDOWS;
-  const color = preset === 'crypto' ? CRYPTO_COLOR : accent;
-  const formatValue = preset === 'crypto' ? formatCrypto : undefined;
+  return {
+    config,
+    dispatchConfig,
+    applyPreset,
+    data,
+    value,
+    loading,
+    scenario,
+    setScenario,
+    candles,
+    liveCandle,
+  };
+}
 
+/**
+ * Preset + State + Chart + Data + Window + Features control panels.
+ * Memoized: every prop is a stable state/reducer setter or a value that only
+ * changes on user input, never on the per-tick setData/setValue calls inside
+ * useCandlestickFeed's interval — see the `onPresetChange` call site below
+ * for the one prop that needed a useCallback to actually earn this.
+ */
+const CandlestickControls = memo(function CandlestickControlsImpl({
+  preset,
+  onPresetChange,
+  scenario,
+  setScenario,
+  paused,
+  setPaused,
+  config,
+  dispatchConfig,
+  windows,
+  grid,
+  setGrid,
+  scrub,
+  setScrub,
+}: {
+  preset: Preset;
+  onPresetChange: (v: Preset) => void;
+  scenario: Scenario;
+  setScenario: (v: Scenario) => void;
+  paused: boolean;
+  setPaused: (fn: (p: boolean) => boolean) => void;
+  config: ConfigState;
+  dispatchConfig: (action: ConfigAction) => void;
+  windows: { label: string; secs: number }[];
+  grid: boolean;
+  setGrid: (v: boolean) => void;
+  scrub: boolean;
+  setScrub: (v: boolean) => void;
+}) {
   return (
-    <View>
-      <ScreenTitle
-        title="Candlestick"
-        subtitle="OHLC aggregation with line-mode morph"
-      />
-
+    <>
       <Section label="Preset">
-        <Btn active={preset === 'dev'} onPress={() => setPreset('dev')}>
+        <Btn active={preset === 'dev'} onPress={() => onPresetChange('dev')}>
           Dev
         </Btn>
-        <Btn active={preset === 'crypto'} onPress={() => setPreset('crypto')}>
+        <Btn
+          active={preset === 'crypto'}
+          onPress={() => onPresetChange('crypto')}
+        >
           Crypto
         </Btn>
       </Section>
@@ -328,12 +401,19 @@ export function CandlestickSection() {
 
       <Section label="Chart">
         <Btn
-          active={chartType === 'candle'}
-          onPress={() => setChartType('candle')}
+          active={config.chartType === 'candle'}
+          onPress={() =>
+            dispatchConfig({ type: 'set', patch: { chartType: 'candle' } })
+          }
         >
           Candle
         </Btn>
-        <Btn active={chartType === 'line'} onPress={() => setChartType('line')}>
+        <Btn
+          active={config.chartType === 'line'}
+          onPress={() =>
+            dispatchConfig({ type: 'set', patch: { chartType: 'line' } })
+          }
+        >
           Line
         </Btn>
         <Sep />
@@ -341,8 +421,10 @@ export function CandlestickSection() {
           {CANDLE_WIDTHS.map((cw) => (
             <Btn
               key={cw.secs}
-              active={candleSecs === cw.secs}
-              onPress={() => setCandleSecs(cw.secs)}
+              active={config.candleSecs === cw.secs}
+              onPress={() =>
+                dispatchConfig({ type: 'set', patch: { candleSecs: cw.secs } })
+              }
             >
               {cw.label}
             </Btn>
@@ -355,8 +437,10 @@ export function CandlestickSection() {
           {VOLATILITIES.map((v) => (
             <Btn
               key={v}
-              active={volatility === v}
-              onPress={() => setVolatility(v)}
+              active={config.volatility === v}
+              onPress={() =>
+                dispatchConfig({ type: 'set', patch: { volatility: v } })
+              }
             >
               {v}
             </Btn>
@@ -367,8 +451,10 @@ export function CandlestickSection() {
           {TICK_RATES.map((t) => (
             <Btn
               key={t.ms}
-              active={tickRate === t.ms}
-              onPress={() => setTickRate(t.ms)}
+              active={config.tickRate === t.ms}
+              onPress={() =>
+                dispatchConfig({ type: 'set', patch: { tickRate: t.ms } })
+              }
             >
               {t.label}
             </Btn>
@@ -380,8 +466,10 @@ export function CandlestickSection() {
         {windows.map((w) => (
           <Btn
             key={w.secs}
-            active={windowSecs === w.secs}
-            onPress={() => setWindowSecs(w.secs)}
+            active={config.windowSecs === w.secs}
+            onPress={() =>
+              dispatchConfig({ type: 'set', patch: { windowSecs: w.secs } })
+            }
           >
             {w.label}
           </Btn>
@@ -396,34 +484,52 @@ export function CandlestickSection() {
           Scrub
         </Toggle>
       </Section>
+    </>
+  );
+});
 
-      <ChartFrame height={320}>
-        <Liveline
-          mode="candle"
-          data={data}
-          value={value}
-          candles={candles}
-          candleWidth={candleSecs}
-          liveCandle={liveCandle ?? undefined}
-          lineMode={chartType === 'line'}
-          lineData={data}
-          lineValue={value}
-          loading={loading}
-          paused={paused}
-          theme={theme}
-          color={color}
-          window={windowSecs}
-          windows={preset === 'crypto' ? CRYPTO_WINDOWS : undefined}
-          formatValue={formatValue}
-          onModeChange={(m) => setChartType(m)}
-          grid={grid}
-          scrub={scrub}
-          style={{ flex: 1 }}
-        />
-      </ChartFrame>
-
-      {/* Size variants — ported from dev/demo.tsx lines 386-429. Web gates
-          only `grid` by size here, and never passes `windows` to the minis. */}
+/**
+ * Mini-chart grid — ported from dev/demo.tsx lines 386-429. Web gates only
+ * `grid` by size here, and never passes `windows` to the minis.
+ * Deliberately NOT memoized: `data`, `candles`, `value`, and `liveCandle`
+ * change on every simulated tick, so a React.memo wrapper here would fail
+ * its shallow comparison every render anyway and just add a wasted check.
+ */
+function SizeVariants({
+  isDark,
+  data,
+  value,
+  candles,
+  candleSecs,
+  liveCandle,
+  chartType,
+  theme,
+  color,
+  windowSecs,
+  formatValue,
+  loading,
+  paused,
+  grid,
+  scrub,
+}: {
+  isDark: boolean;
+  data: LivelinePoint[];
+  value: number;
+  candles: CandlePoint[];
+  candleSecs: number;
+  liveCandle: CandlePoint | null;
+  chartType: ChartType;
+  theme: 'dark' | 'light';
+  color: string;
+  windowSecs: number;
+  formatValue: ((v: number) => string) | undefined;
+  loading: boolean;
+  paused: boolean;
+  grid: boolean;
+  scrub: boolean;
+}) {
+  return (
+    <>
       <Text
         style={{
           fontSize: 12,
@@ -439,7 +545,7 @@ export function CandlestickSection() {
           <View key={size.label}>
             <Text
               style={{
-                fontSize: 10,
+                fontSize: 12,
                 color: fg(isDark, 0.25),
                 marginBottom: 4,
               }}
@@ -481,6 +587,120 @@ export function CandlestickSection() {
           </View>
         ))}
       </View>
+    </>
+  );
+}
+
+export function CandlestickSection() {
+  const { isDark, accent } = useAppTheme();
+  const theme = isDark ? 'dark' : 'light';
+
+  const [preset, setPreset] = useState<Preset>('dev');
+  const [paused, setPaused] = useState(false);
+  const [grid, setGrid] = useState(true);
+  const [scrub, setScrub] = useState(true);
+
+  const {
+    config,
+    dispatchConfig,
+    applyPreset,
+    data,
+    value,
+    loading,
+    scenario,
+    setScenario,
+    candles,
+    liveCandle,
+  } = useCandlestickFeed();
+  const { candleSecs, chartType, tickRate, volatility, windowSecs } = config;
+
+  // Memoized so it's a stable prop into the memoized CandlestickControls
+  // below — a fresh arrow function here every render would defeat that memo.
+  const handlePresetChange = useCallback(
+    (p: Preset) => {
+      setPreset(p);
+      applyPreset(p);
+    },
+    [applyPreset]
+  );
+
+  // Deliberate correction of an upstream demo bug: web dev/demo.tsx's Window
+  // control panel always maps over TIME_WINDOWS regardless of preset, so in
+  // crypto mode it shows 10s/30s/1m/5m buttons that don't match the
+  // 300/900/3600s window values actually in play. We switch the panel's
+  // window buttons by preset here; the in-chart pills (below) still follow
+  // web exactly (crypto-only, via the chart's own `windows` prop).
+  const windows = preset === 'crypto' ? CRYPTO_WINDOWS : TIME_WINDOWS;
+  const color = preset === 'crypto' ? CRYPTO_COLOR : accent;
+  const formatValue = preset === 'crypto' ? formatCrypto : undefined;
+
+  return (
+    <View>
+      <ScreenTitle
+        title="Candlestick"
+        subtitle="OHLC aggregation with line-mode morph"
+      />
+
+      <CandlestickControls
+        preset={preset}
+        onPresetChange={handlePresetChange}
+        scenario={scenario}
+        setScenario={setScenario}
+        paused={paused}
+        setPaused={setPaused}
+        config={config}
+        dispatchConfig={dispatchConfig}
+        windows={windows}
+        grid={grid}
+        setGrid={setGrid}
+        scrub={scrub}
+        setScrub={setScrub}
+      />
+
+      <ChartFrame height={320}>
+        <Liveline
+          mode="candle"
+          data={data}
+          value={value}
+          candles={candles}
+          candleWidth={candleSecs}
+          liveCandle={liveCandle ?? undefined}
+          lineMode={chartType === 'line'}
+          lineData={data}
+          lineValue={value}
+          loading={loading}
+          paused={paused}
+          theme={theme}
+          color={color}
+          window={windowSecs}
+          windows={preset === 'crypto' ? CRYPTO_WINDOWS : undefined}
+          formatValue={formatValue}
+          onModeChange={(m) =>
+            dispatchConfig({ type: 'set', patch: { chartType: m } })
+          }
+          grid={grid}
+          scrub={scrub}
+          style={{ flex: 1 }}
+        />
+      </ChartFrame>
+
+      <SizeVariants
+        isDark={isDark}
+        data={data}
+        value={value}
+        candles={candles}
+        candleSecs={candleSecs}
+        liveCandle={liveCandle}
+        chartType={chartType}
+        theme={theme}
+        color={color}
+        windowSecs={windowSecs}
+        formatValue={formatValue}
+        loading={loading}
+        paused={paused}
+        grid={grid}
+        scrub={scrub}
+      />
 
       <StatusBar
         items={[

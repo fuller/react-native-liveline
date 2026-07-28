@@ -20,8 +20,32 @@ export const PAUSE_CATCHUP_SPEED_FAST = 0.22;
 export const LOADING_ALPHA_SPEED = 0.14;
 export const SERIES_TOGGLE_SPEED = 0.1;
 
+// --- Quiescence (skip picture re-recording when provably static) ---
+// ~1.5s of consecutively-settled frames at 60fps — by then every
+// exponential lerp in the engine (smoothValue, range, badge, grid/time-axis
+// label fades, window transitions) has fully converged, so it's safe to
+// start skipping without any visible discontinuity.
+export const QUIESCENT_FRAME_THRESHOLD = 90;
+
+// --- Frame pacing (cap picture re-recording on high-refresh displays) ---
+// Below the nominal 60fps interval (1000/60 ≈ 16.67ms) on purpose: at
+// exactly 16.67, vsync jitter alone would intermittently trip the gate on
+// a real 60Hz display, silently skipping legitimate frames and halving its
+// effective frame rate. This margin lets every native 60Hz vsync through
+// while still roughly halving work on a 120Hz display.
+export const MIN_FRAME_INTERVAL_MS = 15;
+
 // --- Candle-specific constants ---
 export const CANDLE_LERP_SPEED = 0.25;
+// Relative snap threshold for the live candle's OHLC lerp (see step.ts).
+// Without an exact snap, high/low never becomes bit-exact with its target;
+// since computeCandleRange scans the live candle too, that epsilon-level
+// drift propagates into displayMax/displayMin whenever the live candle
+// holds the visible extreme, which mismatches the candle cache's
+// kMinVal/kMaxVal and forces a full geometry rebuild every single frame —
+// the main limiter on the cache's hit rate. Sub-pixel (matches
+// LINE_SNAP_THRESHOLD), so the snap itself is invisible.
+export const CANDLE_SNAP_THRESHOLD = 0.001;
 export const CANDLE_WIDTH_TRANS_MS = 300;
 export const LINE_MORPH_MS = 500;
 export const CLOSE_LINE_LERP_SPEED = 0.25; // matches candle body speed
@@ -31,5 +55,4 @@ export const LINE_ADAPTIVE_BOOST = 0.2;
 export const LINE_SNAP_THRESHOLD = 0.001;
 export const RANGE_LERP_SPEED = 0.15;
 export const RANGE_ADAPTIVE_BOOST = 0.2;
-export const CANDLE_BUFFER = 0.05;
 export const CANDLE_BUFFER_NO_BADGE = 0.015;

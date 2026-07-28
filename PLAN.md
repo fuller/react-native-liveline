@@ -191,10 +191,14 @@ and published-package Metro transform: consumer-side, deferred as planned.
 ### Deferred / nice-to-have (post-v0.1)
 - Perf: avoid re-serializing full `data` array into the config shared value on
   every tick (append-only path or ring buffer) if profiling shows cost.
-- Paint/path pooling, scrub activation delay, point decimation, and
-  off-screen frame-loop suspension: see **`PLAN_PERF.md`** — a source-verified
-  comparison against react-native-graph with a concrete implementation plan
-  for each (this superseded the speculative bullets that used to be here).
+- ~~Paint/path pooling, scrub activation delay, point decimation, and
+  off-screen frame-loop suspension~~ ✅ ALL DONE 2026-07-18 — all four
+  `PLAN_PERF.md` items landed as individual commits (paint pooling 27b0dfc,
+  min-max decimation 7c3c668, `scrubActivationDelay` 413af2d, `active`
+  prop 6347873), each verified on the iOS sim incl. the Block JS 2s stress
+  test. One manual check remains open: scrub-vs-scroll *feel* for
+  `scrubActivationDelay` (example "Scroll" section) needs a real finger —
+  synthetic input can't reach RNGH Pan gestures on the sim.
 - CI runs on GitHub once repo is pushed (workflows already scaffolded).
 
 ## Task list mapping (session task tool)

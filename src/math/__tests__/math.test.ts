@@ -1,9 +1,20 @@
 import { lerp } from '../lerp';
+import { easeInOutCos, logLerp } from '../ease';
+import { smoothstepRamp } from '../ramp';
+import { filterVisiblePoints, filterVisiblePointsInto } from '../visible';
+import { rgbColor } from '../color';
 import { computeRange } from '../range';
 import { detectMomentum } from '../momentum';
 import { interpolateAtTime } from '../interpolate';
 import { niceTimeInterval } from '../intervals';
-import { drawSpline, type SplinePath } from '../spline';
+import {
+  drawSpline,
+  computeSplineTangents,
+  emitSplineSegments,
+  drawSplineTail,
+  type SplinePath,
+} from '../spline';
+import { decimateMinMax } from '../decimate';
 import type { LivelinePoint } from '../../types';
 
 // -- lerp --
@@ -34,6 +45,245 @@ describe('lerp', () => {
     let v = 0;
     for (let i = 0; i < 200; i++) v = lerp(v, 100, 0.08, 16.67);
     expect(v).toBeCloseTo(100, 1);
+  });
+});
+
+// -- easeInOutCos --
+
+describe('easeInOutCos', () => {
+  it('starts at 0 and ends at 1', () => {
+    expect(easeInOutCos(0)).toBeCloseTo(0);
+    expect(easeInOutCos(1)).toBeCloseTo(1);
+  });
+
+  it('sits at 0.5 for the midpoint', () => {
+    expect(easeInOutCos(0.5)).toBeCloseTo(0.5);
+  });
+
+  it('is monotonically increasing over [0, 1]', () => {
+    let prev = -Infinity;
+    for (let t = 0; t <= 1; t += 0.05) {
+      const v = easeInOutCos(t);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it('has zero slope at both endpoints (ease-in-out, not linear)', () => {
+    const nearStart = easeInOutCos(0.02);
+    const nearEnd = easeInOutCos(0.98);
+    // Linear would give 0.02 / 0.98 — cosine easing stays flatter near the ends.
+    expect(nearStart).toBeLessThan(0.02);
+    expect(1 - nearEnd).toBeLessThan(0.02);
+  });
+});
+
+// -- logLerp --
+
+describe('logLerp', () => {
+  it('returns `from` at t=0 and `to` at t=1', () => {
+    expect(logLerp(10, 40, 0)).toBeCloseTo(10);
+    expect(logLerp(10, 40, 1)).toBeCloseTo(40);
+  });
+
+  it('interpolates in log space, not linear space', () => {
+    // Doubling and halving should feel symmetric: sqrt(from*to) at t=0.5.
+    const mid = logLerp(10, 40, 0.5);
+    expect(mid).toBeCloseTo(Math.sqrt(10 * 40));
+    expect(mid).not.toBeCloseTo((10 + 40) / 2);
+  });
+
+  it('handles from === to as a constant', () => {
+    expect(logLerp(25, 25, 0.5)).toBeCloseTo(25);
+  });
+});
+
+// -- smoothstepRamp --
+
+describe('smoothstepRamp', () => {
+  it('clamps to 0 below the start threshold', () => {
+    expect(smoothstepRamp(0, 0.15, 0.7)).toBe(0);
+    expect(smoothstepRamp(-1, 0.15, 0.7)).toBe(0);
+  });
+
+  it('clamps to 1 above the end threshold', () => {
+    expect(smoothstepRamp(0.7, 0.15, 0.7)).toBe(1);
+    expect(smoothstepRamp(2, 0.15, 0.7)).toBe(1);
+  });
+
+  it('is 0.5 at the midpoint of the ramp', () => {
+    expect(smoothstepRamp(0.5, 0, 1)).toBeCloseTo(0.5);
+  });
+
+  it('is monotonically increasing across the ramp', () => {
+    let prev = -Infinity;
+    for (let r = 0; r <= 1; r += 0.05) {
+      const v = smoothstepRamp(r, 0.15, 0.7);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+});
+
+// -- filterVisiblePoints --
+
+describe('filterVisiblePoints', () => {
+  const pts = (times: number[]): LivelinePoint[] =>
+    times.map((t) => ({ time: t, value: t }));
+
+  it('keeps points strictly within [leftEdge, rightEdge]', () => {
+    const result = filterVisiblePoints(pts([0, 5, 10, 15, 20]), 5, 15);
+    expect(result.map((p) => p.time)).toEqual([5, 10, 15]);
+  });
+
+  it('includes points up to 2 units before leftEdge (the float-rounding epsilon)', () => {
+    const result = filterVisiblePoints(pts([3, 4, 5]), 5, 10);
+    expect(result.map((p) => p.time)).toEqual([3, 4, 5]);
+  });
+
+  it('excludes points more than 2 units before leftEdge', () => {
+    const result = filterVisiblePoints(pts([2.9, 3]), 5, 10);
+    expect(result.map((p) => p.time)).toEqual([3]);
+  });
+
+  // The window scan binary-searches for its start index (the buffer is
+  // time-ordered, an invariant dataDelta/candleAtX already rely on), so the
+  // boundary cases below are where an off-by-one would surface.
+  it('handles an empty buffer', () => {
+    expect(filterVisiblePoints([], 5, 10)).toEqual([]);
+  });
+
+  it('returns nothing when every point precedes the window', () => {
+    expect(filterVisiblePoints(pts([0, 1, 2]), 50, 60)).toEqual([]);
+  });
+
+  it('returns nothing when every point follows the window', () => {
+    expect(filterVisiblePoints(pts([50, 60]), 0, 10)).toEqual([]);
+  });
+
+  it('returns the whole buffer when it sits inside the window', () => {
+    const result = filterVisiblePoints(pts([10, 11, 12]), 0, 100);
+    expect(result.map((q) => q.time)).toEqual([10, 11, 12]);
+  });
+
+  it('picks the exact start index on a long buffer (binary-search boundary)', () => {
+    // 0..999; window [500,510] with the 2-unit epsilon => first kept is 498.
+    const long = pts(Array.from({ length: 1000 }, (_, i) => i));
+    const result = filterVisiblePoints(long, 500, 510);
+    expect(result[0]!.time).toBe(498);
+    expect(result[result.length - 1]!.time).toBe(510);
+  });
+
+  it('matches a brute-force linear scan across many random windows', () => {
+    const long = pts(Array.from({ length: 500 }, (_, i) => i * 3));
+    for (let k = 0; k < 60; k++) {
+      const l = Math.random() * 1500;
+      const r = l + Math.random() * 300;
+      const expected = long
+        .filter((q) => q.time >= l - 2 && q.time <= r)
+        .map((q) => q.time);
+      expect(filterVisiblePoints(long, l, r).map((q) => q.time)).toEqual(
+        expected
+      );
+    }
+  });
+
+  it('excludes points after rightEdge', () => {
+    const result = filterVisiblePoints(pts([9, 10, 11]), 0, 10);
+    expect(result.map((p) => p.time)).toEqual([9, 10]);
+  });
+
+  it('returns a new array, not the input reference', () => {
+    const input = pts([1, 2, 3]);
+    const result = filterVisiblePoints(input, 0, 10);
+    expect(result).not.toBe(input);
+  });
+
+  it('returns an empty array when nothing is visible', () => {
+    expect(filterVisiblePoints(pts([100, 200]), 0, 10)).toEqual([]);
+  });
+
+  it('handles an empty input array', () => {
+    expect(filterVisiblePoints([], 0, 10)).toEqual([]);
+  });
+});
+
+// -- filterVisiblePointsInto --
+
+describe('filterVisiblePointsInto', () => {
+  const pts = (times: number[]): LivelinePoint[] =>
+    times.map((t) => ({ time: t, value: t }));
+
+  it('produces the same results as the allocating filterVisiblePoints', () => {
+    const cases: [number[], number, number][] = [
+      [[0, 5, 10, 15, 20], 5, 15],
+      [[3, 4, 5], 5, 10],
+      [[2.9, 3], 5, 10],
+      [[9, 10, 11], 0, 10],
+      [[100, 200], 0, 10],
+      [[], 0, 10],
+    ];
+    for (const [times, leftEdge, rightEdge] of cases) {
+      const out: LivelinePoint[] = [];
+      filterVisiblePointsInto(pts(times), leftEdge, rightEdge, out);
+      expect(out).toEqual(filterVisiblePoints(pts(times), leftEdge, rightEdge));
+    }
+  });
+
+  it('reuses the provided array instead of allocating a new one', () => {
+    const out: LivelinePoint[] = [];
+    filterVisiblePointsInto(pts([0, 5, 10, 15, 20]), 5, 15, out);
+    const sameArray = out;
+    filterVisiblePointsInto(pts([1, 2, 3]), 0, 10, out);
+    expect(out).toBe(sameArray);
+  });
+
+  it('truncates stale entries left over from a longer previous frame', () => {
+    const out: LivelinePoint[] = [];
+    filterVisiblePointsInto(pts([0, 5, 10, 15, 20]), 5, 15, out);
+    expect(out.length).toBe(3);
+    filterVisiblePointsInto(pts([0, 100]), 5, 15, out);
+    expect(out.length).toBe(0);
+  });
+
+  it('overwrites pre-existing (garbage) contents in the output array', () => {
+    const out: LivelinePoint[] = [
+      { time: -1, value: -1 },
+      { time: -2, value: -2 },
+    ];
+    filterVisiblePointsInto(pts([1, 2, 3]), 0, 10, out);
+    expect(out.map((p) => p.time)).toEqual([1, 2, 3]);
+  });
+});
+
+// -- rgbColor --
+
+describe('rgbColor', () => {
+  it('scales 0-255 RGB to the 0-1 range SkColor expects', () => {
+    // Float32Array has ~7 significant digits — compare at reduced precision.
+    const c = rgbColor(255, 128, 0);
+    expect(c[0]).toBeCloseTo(1, 6);
+    expect(c[1]).toBeCloseTo(128 / 255, 6);
+    expect(c[2]).toBeCloseTo(0, 6);
+  });
+
+  it('defaults alpha to 1', () => {
+    expect(rgbColor(10, 20, 30)[3]).toBe(1);
+  });
+
+  it('passes through an explicit alpha unscaled', () => {
+    expect(rgbColor(10, 20, 30, 0.5)[3]).toBe(0.5);
+  });
+
+  it('returns a 4-element Float32Array', () => {
+    const c = rgbColor(0, 0, 0);
+    expect(c).toBeInstanceOf(Float32Array);
+    expect(c.length).toBe(4);
+  });
+
+  it('handles black and white exactly', () => {
+    expect(Array.from(rgbColor(0, 0, 0))).toEqual([0, 0, 0, 1]);
+    expect(Array.from(rgbColor(255, 255, 255))).toEqual([1, 1, 1, 1]);
   });
 });
 
@@ -244,5 +494,427 @@ describe('drawSpline', () => {
       }
       prev = [x3, y3];
     }
+  });
+});
+
+// -- computeSplineTangents / emitSplineSegments --
+
+describe('computeSplineTangents + emitSplineSegments', () => {
+  const recorder = () => {
+    const calls: { op: 'cubicTo'; args: number[] }[] = [];
+    const path: SplinePath = {
+      lineTo: () => {
+        throw new Error('emitSplineSegments should never call lineTo');
+      },
+      cubicTo: (...args) => calls.push({ op: 'cubicTo', args }),
+    };
+    return { path, calls };
+  };
+
+  const pts: [number, number][] = [
+    [0, 0],
+    [10, 5],
+    [20, 3],
+    [30, 8],
+    [40, 1],
+  ];
+
+  it('composes to the exact same output as drawSpline at full count', () => {
+    const full = recorder();
+    drawSpline(full.path, pts);
+
+    const composed = recorder();
+    const { m, h } = computeSplineTangents(pts);
+    emitSplineSegments(composed.path, pts, m, h);
+
+    expect(composed.calls).toEqual(full.calls);
+  });
+
+  it('an explicit count equal to pts.length matches the implicit default', () => {
+    const a = recorder();
+    const { m: mA, h: hA } = computeSplineTangents(pts);
+    emitSplineSegments(a.path, pts, mA, hA);
+
+    const b = recorder();
+    const { m: mB, h: hB } = computeSplineTangents(pts, pts.length);
+    emitSplineSegments(b.path, pts, mB, hB, pts.length);
+
+    expect(b.calls).toEqual(a.calls);
+  });
+
+  it('count truncates to a prefix: matches drawSpline run on that prefix', () => {
+    // This is exactly how the line path cache builds its cached prefix —
+    // over all but the last two (moving) points.
+    const prefixCount = pts.length - 2;
+    const prefix = pts.slice(0, prefixCount);
+
+    const viaPrefixArray = recorder();
+    drawSpline(viaPrefixArray.path, prefix);
+
+    const viaCount = recorder();
+    const { m, h } = computeSplineTangents(pts, prefixCount);
+    emitSplineSegments(viaCount.path, pts, m, h, prefixCount);
+
+    expect(viaCount.calls).toEqual(viaPrefixArray.calls);
+    // And the truncated tangent/interval arrays are exactly prefixCount /
+    // prefixCount-1 long — nothing computed past the requested count.
+    expect(m).toHaveLength(prefixCount);
+    expect(h).toHaveLength(prefixCount - 1);
+  });
+
+  it('emitSplineSegments with count=2 emits exactly one segment', () => {
+    const { path, calls } = recorder();
+    const { m, h } = computeSplineTangents(pts, 2);
+    emitSplineSegments(path, pts, m, h, 2);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args.slice(4)).toEqual(pts[1]);
+  });
+
+  it('the alpha²+beta²≤9 constraint clamps an overshoot-prone tangent (steep segment into a near-flat one)', () => {
+    // A steep rise (delta=10) straight into a near-flat run (delta=0.01):
+    // the naive averaged tangent at the join, (10 + 0.01) / 2 = 5.005, is
+    // wildly disproportionate to the flat segment it feeds into and would
+    // overshoot it — this is exactly the shape the Fritsch-Carlson
+    // constraint exists to catch.
+    const steepThenFlat: [number, number][] = [
+      [0, 0],
+      [1, 10],
+      [2, 10.01],
+      [3, 10.02],
+    ];
+    const { m } = computeSplineTangents(steepThenFlat);
+    expect(m[1]).not.toBeCloseTo(5.005, 2); // the clamp must have engaged
+
+    // Verify the actual constraint it enforces, from the formula: for the
+    // flat segment (index 1), alpha² + beta² ≤ 9 — equality once clamped.
+    const delta1 =
+      (steepThenFlat[2]![1] - steepThenFlat[1]![1]) /
+      (steepThenFlat[2]![0] - steepThenFlat[1]![0]);
+    const alpha = m[1]! / delta1;
+    const beta = m[2]! / delta1;
+    expect(alpha * alpha + beta * beta).toBeCloseTo(9, 6);
+  });
+
+  it('a zero-width segment (two points sharing the same x — a duplicate timestamp) produces a zero slope, not NaN/Infinity', () => {
+    const dupX: [number, number][] = [
+      [0, 0],
+      [5, 5],
+      [5, 8], // same x as the previous point
+      [10, 10],
+    ];
+    const { m, h } = computeSplineTangents(dupX);
+    expect(h[1]).toBe(0);
+    expect(m.every((v) => Number.isFinite(v))).toBe(true);
+    expect(h.every((v) => Number.isFinite(v))).toBe(true);
+  });
+});
+
+// -- drawSplineTail --
+
+describe('drawSplineTail', () => {
+  const recorder = () => {
+    const calls: { op: 'lineTo' | 'cubicTo'; args: number[] }[] = [];
+    const path: SplinePath = {
+      lineTo: (x, y) => calls.push({ op: 'lineTo', args: [x, y] }),
+      cubicTo: (...args) => calls.push({ op: 'cubicTo', args }),
+    };
+    return { path, calls };
+  };
+
+  it('emits two cubics on the normal (monotone-increasing x) path', () => {
+    const { path, calls } = recorder();
+    drawSplineTail(path, 0, 0, 1, 10, 8, 20, 20);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.op === 'cubicTo')).toBe(true);
+    expect(calls[0]!.args.slice(4)).toEqual([10, 8]); // ends at the last data point
+    expect(calls[1]!.args.slice(4)).toEqual([20, 20]); // ends at the live tip
+  });
+
+  it('the first cubic’s incoming control point uses mCut verbatim (C1 continuity at the cut)', () => {
+    const { path, calls } = recorder();
+    const cutX = 5;
+    const cutY = 2;
+    const mCut = 1.5;
+    const h0 = 10 - cutX;
+    drawSplineTail(path, cutX, cutY, mCut, 10, 8, 20, 20);
+    const first = calls[0]!.args;
+    // Control point 1 = (cutX + h0/3, cutY + mCut*h0/3) — the exact formula
+    // drawSpline itself uses for a segment's leading control point.
+    expect(first[0]).toBeCloseTo(cutX + h0 / 3, 9);
+    expect(first[1]).toBeCloseTo(cutY + (mCut * h0) / 3, 9);
+  });
+
+  it('degenerate ordering (x1 <= cutX) falls back to two straight lineTos, no cubics', () => {
+    const { path, calls } = recorder();
+    drawSplineTail(path, 10, 5, 1, 10, 8, 20, 20); // x1 === cutX
+    expect(calls).toEqual([
+      { op: 'lineTo', args: [10, 8] },
+      { op: 'lineTo', args: [20, 20] },
+    ]);
+  });
+
+  it('degenerate ordering (x1 < cutX) also falls back to lineTos', () => {
+    const { path, calls } = recorder();
+    drawSplineTail(path, 10, 5, 1, 5, 8, 20, 20);
+    expect(calls).toEqual([
+      { op: 'lineTo', args: [5, 8] },
+      { op: 'lineTo', args: [20, 20] },
+    ]);
+  });
+
+  it('a stalled tip (x2 <= x1, e.g. reveal/paused edge case) emits one cubic then a lineTo', () => {
+    const { path, calls } = recorder();
+    drawSplineTail(path, 0, 0, 1, 10, 8, 10, 8); // tip hasn't advanced past the last point
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.op).toBe('cubicTo');
+    expect(calls[0]!.args.slice(4)).toEqual([10, 8]);
+    expect(calls[1]).toEqual({ op: 'lineTo', args: [10, 8] });
+  });
+
+  it('the interior tangent (m1) never exceeds the three-times monotonicity limit', () => {
+    // A sharp direction change right at the cut — the averaged secant would
+    // overshoot without clamping.
+    const { path, calls } = recorder();
+    const cutX = 0;
+    const cutY = 0;
+    drawSplineTail(path, cutX, cutY, 0, 1, 100, 2, 100.01);
+    const d0 = (100 - cutY) / (1 - cutX);
+    const d1 = (100.01 - 100) / (2 - 1);
+    const lim = 3 * Math.min(Math.abs(d0), Math.abs(d1));
+    // m1 is embedded in the first cubic's outgoing control point:
+    // y1 - (m1 * h0) / 3 = args[3], with h0 = x1 - cutX = 1.
+    const impliedM1 = ((100 - calls[0]!.args[3]!) * 3) / 1;
+    expect(Math.abs(impliedM1)).toBeLessThanOrEqual(lim + 1e-9);
+  });
+
+  it('the clamp also engages on the negative side (steep descent into a near-flat one)', () => {
+    const { path, calls } = recorder();
+    const cutX = 0;
+    const cutY = 0;
+    drawSplineTail(path, cutX, cutY, 0, 1, -100, 2, -100.01);
+    const d0 = (-100 - cutY) / (1 - cutX);
+    const d1 = (-100.01 - -100) / (2 - 1);
+    const lim = 3 * Math.min(Math.abs(d0), Math.abs(d1));
+    const impliedM1 = ((-100 - calls[0]!.args[3]!) * 3) / 1;
+    expect(impliedM1).toBeLessThan(0); // clamped to -lim, not zeroed
+    expect(Math.abs(impliedM1)).toBeCloseTo(lim, 9);
+  });
+
+  it('opposite-signed secants (a local extremum at the cut) zero the interior tangent', () => {
+    const { path, calls } = recorder();
+    // Rising into the cut, falling out of it — d0 > 0, d1 < 0 at the join.
+    drawSplineTail(path, 0, 0, 1, 10, 10, 20, 0);
+    const h0 = 10;
+    const impliedM1 = ((10 - calls[0]!.args[3]!) * 3) / h0;
+    expect(impliedM1).toBeCloseTo(0, 9);
+  });
+});
+
+// -- decimateMinMax --
+
+describe('decimateMinMax', () => {
+  const pts = (values: number[]): LivelinePoint[] =>
+    values.map((v, i) => ({ time: i, value: v }));
+
+  it('returns the input unchanged (same reference) when at or below the pixel budget', () => {
+    const input = pts([1, 5, 3, 8, 2]);
+    const result = decimateMinMax(input, 400);
+    expect(result).toBe(input); // same reference, not just equal content
+  });
+
+  it('returns the input unchanged when length exactly equals chartW', () => {
+    const input = pts(Array.from({ length: 100 }, (_, i) => i));
+    const result = decimateMinMax(input, 100);
+    expect(result).toBe(input);
+  });
+
+  it('preserves the first and last elements exactly when decimating', () => {
+    const input = pts(Array.from({ length: 5000 }, (_, i) => Math.sin(i)));
+    const result = decimateMinMax(input, 100);
+    expect(result[0]).toBe(input[0]);
+    expect(result[result.length - 1]).toBe(input[input.length - 1]);
+  });
+
+  it('produces chronologically monotonic output (required by drawSpline)', () => {
+    const input = pts(Array.from({ length: 3000 }, () => Math.random() * 100));
+    const result = decimateMinMax(input, 150);
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i]!.time).toBeGreaterThanOrEqual(result[i - 1]!.time);
+    }
+  });
+
+  it('has no duplicate points despite first/last special-casing', () => {
+    const input = pts(Array.from({ length: 2000 }, (_, i) => i % 7));
+    const result = decimateMinMax(input, 80);
+    const seen = new Set(result.map((p) => p.time));
+    expect(seen.size).toBe(result.length);
+  });
+
+  it('a synthetic spike mid-array survives decimation', () => {
+    const values = Array.from({ length: 4000 }, () => 10);
+    const spikeIndex = 2137;
+    values[spikeIndex] = 9999;
+    const input = pts(values);
+    const result = decimateMinMax(input, 200);
+    expect(result.some((p) => p.value === 9999)).toBe(true);
+  });
+
+  it('a synthetic dip mid-array (negative spike) survives decimation', () => {
+    const values = Array.from({ length: 4000 }, () => 10);
+    const dipIndex = 913;
+    values[dipIndex] = -9999;
+    const input = pts(values);
+    const result = decimateMinMax(input, 200);
+    expect(result.some((p) => p.value === -9999)).toBe(true);
+  });
+
+  it('bounds output length to roughly 2x buckets plus a small constant', () => {
+    const input = pts(Array.from({ length: 8000 }, (_, i) => i % 50));
+    const chartW = 300;
+    const result = decimateMinMax(input, chartW);
+    expect(result.length).toBeLessThanOrEqual(chartW * 2 + 2);
+  });
+
+  it('decimates dense input (10k points, chartW 400) to the expected order of magnitude', () => {
+    const input = pts(
+      Array.from({ length: 10000 }, (_, i) => Math.sin(i * 0.01) * 100)
+    );
+    const chartW = 400;
+    const result = decimateMinMax(input, chartW);
+    // Should be dramatically smaller than the input, and in the same
+    // ballpark as chartW (bounded above by 2*chartW + 2), not e.g. still
+    // thousands of points.
+    expect(result.length).toBeLessThan(input.length / 5);
+    expect(result.length).toBeLessThanOrEqual(chartW * 2 + 2);
+    expect(result.length).toBeGreaterThan(chartW / 4);
+  });
+
+  it('handles all-identical timestamps without throwing or producing NaN buckets', () => {
+    const input: LivelinePoint[] = Array.from({ length: 500 }, (_, i) => ({
+      time: 42,
+      value: i,
+    }));
+    const result = decimateMinMax(input, 50);
+    expect(result[0]).toBe(input[0]);
+    expect(result[result.length - 1]).toBe(input[input.length - 1]);
+    expect(result.every((p) => Number.isFinite(p.value))).toBe(true);
+  });
+
+  it('a duplicate timestamp at the tail (a same-instant burst tick) is not dropped by the bucket-index clamp', () => {
+    // The interior loop excludes index n-1 (`last`) but not n-2 — if an
+    // interior point shares `last`'s exact timestamp (two ticks landing in
+    // the same instant, which real feeds do produce), its raw bucket index
+    // computes to exactly `bucketCount` (one past the last valid bucket)
+    // and must be clamped rather than silently indexing out of bounds.
+    // Chosen so the division is exact (64 / 8 = 8), not a float-rounding
+    // fluke: first.time=0, last.time=64, chartW=8 → bucketWidth=8 exactly.
+    const input: LivelinePoint[] = [{ time: 0, value: 0 }];
+    for (let i = 1; i <= 6; i++) input.push({ time: i * 9, value: i });
+    input.push({ time: 64, value: 999 }); // interior, time === last.time
+    input.push({ time: 64, value: 1000 }); // the actual last
+    const result = decimateMinMax(input, 8);
+    expect(result[0]).toBe(input[0]);
+    expect(result[result.length - 1]).toBe(input[input.length - 1]);
+    // The duplicated interior point must still show up somewhere — proof
+    // it landed in the clamped bucket instead of an out-of-bounds slot
+    // that's never read back.
+    expect(result.some((p) => p.value === 999)).toBe(true);
+  });
+
+  // -- bucketSecs: absolute-time-aligned grid --
+
+  describe('with bucketSecs (absolute grid)', () => {
+    it('uses exactly `count` buckets at the fallback boundary (count === chartW*4), and falls back to chartW buckets just past it', () => {
+      const chartW = 10;
+      const bucketSecs = 1;
+      // Dense, alternating values so every ~1s bucket contributes 2 distinct
+      // points (a min and a max) — bucket count becomes directly observable
+      // via output length, without inspecting internals.
+      const dense = (span: number): LivelinePoint[] =>
+        Array.from({ length: 4000 }, (_, i) => ({
+          time: (i / 3999) * span,
+          value: i % 2 === 0 ? 0 : 1,
+        }));
+
+      // count = floor(39.5/1) - floor(0/1) + 1 = 40 === chartW*4 → still the
+      // absolute grid: up to 40 buckets, output length can exceed 2*chartW+2.
+      const atBoundary = decimateMinMax(dense(39.5), chartW, bucketSecs);
+      expect(atBoundary.length).toBeGreaterThan(chartW * 2 + 2);
+
+      // count = floor(40.5/1) - floor(0/1) + 1 = 41 > chartW*4 → falls back
+      // to the relative grid: exactly chartW buckets, output length bounded.
+      const pastBoundary = decimateMinMax(dense(40.5), chartW, bucketSecs);
+      expect(pastBoundary.length).toBeLessThanOrEqual(chartW * 2 + 2);
+    });
+
+    it('bucket boundaries are pinned to absolute time, not the window start', () => {
+      // Two windows over the same underlying 1Hz grid, offset by a
+      // non-bucket-aligned amount — points that fall in the same absolute
+      // 1-second bucket in both windows must decimate to the same selection
+      // wherever the windows overlap (this is the whole point: it's what
+      // lets a scrolling chart reuse a cached spline path between ticks).
+      const chartW = 20;
+      const bucketSecs = 1;
+      const all: LivelinePoint[] = Array.from({ length: 200 }, (_, i) => ({
+        time: i * 0.1,
+        value: Math.sin(i * 0.31) * 10,
+      }));
+      const windowA = all.slice(0, 150); // t in [0, 14.9]
+      const windowB = all.slice(20, 170); // t in [2.0, 16.9]
+
+      const outA = decimateMinMax(windowA, chartW, bucketSecs);
+      const outB = decimateMinMax(windowB, chartW, bucketSecs);
+
+      // Interior selections (excluding each window's own first/last, which
+      // are window-dependent by contract) agree wherever both windows had
+      // full, comparable bucket coverage — away from either edge.
+      const key = (p: LivelinePoint) => `${p.time}:${p.value}`;
+      const overlapStart = windowB[0]!.time + bucketSecs;
+      const overlapEnd = windowA[windowA.length - 1]!.time - bucketSecs;
+      const selA = new Set(
+        outA
+          .slice(1, -1)
+          .filter((p) => p.time >= overlapStart && p.time <= overlapEnd)
+          .map(key)
+      );
+      const selB = new Set(
+        outB
+          .slice(1, -1)
+          .filter((p) => p.time >= overlapStart && p.time <= overlapEnd)
+          .map(key)
+      );
+      expect(selA.size).toBeGreaterThan(0); // sanity: the overlap isn't empty
+      expect(selA).toEqual(selB);
+    });
+
+    it('a spike survives decimation under the absolute grid too', () => {
+      const input: LivelinePoint[] = Array.from({ length: 500 }, (_, i) => ({
+        time: i * 0.5,
+        value: Math.sin(i * 0.7) * 10,
+      }));
+      input[250] = { time: input[250]!.time, value: 99 };
+      const out = decimateMinMax(input, 40, 6);
+      expect(out.length).toBeLessThan(input.length);
+      expect(out[0]).toBe(input[0]);
+      expect(out[out.length - 1]).toBe(input[input.length - 1]);
+      expect(out.some((p) => p.value === 99)).toBe(true);
+      for (let i = 1; i < out.length; i++) {
+        expect(out[i]!.time).toBeGreaterThanOrEqual(out[i - 1]!.time);
+      }
+    });
+
+    it('falls back to the relative grid (still correct) when bucketSecs would need more than chartW*4 buckets', () => {
+      const input: LivelinePoint[] = Array.from({ length: 2000 }, (_, i) => ({
+        time: i, // spans 0..1999
+        value: Math.sin(i * 0.05) * 10,
+      }));
+      // bucketSecs=1 over a 2000s span needs ~2000 buckets — far past
+      // chartW*4 (400) — so this must fall back, not allocate ~2000-length
+      // index arrays.
+      const result = decimateMinMax(input, 100, 1);
+      expect(result[0]).toBe(input[0]);
+      expect(result[result.length - 1]).toBe(input[input.length - 1]);
+      expect(result.length).toBeLessThanOrEqual(100 * 2 + 2);
+    });
   });
 });

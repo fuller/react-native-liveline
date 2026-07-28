@@ -2,6 +2,16 @@ import type { LivelinePalette, ChartLayout } from '../types';
 import { lerp } from '../math/lerp';
 import type { Ctx2D } from './canvas2d';
 
+// Hoisted so setLineDash doesn't take a fresh array literal every frame —
+// the shim stores this reference directly (see canvas2d.ts's setLineDash).
+// Declared locally rather than imported from canvas2d.ts: that module pulls
+// in the native Skia binding at import time, which some draw modules'
+// dedicated unit tests (e.g. candlestick.test.ts) import without it loaded
+// — a real (non-type) import from canvas2d.ts would drag Skia in and break
+// those tests under Jest, which doesn't transform that package.
+const DASH_1_3: number[] = [1, 3];
+const EMPTY_DASH: number[] = [];
+
 /**
  * Pick a nice interval using TradingView's cycling divisor approach.
  * Hysteresis: once chosen, sticks until spacing falls outside [0.5×, 4×] of minGap.
@@ -47,6 +57,12 @@ function divisible(val: number, interval: number): boolean {
 export interface GridState {
   interval: number;
   labels: Map<number, number>; // key → alpha
+  /** Scratch map for Phase 1's per-call target-alpha computation — purely
+   * local to a single `drawGrid` call (read back in Phase 2, never held
+   * past this function), but rebuilt every call regardless, so it's
+   * persisted and `.clear()`-ed instead of reallocated 60x/sec. Same
+   * rationale as `EngineState.smoothValuesScratch`. */
+  targetsScratch: Map<number, number>;
 }
 
 const FADE_IN = 0.18;
@@ -87,7 +103,8 @@ export function drawGrid(
   };
 
   // --- Phase 1: compute target alpha for every current grid label ---
-  const targets = new Map<number, number>();
+  const targets = state.targetsScratch;
+  targets.clear();
   const first = Math.ceil(minVal / fine) * fine;
   for (let val = first; val <= maxVal; val += fine) {
     const y = toY(val);
@@ -120,7 +137,7 @@ export function drawGrid(
 
   // --- Phase 3: draw ---
   const baseAlpha = ctx.globalAlpha;
-  ctx.setLineDash([1, 3]);
+  ctx.setLineDash(DASH_1_3);
   ctx.lineWidth = 1;
   ctx.font = ctx.fonts.label;
   ctx.textAlign = 'left';
@@ -147,5 +164,5 @@ export function drawGrid(
     ctx.restore();
   }
 
-  ctx.setLineDash([]);
+  ctx.setLineDash(EMPTY_DASH);
 }
