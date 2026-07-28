@@ -81,7 +81,11 @@ export interface Ctx2D {
   shadowColor: string | SkColor;
   shadowBlur: number;
   shadowOffsetY: number;
-  readonly fonts: LivelineFonts;
+  // Not readonly: createCanvas2D now builds one Ctx2D per SkiaCache and
+  // reuses it every frame (see the cache's `ctx`/`resetFrame` fields), so
+  // `fonts` must be reassignable to rebind it per frame like every other
+  // mutable property here — see createCanvas2D's top-of-function comment.
+  fonts: LivelineFonts;
 
   save(): void;
   restore(): void;
@@ -218,6 +222,21 @@ export interface SkiaCache {
     // "assign now, consume later" gap here to create aliasing risk.
     rect: SkHostRect;
   } | null;
+  // The Ctx2D built by createCanvas2D, cached across frames instead of
+  // rebuilt every frame. A fresh call used to allocate 23 method closures +
+  // 13 mutable properties + a stack array + a few helper closures on every
+  // single frame (~27+ allocations before a pixel is drawn, plus Hermes
+  // rebuilding the object's hidden-class chain each time) — almost none of
+  // that actually varies per frame; only the recording `canvas` does.
+  // Building once and mutating in place removes essentially all of it.
+  // `resetFrame` is a plain function value (not the state it operates on)
+  // specifically so its closed-over locals — the in-progress path, the
+  // current line-dash array, and the save()/restore() stack, none of which
+  // carry meaning across frames — don't need to be typed on this exported
+  // interface. Both are null until the first createCanvas2D call for this
+  // cache (built lazily on the UI thread, same reasoning as `pool`).
+  ctx: Ctx2D | null;
+  resetFrame: ((canvas: SkCanvas, fonts: LivelineFonts) => void) | null;
   colors: Record<string, SkColor>;
   colorCount: number;
   gradients: Record<string, SkShader>;
@@ -245,6 +264,8 @@ export function createSkiaCache(): SkiaCache {
   'worklet';
   return {
     pool: null,
+    ctx: null,
+    resetFrame: null,
     colors: {},
     colorCount: 0,
     gradients: {},
@@ -467,6 +488,14 @@ function baselineDy(
   return -m.ascent; // 'top'
 }
 
+// Shared empty dash pattern used to reset `lineDash` every frame. A fresh
+// `[]` literal would be a per-frame allocation defeating the point of this
+// whole file; this is safe to share for the same reason the module-level
+// DASH_4_4/EMPTY_DASH constants in the draw modules are safe to pass to
+// setLineDash — nothing ever mutates a dash array in place (see the
+// INVARIANT comment on setLineDash below).
+const EMPTY_LINE_DASH: number[] = [];
+
 export function createCanvas2D(
   canvas: SkCanvas,
   fonts: LivelineFonts,
@@ -552,10 +581,34 @@ export function createCanvas2D(
     gradient: ownGradient,
     rect: ownRect,
   } = cache.pool;
-  ownPath.rewind(); // discard last frame's verbs
+
+  // Re-entry path: everything below (the 23 method closures, the ctx object
+  // itself, and the applyStyle/capOf/joinOf helpers) was already built on
+  // this cache's first createCanvas2D call. Rebuilding it every frame was
+  // the actual bug — a fresh object literal with 23 closures + 13 mutable
+  // properties, allocated 60x/sec, on top of Hermes reconstructing its
+  // hidden-class chain each time. Reuse it, only rebinding what the closures
+  // can't see any other way (canvas) and resetting every piece of mutable
+  // state a fresh literal used to give us for free. See resetFrame's
+  // definition below for the complete list and how it was derived (every
+  // Ctx2D property, plus the closed-over path/lineDash/stack locals).
+  if (cache.ctx !== null) {
+    cache.resetFrame!(canvas, fonts);
+    return cache.ctx;
+  }
+
+  ownPath.rewind(); // discard any stale verbs before first use
   let path = ownPath;
-  let lineDash: number[] = [];
+  let lineDash: number[] = EMPTY_LINE_DASH;
   const stack: StyleSnapshot[] = [];
+
+  // canvas is a fresh recording canvas every frame — the one piece of
+  // per-frame-varying input among all of this. The 23 method closures below
+  // are only built once (this branch), so they can't just close over the
+  // `canvas` parameter directly; they read it through this mutable holder
+  // instead, which resetFrame rebinds every frame. One property load per
+  // canvas use is trivially cheaper than reallocating all 23 closures.
+  const canvasHolder: { current: SkCanvas } = { current: canvas };
 
   // Applies a fill/stroke style + globalAlpha to a paint. For color strings
   // the string's own alpha is multiplied by globalAlpha; for gradients the
@@ -654,7 +707,7 @@ export function createCanvas2D(
         // place, which no caller in this codebase does.
         lineDash,
       });
-      canvas.save();
+      canvasHolder.current.save();
     },
 
     restore() {
@@ -675,7 +728,7 @@ export function createCanvas2D(
         this.shadowOffsetY = s.shadowOffsetY;
         lineDash = s.lineDash;
       }
-      canvas.restore();
+      canvasHolder.current.restore();
     },
 
     beginPath() {
@@ -766,12 +819,12 @@ export function createCanvas2D(
         );
         // Draw the same path through a translated canvas instead of
         // allocating an offset copy per shadowed fill.
-        canvas.save();
-        canvas.translate(0, this.shadowOffsetY);
-        canvas.drawPath(path, sp);
-        canvas.restore();
+        canvasHolder.current.save();
+        canvasHolder.current.translate(0, this.shadowOffsetY);
+        canvasHolder.current.drawPath(path, sp);
+        canvasHolder.current.restore();
       }
-      canvas.drawPath(path, paint);
+      canvasHolder.current.drawPath(path, paint);
     },
 
     stroke() {
@@ -791,7 +844,7 @@ export function createCanvas2D(
       paint.setPathEffect(
         lineDash.length > 0 ? cachedDash(cache, lineDash) : null
       );
-      canvas.drawPath(path, paint);
+      canvasHolder.current.drawPath(path, paint);
     },
 
     // Every call site clips to an axis-aligned rect built immediately before
@@ -805,7 +858,7 @@ export function createCanvas2D(
     // antialias, so there's no visual cost to the non-AA path.
     clipRect(x, y, w, h) {
       ownRect.setXYWH(x, y, w, h);
-      canvas.clipRect(ownRect, ClipOp.Intersect, false);
+      canvasHolder.current.clipRect(ownRect, ClipOp.Intersect, false);
     },
 
     fillRect(x, y, w, h) {
@@ -817,7 +870,7 @@ export function createCanvas2D(
           : BlendMode.SrcOver
       );
       ownRect.setXYWH(x, y, w, h);
-      canvas.drawRect(ownRect, paint);
+      canvasHolder.current.drawRect(ownRect, paint);
     },
 
     fillText(text, x, y) {
@@ -828,10 +881,10 @@ export function createCanvas2D(
       // this paint is shared with fill()/fillRect() it must not inherit
       // DstOut from a prior destination-out fill.
       paint.setBlendMode(BlendMode.SrcOver);
-      canvas.drawText(
+      canvasHolder.current.drawText(
         text,
-        x + alignDx(cache, fonts, this.font, text, this.textAlign),
-        y + baselineDy(cache, fonts, this.font, this.textBaseline),
+        x + alignDx(cache, this.fonts, this.font, text, this.textAlign),
+        y + baselineDy(cache, this.fonts, this.font, this.textBaseline),
         paint,
         this.font
       );
@@ -849,17 +902,17 @@ export function createCanvas2D(
       // strokeText never dashes; must not inherit a dash from stroke().
       paint.setPathEffect(null);
       paint.setBlendMode(BlendMode.SrcOver);
-      canvas.drawText(
+      canvasHolder.current.drawText(
         text,
-        x + alignDx(cache, fonts, this.font, text, this.textAlign),
-        y + baselineDy(cache, fonts, this.font, this.textBaseline),
+        x + alignDx(cache, this.fonts, this.font, text, this.textAlign),
+        y + baselineDy(cache, this.fonts, this.font, this.textBaseline),
         paint,
         this.font
       );
     },
 
     measureText(text) {
-      return { width: cachedTextWidth(cache, fonts, this.font, text) };
+      return { width: cachedTextWidth(cache, this.fonts, this.font, text) };
     },
 
     // No defensive copy: `segments` used to be sliced here because callers
@@ -904,12 +957,50 @@ export function createCanvas2D(
     },
 
     translate(dx, dy) {
-      canvas.translate(dx, dy);
+      canvasHolder.current.translate(dx, dy);
     },
 
     drawPicture(picture) {
-      canvas.drawPicture(picture);
+      canvasHolder.current.drawPicture(picture);
     },
+  };
+
+  cache.ctx = ctx;
+
+  // Rebinds the two genuinely per-frame-varying inputs (canvas, fonts) and
+  // resets every piece of mutable state that used to come for free from a
+  // fresh object literal each frame. Derived by reading every property
+  // Ctx2D declares (the 13 style/text/shadow properties below, in the same
+  // order as the interface) plus the three closed-over locals the method
+  // closures above actually mutate: `path` must go back to the pooled
+  // `ownPath` (and `ownPath` itself must be rewound — beginPath() isn't
+  // guaranteed to run before the next frame's first draw call), `lineDash`
+  // must go back to empty, and `stack` must be emptied in place (`.length =
+  // 0`, not reallocated — this array is otherwise never touched outside
+  // save()/restore()). Missing any one of these is a state leak: the object
+  // is now reused across frames instead of rebuilt, so anything not reset
+  // here silently carries over from whatever the last frame left it as.
+  cache.resetFrame = (nextCanvas, nextFonts) => {
+    canvasHolder.current = nextCanvas;
+    ownPath.rewind();
+    path = ownPath;
+    lineDash = EMPTY_LINE_DASH;
+    stack.length = 0;
+
+    ctx.fillStyle = '#000000';
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
+    ctx.font = nextFonts.label;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.shadowColor = 'rgba(0,0,0,0)';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.fonts = nextFonts;
   };
 
   return ctx;
