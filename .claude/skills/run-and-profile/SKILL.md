@@ -70,13 +70,31 @@ A/B protocol:
    Commit/stash first.
 2. **Screenshot the baseline arm.** If the old `src/` throws, you're timing a
    red error screen — cheap to render, looks like a huge win.
-3. Relaunch between arms, settle ~20s. Use the default Line tab where possible:
-   it survives a reload with no navigation, removing a variance source.
-4. 3 runs/arm. Within-arm spread should be 2-3 points; much wider means the host
+3. Relaunch between arms, settle **~50s**, not 20 — a swapped `src/` makes Metro
+   re-bundle, and a window opened too early reads 1-5% (the app is still
+   loading, not cheap). Any run that implausibly low is a settle artifact, not
+   data. Use the default Line tab where possible: it survives a reload with no
+   navigation, removing a variance source.
+4. **Relaunching resets in-app toggles — check them per arm.** Burned a full
+   A/B on 2026-07-30: the FPS counter was ON for arm 1 (set in an earlier
+   session) and OFF for every later arm, because relaunch resets React state
+   and it defaults off. That is an always-on frame callback present in one arm
+   and absent in the others — it cost ~15 points and looked exactly like host
+   drift. The arm screenshots are the check: the control reads `56 fps` when on
+   and a blank `fps` when off. Confirm every arm matches before comparing.
+5. 3 runs/arm. Within-arm spread should be 2-3 points; much wider means the host
    is too busy to measure on.
-5. Re-measure the first arm at the end as a drift control.
-6. Log `uptime` per arm — shared 8-core box, has run at load 24. Relative deltas
-   survive moderate load; absolute numbers don't.
+6. Re-measure the first arm at the end as a drift control.
+7. Log `uptime` per arm, **at the start AND end of each arm** — a mid-arm climb
+   is invisible if you only sample once. Shared 8-core box, has run at load 24;
+   observed 50.7 immediately after a build/install/bundle, draining over
+   several minutes. Relative deltas survive moderate load; absolute numbers
+   don't, and a *moving* load voids the comparison outright.
+8. **Know your effect size before trusting this method.** Whole-process CPU
+   cannot resolve a change worth ~1-2k JS allocations/sec — that is inside the
+   noise on this box (measured null, and slightly negative, for the timeAxis
+   memoization on 2026-07-30 despite unit tests proving the work was removed).
+   For allocation-shaped changes, prefer symbol-level sampling over total CPU.
 
 Reference (2026-07-27, iPhone 17 Pro sim, Debug, load ~8-11), `main` 60e493e →
 `perf-hardening` 2fb7ff2: Line 127.8% → 85.4%, Candles 108.5% → 63.5%.
