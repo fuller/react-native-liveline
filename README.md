@@ -281,6 +281,45 @@ function TickerList({ rows }: { rows: Ticker[] }) {
 }
 ```
 
+#### Hoist object and function props
+
+`Liveline` is wrapped in `React.memo`, and its props are compared shallowly. A
+new object or function identity on every parent render defeats that — and it
+costs more than a wasted render. The engine mirrors its config into a shared
+value on every commit, and the frame loop's idle detection keys off that
+config's object identity, so a chart that receives fresh props each render can
+never go idle even when nothing about it has changed.
+
+This matters most in exactly the list above, where one row's tick re-renders the
+whole list.
+
+```tsx
+// ✗ new identity every render — memo always misses, chart never idles
+<Liveline
+  data={item.data}
+  padding={{ top: 8, right: 60, bottom: 24, left: 8 }}
+  windows={[{ secs: 30, label: '30s' }, { secs: 60, label: '1m' }]}
+  formatValue={(v) => `$${v.toFixed(2)}`}
+/>
+
+// ✓ hoisted to module scope (or useMemo / useCallback if they depend on props)
+const PADDING = { top: 8, right: 60, bottom: 24, left: 8 };
+const WINDOWS = [{ secs: 30, label: '30s' }, { secs: 60, label: '1m' }];
+const formatUsd = (v: number) => {
+  'worklet';
+  return `$${v.toFixed(2)}`;
+};
+
+<Liveline data={item.data} padding={PADDING} windows={WINDOWS} formatValue={formatUsd} />
+```
+
+`data` and `value` are expected to change — that is the live feed, and the
+engine diffs `data` rather than re-sending it. It is the *configuration* props
+that should be stable.
+
+Note that `formatValue` / `formatTime` run on the UI thread and need the
+`'worklet'` directive, which also makes hoisting them the natural choice.
+
 ### `LivelineTransition`
 
 Cross-fades between chart components (e.g. line ↔ candlestick). Children must

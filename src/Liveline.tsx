@@ -596,6 +596,23 @@ export const Liveline = memo(function LivelineComponent({
             redraw(). Keep it that way: no conditionals, no .map(), nothing
             that can add or remove a node, or the chart stops animating while
             the JS thread is blocked.
+
+            Two <Canvas> props are deliberately NOT set here:
+
+            - `androidWarmup` — do not enable. It exists to hide a first-frame
+              flash, but SkiaPictureView.java implements it as a GPU→CPU pixel
+              readback inside onDraw (getBitmap -> int[] -> Bitmap.createBitmap
+              -> drawBitmap). On a view that invalidates continuously, as this
+              one does, that is catastrophic.
+            - `opaque` — leaving it false is what makes react-native-skia back
+              this view with a TextureView rather than a SurfaceView (see
+              SkiaBaseView.setOpaque). SurfaceView would very likely composite
+              cheaper on Android, but an opaque surface has no destination
+              alpha, and both drawEdgeFade and drawEmpty composite with
+              `destination-out` — on an opaque surface those erase to black
+              instead of to transparent. Exposing `opaque` as an opt-in for
+              consumers who sit the chart on a solid background is a real
+              option; flipping it by default is not.
           */}
           <Canvas style={styles.canvas}>
             <Group transform={engine.scrollTransform}>

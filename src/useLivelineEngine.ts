@@ -14,14 +14,17 @@ import {
   type SharedValue,
 } from 'react-native-reanimated';
 import { Gesture } from 'react-native-gesture-handler';
-// `Gesture.Pan()` is the classic (pre-v3) builder API, whose composed-gesture
-// result type the package now exposes as `LegacyComposedGesture` — the plain
-// `ComposedGesture` name was reassigned to the new v3 declarative gesture
-// model, which this classic API doesn't produce.
-import type {
-  LegacyComposedGesture as ComposedGesture,
-  GestureType,
-} from 'react-native-gesture-handler';
+// `GestureType` only — deliberately NOT `LegacyComposedGesture`. This hook
+// always returns a single `Gesture.Pan()` and never composes, so the old
+// `ComposedGesture | GestureType` union was over-broad. It also mattered for
+// compatibility: `LegacyComposedGesture` is a gesture-handler v3 name that
+// does not exist in v2, and importing it forced the peerDependency to
+// `>=3.0.0` — which fails `expo-doctor` for every Expo SDK 55 consumer, since
+// that SDK pins `~2.30.0`. `GestureType` exists in both majors (verified
+// against the published 2.30.0 typings), as do every builder method used
+// below: Pan, enabled, activateAfterLongPress, onBegin/onStart/onUpdate/
+// onFinalize.
+import type { GestureType } from 'react-native-gesture-handler';
 import {
   createCanvas2D,
   createSkiaCache,
@@ -144,7 +147,7 @@ export interface LivelineEngine {
    */
   scrollTransform: SharedValue<Transforms3d>;
   /** Pan gesture driving crosshair scrub — attach with <GestureDetector> */
-  gesture: ComposedGesture | GestureType;
+  gesture: GestureType;
   /** Attach to the chart container to feed the engine its size */
   onLayout: (e: LayoutChangeEvent) => void;
   /** Live value text (when showValue) — bind via useAnimatedProps */
