@@ -121,6 +121,32 @@ Two workstreams, deliberately chosen for file disjointness:
 Integration (wiring A's prefix stroke into B's `scrollPicture`, plus the alpha
 gate) is a third, sequential step once both land.
 
+### Reuse `src/draw/scrollLayer.ts` — do not re-derive
+
+**Added 2026-07-31 after stream A flagged the omission.** This branch already
+carries `src/draw/scrollLayer.ts` (commit `3db71f1`, "scroll-layer slot
+foundation"), which provides exactly what integration needs and which the
+original version of this doc failed to mention or place in either workstream's
+file list:
+
+- `ScrollLayerSlot<Picture>` — picture + build-time `tRef`/`xRefAtBuild` +
+  per-slot clip region + a push-built invalidation key.
+- `scrollLayerDx(slot, layout)` — the dx formula, identical to `lineCache.ts`'s
+  `lineScrollDx`. A slot wrapping the line's prefix picture takes its
+  `tRef`/`xRefAtBuild` straight from the line cache slot, so the two agree by
+  construction.
+- `scrollLayerUsable(slot, alpha)` — the alpha≥1 gate described below, already
+  written.
+
+Integration must consume these rather than re-implement dx or alpha handling.
+
+### Naming collision to avoid
+
+`scrollLayerDx(slot, layout)` is a **pure function returning a number**.
+`scrollTransform` is a **shared value holding `[{ translateX }]`** that
+`<Group transform>` reads. Earlier wording in this doc blurred the two; they are
+different things, and the frame callback converts the former into the latter.
+
 ## Risks
 
 - **Double-draw.** Once integrated, `screenPicture` must not also draw the
