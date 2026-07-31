@@ -4,6 +4,7 @@ import {
   Skia,
   type SkPicture,
   type SkHostRect,
+  type Transforms3d,
 } from '@shopify/react-native-skia';
 import {
   runOnJS,
@@ -120,8 +121,28 @@ function makeEmptyPicture(): SkPicture {
 }
 
 export interface LivelineEngine {
-  /** Re-recorded every frame on the UI thread — render via Skia's <Picture> */
-  picture: SharedValue<SkPicture>;
+  /**
+   * The scroll layer: content that is recorded once and then translated
+   * horizontally by `scrollTransform` instead of being re-recorded. Render
+   * inside a `<Group transform={scrollTransform}>`, *below* `screenPicture`.
+   *
+   * Currently always the empty placeholder — the declarative shell ships as a
+   * structural no-op and the line's prefix stroke moves in here in a later
+   * step.
+   */
+  scrollPicture: SharedValue<SkPicture>;
+  /**
+   * The screen layer: everything drawn live, re-recorded every frame on the
+   * UI thread — render via Skia's <Picture>, above the scroll layer.
+   */
+  screenPicture: SharedValue<SkPicture>;
+  /**
+   * Scroll-layer offset, `[{ translateX: dx }]` in screen pixels. Updated on
+   * the UI thread every recorded frame; bind to `<Group transform>` so the
+   * update stays a prop change (UI thread) rather than a structural change
+   * (which would need a JS-thread reconcile).
+   */
+  scrollTransform: SharedValue<Transforms3d>;
   /** Pan gesture driving crosshair scrub — attach with <GestureDetector> */
   gesture: ComposedGesture | GestureType;
   /** Attach to the chart container to feed the engine its size */
@@ -370,7 +391,23 @@ export function useLivelineEngine(
   const cullRect = useSharedValue<SkHostRect | null>(null);
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
-  const picture = useSharedValue<SkPicture>(makeEmptyPicture());
+  const screenPicture = useSharedValue<SkPicture>(makeEmptyPicture());
+  // The scroll layer. Nothing records into it yet (the declarative shell
+  // ships as a structural no-op), so it stays the 1×1 empty placeholder and
+  // draws nothing — rendering is pixel-identical to the single-picture tree.
+  const scrollPicture = useSharedValue<SkPicture>(makeEmptyPicture());
+  // `[{ translateX: dx }]`, reassigned by the frame callback below (a shared
+  // value only notifies its mapper on assignment, so this can't be mutated
+  // in place). dx is always 0 for now, but it's written every recorded frame so
+  // the shared-value → <Group transform> plumbing is real rather than a
+  // constant that a later step would have to re-thread.
+  const scrollTransform = useSharedValue<Transforms3d>([{ translateX: 0 }]);
+  // Last dx pushed into `scrollTransform`, so the frame callback can skip the
+  // reassignment (and the array/object allocation it needs) when the offset
+  // hasn't moved. `Transform3d` is a union of single-key objects, so reading
+  // the current translateX back out of `scrollTransform.value` isn't
+  // type-safe; mirroring the scalar here is.
+  const scrollDx = useSharedValue(0);
   const valueText = useSharedValue('');
   const valueColor = useSharedValue('');
 
@@ -480,7 +517,15 @@ export function useLivelineEngine(
       candlesBuf.value,
       multiDataBuf.value
     );
-    picture.value = recorder.finishRecordingAsPicture();
+    screenPicture.value = recorder.finishRecordingAsPicture();
+    // Scroll-layer offset for this frame. Nothing is recorded into
+    // `scrollPicture` yet, so this is always 0 — the write exists so the
+    // shared value is genuinely driven from the frame loop.
+    const dx = 0;
+    if (scrollDx.value !== dx) {
+      scrollDx.value = dx;
+      scrollTransform.value = [{ translateX: dx }];
+    }
     s.lastRecordedW = w;
     s.lastRecordedH = h;
     s.lastFrameTimestamp = now_ms;
@@ -585,5 +630,13 @@ export function useLivelineEngine(
     [size]
   );
 
-  return { picture, gesture, onLayout, valueText, valueColor };
+  return {
+    scrollPicture,
+    screenPicture,
+    scrollTransform,
+    gesture,
+    onLayout,
+    valueText,
+    valueColor,
+  };
 }

@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import {
   Canvas,
+  Group,
   Picture,
   Path,
   Line,
@@ -587,8 +588,20 @@ export const Liveline = memo(function LivelineComponent({
           style={[styles.container, style]}
           collapsable={false}
         >
+          {/*
+            Fixed 4-node tree — never reconciled after mount. Every per-frame
+            update is a shared-value *prop* change, which Skia's
+            NativeReanimatedContainer applies from a Reanimated mapper on the
+            UI thread; only a *structural* change would force a JS-thread
+            redraw(). Keep it that way: no conditionals, no .map(), nothing
+            that can add or remove a node, or the chart stops animating while
+            the JS thread is blocked.
+          */}
           <Canvas style={styles.canvas}>
-            <Picture picture={engine.picture} />
+            <Group transform={engine.scrollTransform}>
+              <Picture picture={engine.scrollPicture} />
+            </Group>
+            <Picture picture={engine.screenPicture} />
           </Canvas>
         </View>
       </GestureDetector>
