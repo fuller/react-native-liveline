@@ -51,6 +51,10 @@ export interface LineCacheSlot {
   scratch: CachePath | null;
   /** Assembled fill path (valid only when wantFill was true). */
   fillScratch: CachePath | null;
+  /** Tail-only stroke path in CURRENT screen coords: moveTo(cutX + dx, cutY)
+   * then the same two tail cubics `scratch` ends with. Valid only after
+   * `assembleLineTailStroke` (never written by `assembleLineTail`). */
+  tailScratch: CachePath | null;
 
   // Prefix metadata
   tRef: number; // decimated[0].time at build
@@ -89,6 +93,7 @@ export function createLineCacheSlot(): LineCacheSlot {
     prefix: null,
     scratch: null,
     fillScratch: null,
+    tailScratch: null,
     tRef: 0,
     xRefAtBuild: 0,
     cutX: 0,
@@ -154,6 +159,27 @@ export function lineCacheHits(
 }
 
 /**
+ * Horizontal scroll of the cached prefix since it was built, in screen px.
+ *
+ * The ONE place this subtraction is written, so the combined path, the
+ * split-out tail and any caller that translates the prefix itself (the
+ * declarative scroll layer) can never disagree about where the prefix is.
+ * Always recomputed against the build-time reference — never accumulated —
+ * so there is no drift; see the note on `assembleLineTail` below.
+ *
+ * Returns 0 for a slot with no prefix (tRef/xRefAtBuild are both still 0
+ * only by coincidence there, so callers should gate on `slot.prefix`).
+ *
+ * Identical formula to `scrollLayer.ts`'s `scrollLayerDx` — a scroll-layer
+ * slot wrapping the prefix picture takes its `tRef`/`xRefAtBuild` straight
+ * from this slot, and the two then agree by construction.
+ */
+export function lineScrollDx(slot: LineCacheSlot, layout: ChartLayout): number {
+  'worklet';
+  return layout.toX(slot.tRef) - slot.xRefAtBuild;
+}
+
+/**
  * Assembles `slot.scratch` (and `slot.fillScratch` when `wantFill`) from an
  * already-valid `slot.prefix` plus this frame's two live tail points — the
  * last data point (re-Y'd to smoothValue) and the live tip. This is the
@@ -186,7 +212,7 @@ export function assembleLineTail(
   firstY: number
 ): void {
   'worklet';
-  const dx = layout.toX(slot.tRef) - slot.xRefAtBuild;
+  const dx = lineScrollDx(slot, layout);
 
   // Assemble the stroke path: translated prefix + live tail.
   slot.scratch = ensured(slot.scratch, makePath);
@@ -220,6 +246,104 @@ export function assembleLineTail(
     fill.lineTo(tipX, baseY);
     fill.close();
   }
+}
+
+/**
+ * ── Split stroke API (declarative scroll layer) ────────────────────────────
+ *
+ * The declarative render shell wants the line's stroke as two *separately
+ * drawable* pieces: the prefix, recorded once into a picture and moved by a
+ * `<Group transform>`, and the tail, drawn live every frame. This section
+ * adds exactly that, additively — `assembleLineTail` above and its combined
+ * `slot.scratch` / `slot.fillScratch` are untouched and still the only thing
+ * `drawLine` uses.
+ *
+ * Shape of the API, and why:
+ *
+ * - **The prefix is exposed as `slot.prefix` itself** (via `linePrefixPath`
+ *   for a documented, null-checked accessor) rather than as a fresh
+ *   untranslated copy. No copy is needed: `assembleLineTail` translates the
+ *   *scratch* — `scratch.addPath(slot.prefix)` then `scratch.offset(dx, 0)`
+ *   — so the offset lands on the copy inside `scratch`, never on `prefix`.
+ *   `slot.prefix` is written in exactly one place (the miss branch of
+ *   `updateLinePaths`) and is only ever read afterwards, so it stays in
+ *   build-time coordinates for its whole life. A second copy would cost an
+ *   extra native path per slot and one more thing to keep in sync, and would
+ *   buy nothing. The caller supplies the transform: `translateX` =
+ *   `lineScrollDx(slot, layout)`.
+ *
+ * - **The tail gets its own slot-owned scratch** (`slot.tailScratch`) filled
+ *   by `assembleLineTailStroke`, in current screen coordinates, because
+ *   unlike the prefix it has no cached representation to reuse — it is
+ *   rebuilt from this frame's two moving points regardless.
+ *
+ * - **The tail is re-emitted rather than sliced out of `slot.scratch`.**
+ *   Building the combined path as prefix + `addPath(tailScratch, …, true)`
+ *   would insert a zero-length connector verb and stop the combined path
+ *   from being verb-for-verb what it is today; two extra `cubicTo`s per
+ *   frame is the cheaper price. The tail starts at `slot.cutX + dx` with
+ *   `slot.endTangent`, the same arguments `assembleLineTail` passes, so the
+ *   join with the translated prefix is the identical C1-continuous one.
+ *
+ * - **The fill is NOT split**, deliberately. It is one closed
+ *   semi-transparent polygon; abutting two halves leaves a hairline seam
+ *   (antialiased coverage on a shared edge sums to ~0.75), overlapping them
+ *   double-darkens a 1px column, and a non-AA clip split only tiles exactly
+ *   when both sides round a fractional `dx` identically. Whoever consumes
+ *   this API keeps drawing the whole fill live from `slot.fillScratch`.
+ */
+
+/**
+ * The prefix stroke — the spline through decimated points `0..N-2` — in
+ * BUILD-TIME screen coordinates. Null until a prefix has been built.
+ *
+ * Never mutated by translation (see the section comment above), so it is
+ * safe to record into a long-lived picture: the picture stays valid until
+ * the next `lineCacheHits` miss rebuilds the prefix, and the caller moves it
+ * with `lineScrollDx(slot, layout)` on the x axis.
+ */
+export function linePrefixPath(slot: LineCacheSlot): CachePath | null {
+  'worklet';
+  return slot.prefix;
+}
+
+/**
+ * Assembles `slot.tailScratch`: the tail stroke alone, in CURRENT screen
+ * coordinates — `moveTo(slot.cutX + dx, slot.cutY)` followed by the same two
+ * cubics `assembleLineTail` appends to the combined path. Drawing the
+ * translated prefix and this back to back is geometrically identical to
+ * drawing `slot.scratch`; only the leading `moveTo` differs, and it lands
+ * exactly on the translated prefix's last on-curve point.
+ *
+ * Independent of `assembleLineTail` — callers that want both call both.
+ * Caller guarantees `slot.prefix` is non-null (same contract as
+ * `assembleLineTail`).
+ */
+export function assembleLineTailStroke(
+  slot: LineCacheSlot,
+  makePath: () => CachePath,
+  layout: ChartLayout,
+  lastX: number,
+  lastY: number,
+  tipX: number,
+  tipY: number
+): void {
+  'worklet';
+  const dx = lineScrollDx(slot, layout);
+  slot.tailScratch = ensured(slot.tailScratch, makePath);
+  const tail = slot.tailScratch;
+  tail.rewind();
+  tail.moveTo(slot.cutX + dx, slot.cutY);
+  drawSplineTail(
+    tail,
+    slot.cutX + dx,
+    slot.cutY,
+    slot.endTangent,
+    lastX,
+    lastY,
+    tipX,
+    tipY
+  );
 }
 
 /**

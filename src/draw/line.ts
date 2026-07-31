@@ -67,10 +67,45 @@ function blendColor(c1: string, c2: string, t: number): SkColor {
   return rgbColor(r, g, b, a);
 }
 
-/** Path factory for the line cache — SkPath satisfies CachePath structurally. */
-function makeSkPath(): CachePath {
+/**
+ * Path factory for the line cache — SkPath satisfies CachePath structurally.
+ * Exported so callers that assemble cache paths outside drawLine (the
+ * declarative scroll layer, which records the prefix stroke into a picture
+ * and strokes the tail live) allocate through the same factory.
+ */
+export function makeSkPath(): CachePath {
   'worklet';
   return Skia.Path.Make();
+}
+
+/**
+ * Strokes an already-built cache path with the line's style. Factored out of
+ * `renderCurvePaths` so the split prefix/tail strokes are painted with
+ * byte-identical paint state to the combined path — there is exactly one
+ * place the line's stroke style is written.
+ *
+ * Restores `ctx.globalAlpha` to what it was on entry, so it composes with a
+ * caller that has already scaled alpha (e.g. the scrub dimming).
+ */
+export function strokeLinePath(
+  ctx: Ctx2D,
+  palette: LivelinePalette,
+  stroke: CachePath,
+  lineAlpha: number,
+  strokeColor?: Style2D
+) {
+  'worklet';
+  const baseAlpha = ctx.globalAlpha;
+  ctx.globalAlpha = baseAlpha * lineAlpha;
+  // Cache paths are always real SkPaths at runtime (built by makeSkPath);
+  // CachePath is just the Skia-free structural type for testability.
+  ctx.beginPathFrom(stroke as SkPath);
+  ctx.strokeStyle = strokeColor ?? palette.line;
+  ctx.lineWidth = palette.lineWidth;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  ctx.globalAlpha = baseAlpha;
 }
 
 /**
@@ -102,16 +137,10 @@ function renderCurvePaths(
     ctx.beginPathFrom(fill as SkPath);
     ctx.fillStyle = grad;
     ctx.fill();
+    ctx.globalAlpha = baseAlpha;
   }
 
-  ctx.globalAlpha = baseAlpha * lineAlpha;
-  ctx.beginPathFrom(stroke as SkPath);
-  ctx.strokeStyle = strokeColor ?? palette.line;
-  ctx.lineWidth = palette.lineWidth;
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  ctx.stroke();
-  ctx.globalAlpha = baseAlpha;
+  strokeLinePath(ctx, palette, stroke, lineAlpha, strokeColor);
 }
 
 /** Draw the fill gradient + stroke line for a set of points. */

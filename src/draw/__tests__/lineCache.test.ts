@@ -3,6 +3,9 @@ import {
   updateLinePaths,
   lineCacheHits,
   assembleLineTail,
+  assembleLineTailStroke,
+  linePrefixPath,
+  lineScrollDx,
   MIN_CACHE_POINTS,
   type CachePath,
 } from '../lineCache';
@@ -659,6 +662,229 @@ describe('assembleLineTail (fast path)', () => {
         expect(translated[i]!.c[k]!).toBeCloseTo(rebuilt[i]!.c[k]!, 6);
       }
     }
+  });
+});
+
+// The split-stroke API the declarative scroll layer consumes: the prefix
+// stroke (build-time coords, moved by a <Group transform>) drawn separately
+// from the tail stroke (current screen coords, drawn live). These tests pin
+// the two invariants the shell depends on — the prefix is never translated
+// in place, and prefix+tail is the same geometry as the combined path — plus
+// the promise that the fill is left exactly as it is today.
+describe('split stroke (prefix / tail)', () => {
+  const NOW = 1000;
+  const N = 20;
+
+  /** Deep snapshot of a fake path's verbs, immune to later mutation. */
+  function snapshot(p: FakePath): Verb[] {
+    return p.verbs.map((v) => ({ op: v.op, c: v.c.slice() }));
+  }
+
+  function builtHarness(): {
+    hz: Harness;
+    data: LivelinePoint[];
+    smooth: number;
+  } {
+    const hz = makeHarness();
+    const data = makeData(N, NOW - 30);
+    const smooth = data[data.length - 1]!.value;
+    update(hz, makeLayout(NOW, 90, 110), data, smooth, NOW, true);
+    return { hz, data, smooth };
+  }
+
+  it('exposes slot.prefix as-is, untranslated and unmutated over many frames', () => {
+    const { hz, data, smooth } = builtHarness();
+    const prefix = hz.slot.prefix as FakePath;
+    expect(linePrefixPath(hz.slot)).toBe(prefix);
+    const atBuild = snapshot(prefix);
+
+    // 200 frames of pure scrolling: a cache hit every frame, both the
+    // combined assembly and the split tail assembly running.
+    for (let f = 1; f <= 200; f++) {
+      const t = NOW + f * 0.0167;
+      const layout = makeLayout(t, 90, 110);
+      expect(
+        lineCacheHits(
+          hz.slot,
+          layout,
+          0,
+          0,
+          data.length,
+          data[0]!.time,
+          data[data.length - 1]!.time,
+          data[data.length - 1]!.value
+        )
+      ).toBe(true);
+      const pts = buildPts(data, layout, smooth, t);
+      assembleLineTail(
+        hz.slot,
+        hz.makePath,
+        layout,
+        true,
+        pts[pts.length - 2]![0],
+        pts[pts.length - 2]![1],
+        pts[pts.length - 1]![0],
+        pts[pts.length - 1]![1],
+        pts[0]![1]
+      );
+      assembleLineTailStroke(
+        hz.slot,
+        hz.makePath,
+        layout,
+        pts[pts.length - 2]![0],
+        pts[pts.length - 2]![1],
+        pts[pts.length - 1]![0],
+        pts[pts.length - 1]![1]
+      );
+    }
+
+    // Byte-identical to the build: offset() lands on the scratch copy, never
+    // on the prefix, so a picture recorded from it stays valid.
+    expect(snapshot(prefix)).toEqual(atBuild);
+    expect(prefix.rewinds).toBe(1);
+    // dx moved (leftwards, as time advances) — the frames really did scroll.
+    expect(
+      lineScrollDx(hz.slot, makeLayout(NOW + 200 * 0.0167, 90, 110))
+    ).toBeLessThan(-1);
+  });
+
+  it('allocates the tail scratch once and reuses it', () => {
+    const { hz, data, smooth } = builtHarness();
+    let made = 0;
+    for (let f = 1; f <= 5; f++) {
+      const t = NOW + f;
+      const layout = makeLayout(t, 90, 110);
+      const pts = buildPts(data, layout, smooth, t);
+      const before = hz.made.length;
+      assembleLineTailStroke(
+        hz.slot,
+        hz.makePath,
+        layout,
+        pts[pts.length - 2]![0],
+        pts[pts.length - 2]![1],
+        pts[pts.length - 1]![0],
+        pts[pts.length - 1]![1]
+      );
+      made += hz.made.length - before;
+    }
+    expect(made).toBe(1); // only the first frame allocated tailScratch
+    expect((hz.slot.tailScratch as FakePath).rewinds).toBe(5);
+  });
+
+  it('starts the tail exactly at cutX + dx with the cached cutY', () => {
+    const { hz, data, smooth } = builtHarness();
+    const later = NOW + 4.2;
+    const layout = makeLayout(later, 90, 110);
+    const pts = buildPts(data, layout, smooth, later);
+    assembleLineTailStroke(
+      hz.slot,
+      hz.makePath,
+      layout,
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      pts[pts.length - 1]![0],
+      pts[pts.length - 1]![1]
+    );
+
+    const dx = layout.toX(hz.slot.tRef) - hz.slot.xRefAtBuild;
+    expect(lineScrollDx(hz.slot, layout)).toBe(dx);
+    expect(dx).not.toBe(0);
+
+    const tail = (hz.slot.tailScratch as FakePath).verbs;
+    expect(tail[0]!.op).toBe('M');
+    expect(tail[0]!.c[0]!).toBe(hz.slot.cutX + dx);
+    expect(tail[0]!.c[1]!).toBe(hz.slot.cutY);
+    expect(tail.length).toBe(3); // moveTo + two tail cubics
+    expect(tail[1]!.op).toBe('C');
+    expect(tail[2]!.op).toBe('C');
+
+    // The start point is exactly the translated prefix's last on-curve
+    // point, so the two pieces meet with no gap.
+    const prefixVerbs = (hz.slot.prefix as FakePath).verbs;
+    const lastPrefix = prefixVerbs[prefixVerbs.length - 1]!;
+    expect(lastPrefix.c[4]! + dx).toBe(tail[0]!.c[0]!);
+    expect(lastPrefix.c[5]!).toBe(tail[0]!.c[1]!);
+  });
+
+  it('translated prefix + tail is the same geometry as the combined path', () => {
+    const { hz, data, smooth } = builtHarness();
+    const later = NOW + 4.2;
+    const layout = makeLayout(later, 90, 110);
+    const pts = buildPts(data, layout, smooth, later);
+    const args: [number, number, number, number] = [
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      pts[pts.length - 1]![0],
+      pts[pts.length - 1]![1],
+    ];
+    assembleLineTail(hz.slot, hz.makePath, layout, true, ...args, pts[0]![1]);
+    assembleLineTailStroke(hz.slot, hz.makePath, layout, ...args);
+
+    const dx = lineScrollDx(hz.slot, layout);
+
+    // What the scroll layer draws: prefix recorded at build time, moved by
+    // translateX = dx, then the live tail.
+    const drawn = new FakePath();
+    drawn.addPath(hz.slot.prefix!);
+    drawn.offset(dx, 0);
+    const tailVerbs = (hz.slot.tailScratch as FakePath).verbs;
+    // Skip the tail's leading moveTo — it re-states the point the prefix
+    // already ends on (asserted exactly equal in the test above).
+    for (let i = 1; i < tailVerbs.length; i++) {
+      drawn.verbs.push({ op: tailVerbs[i]!.op, c: tailVerbs[i]!.c.slice() });
+    }
+
+    const combined = (hz.slot.scratch as FakePath).verbs;
+    expect(drawn.verbs.length).toBe(combined.length);
+    for (let i = 0; i < combined.length; i++) {
+      expect(drawn.verbs[i]!.op).toBe(combined[i]!.op);
+      for (let k = 0; k < combined[i]!.c.length; k++) {
+        expect(drawn.verbs[i]!.c[k]!).toBe(combined[i]!.c[k]!);
+      }
+    }
+  });
+
+  it('leaves the fill path byte-identical to the unsplit construction', () => {
+    const { hz, data, smooth } = builtHarness();
+    const later = NOW + 4.2;
+    const layout = makeLayout(later, 90, 110);
+    const pts = buildPts(data, layout, smooth, later);
+    const tipX = pts[pts.length - 1]![0];
+    const firstY = pts[0]![1];
+
+    assembleLineTail(
+      hz.slot,
+      hz.makePath,
+      layout,
+      true,
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      tipX,
+      pts[pts.length - 1]![1],
+      firstY
+    );
+    // …and the split call, which must not disturb the fill at all.
+    assembleLineTailStroke(
+      hz.slot,
+      hz.makePath,
+      layout,
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      tipX,
+      pts[pts.length - 1]![1]
+    );
+
+    // Literal re-implementation of the fill block as it stands today.
+    const expected = new FakePath();
+    const baseY = layout.h - layout.pad.bottom;
+    const firstX = layout.toX(hz.slot.tRef);
+    expected.moveTo(firstX, baseY);
+    expected.lineTo(firstX, firstY);
+    expected.addPath(hz.slot.scratch!, undefined, true);
+    expected.lineTo(tipX, baseY);
+    expected.close();
+
+    expect((hz.slot.fillScratch as FakePath).verbs).toEqual(expected.verbs);
   });
 });
 
