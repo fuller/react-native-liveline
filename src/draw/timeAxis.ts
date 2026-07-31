@@ -31,6 +31,15 @@ export interface TimeAxisState {
    * Also holds references into `labelEntryPool`, never its own objects —
    * `.length = 0` at the top of each use. */
   drawnScratch: TimeLabelEntry[];
+  /** The `formatTime` this state's cached label text was produced with,
+   * compared by reference. `null` before the first frame. Label text is only
+   * recomputed when this changes (or for a key never seen before) — see the
+   * comment at the create-labels loop in `drawTimeAxis` for why that is safe
+   * and what it saves. A formatter closing over mutable state it reads but
+   * does not appear in its own identity will go stale here; every formatter
+   * in this codebase, and the documented contract for the `formatTime` prop,
+   * is a pure function of its argument. */
+  formatTimeRef: ((t: number) => string) | null;
   /** Growable pool of reusable `{x,alpha,text,w}` objects, indexed by
    * position in this frame's visible-label scan (NOT by label key — a
    * given index may back a different label on every frame, which is fine
@@ -105,28 +114,55 @@ export function drawTimeAxis(
     targets.add(Math.round(t * 100));
   }
 
-  // Create or update labels. Text is updated in-place — no crossfade needed
-  // because format changes coincide with scroll transitions where the eye
-  // tracks movement, not text content. By the time labels settle, the text
-  // is already correct so nothing visibly changes on stationary labels.
+  // Create labels for newly-visible keys.
+  //
+  // `formatTime(key / 100)` is a pure function of `key`, so a label's text
+  // cannot change while its key and the formatter both stay the same. This
+  // loop used to call the formatter for EVERY target on EVERY frame and then
+  // overwrite each existing label's text with a byte-identical string. At the
+  // ~6-10 labels a chart typically shows, that is 360-600 formatter calls per
+  // second, and the default formatter (`defaultFormatTime` in Liveline.tsx)
+  // allocates a Date, three padStart results and a template string on each
+  // call — several thousand short-lived allocations per second, on the UI
+  // thread, to recompute text that was already correct.
+  //
+  // The formatter now runs only for a key being seen for the first time.
+  // Text is still updated in place when the *formatter itself* changes,
+  // caught by reference identity — the same conservative trade gridLayer.ts
+  // makes for `kFormatValue`. That re-text deliberately does NOT touch
+  // alphas: a label already on screen must not restart its fade-in just
+  // because the consumer swapped formatters.
+  if (state.formatTimeRef !== formatTime) {
+    state.formatTimeRef = formatTime;
+    for (const [key, label] of state.labels) {
+      label.text = formatTime(key / 100);
+    }
+  }
   for (const key of targets) {
-    const text = formatTime(key / 100);
-    const existing = state.labels.get(key);
-    if (!existing) {
-      state.labels.set(key, { alpha: 0, text });
-    } else {
-      existing.text = text;
+    if (state.labels.get(key) === undefined) {
+      state.labels.set(key, { alpha: 0, text: formatTime(key / 100) });
     }
   }
 
-  // Update alphas
+  // Update alphas.
+  //
+  // The `!isTarget` term on the delete is load-bearing, not defensive.
+  // `targets` deliberately spans one interval beyond each edge (see the
+  // generation loop above), so the buffer keys sit outside the visible
+  // x-range, where `edgeAlpha` returns 0. Without `!isTarget` those keys
+  // churn: created at alpha 0, decayed, deleted, then re-created and
+  // re-formatted on the very next frame, forever — which also defeats the
+  // text memoization above, since each re-creation is a genuinely unseen key.
+  // Keeping a still-targeted label parked at alpha 0 costs one Map entry
+  // (`targets` is capped at 30) and is invisible: the draw pass below filters
+  // at `alpha < 0.02`.
   for (const [key, label] of state.labels) {
     const x = toX(key / 100);
     const isTarget = targets.has(key);
     const target = isTarget ? edgeAlpha(x) : 0;
     let next = lerp(label.alpha, target, FADE, dt);
     if (Math.abs(next - target) < 0.02) next = target;
-    if (next < 0.01 && target === 0) {
+    if (next < 0.01 && target === 0 && !isTarget) {
       state.labels.delete(key);
     } else {
       label.alpha = next;

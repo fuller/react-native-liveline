@@ -277,6 +277,7 @@ export function createEngineState(
       visibleLabelsScratch: [],
       drawnScratch: [],
       labelEntryPool: [],
+      formatTimeRef: null,
     },
     orderbookState: createOrderbookState(),
     particleState: createParticleState(),
