@@ -36,16 +36,36 @@ import { MAX_SCROLL_EXTRAPOLATION_MS } from './constants';
  * ordinary paced interval (~16ms) is comfortably inside it while a stall is
  * not.
  *
+ * `layerChanged` is the second, subtler guard, and the gap bound does NOT
+ * subsume it. `dx` is an offset *of a particular recorded picture* — it is
+ * meaningful only relative to the prefix that was built when `xRefAtBuild`
+ * was captured. Two consecutive recorded frames 16ms apart can therefore
+ * report `dx = -35` then `dx = 0` with the on-screen line perfectly
+ * continuous, because the prefix was rebuilt in between and the new one
+ * already bakes in that 35px. Differencing those two numbers yields a rate
+ * of +2.1 px/ms that describes nothing physical; the next paced-out vsync
+ * would then shove the `<Group transform>` ~35px to the right, and the
+ * following recorded frame would snap it back — a flick, once per line-cache
+ * rebuild, on high-refresh hardware only. The same applies when the layer
+ * stops or starts compositing: `dx` is 0 on every frame the layer is not
+ * live, so either edge of that toggle differences two unrelated quantities.
+ *
+ * So: no rate is observable across a frame whose layer identity moved. Pass
+ * `true` and this returns 0 — one paced-out vsync leaves the transform
+ * exactly where it was (`extrapolateScrollDx` returns null on rate 0), and
+ * the next recorded frame supplies both an exact dx and an honest rate.
+ *
  * `tPrev < 0` means no previous recorded frame.
  */
 export function observeScrollRate(
   dxPrev: number,
   tPrev: number,
   dx: number,
-  now: number
+  now: number,
+  layerChanged: boolean
 ): number {
   'worklet';
-  if (tPrev < 0) return 0;
+  if (tPrev < 0 || layerChanged) return 0;
   const gap = now - tPrev;
   if (gap <= 0 || gap > MAX_SCROLL_EXTRAPOLATION_MS * 2) return 0;
   return (dx - dxPrev) / gap;

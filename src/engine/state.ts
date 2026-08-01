@@ -156,6 +156,19 @@ export interface EngineState {
   scrollDxLastT: number;
   /** Observed dx change per ms across the last two recorded frames. */
   scrollDxRate: number;
+  /**
+   * `lineCache.buildRev` as of the last recorded frame, i.e. WHICH prefix
+   * picture `scrollDxLast` is an offset of.
+   *
+   * `dx` is `layout.toX(tRef) - xRefAtBuild`, so it resets to ~0 the frame
+   * the prefix is rebuilt while the line on screen does not move at all.
+   * Differencing across that frame yields a rate that describes a jump that
+   * never happened — see `observeScrollRate`'s `layerChanged` guard, which
+   * this field feeds. `-1` before the first recorded frame (no slot has
+   * `buildRev` -1, so the first frame always reads as a change; harmless,
+   * since `scrollDxLastT < 0` already suppresses it).
+   */
+  scrollDxBuildRev: number;
   /** Cross-frame closed-candle body+wick path cache, candle mode (see
    * draw/candleCache). */
   candleCache: CandleCacheSlot;
@@ -260,6 +273,24 @@ export interface EngineState {
    * both the quiescence skip and the pacing skip, so it always reflects
    * "when did state last actually advance." */
   lastFrameTimestamp: number | null;
+  /**
+   * `now_ms` as of the last frame that credited `timeDebt` — a SEPARATE
+   * clock from `lastFrameTimestamp`, and deliberately so.
+   *
+   * `lastFrameTimestamp` answers "when did state last advance", which is
+   * exactly what the pacing gate and `dt` want, and exactly what accrual
+   * must not use: the quiescence skip credits debt without advancing state,
+   * so measuring it against a fixed origin makes every consecutive skipped
+   * frame re-count the same interval (see `engine/timeAccrual.ts`). This
+   * field advances on every frame that credits, so credited intervals
+   * tile the timeline exactly once.
+   *
+   * `null` until the first credit. Recorded frames set it too — their
+   * accrual is done inside `engineStep` off `dt` — so the first quiescent
+   * frame after a record measures from that record, not from whenever
+   * quiescence last ended.
+   */
+  lastAccrualTimestamp: number | null;
 }
 
 /** The subset of `Map` that {@link pruneByIds} needs — lets one array hold
@@ -383,6 +414,7 @@ export function createEngineState(
     scrollDxLast: 0,
     scrollDxLastT: -1,
     scrollDxRate: 0,
+    scrollDxBuildRev: -1,
     candleCache: createCandleCacheSlot(),
 
     scrubAmount: 0,
@@ -449,5 +481,6 @@ export function createEngineState(
     lastRecordedH: -1,
 
     lastFrameTimestamp: null,
+    lastAccrualTimestamp: null,
   };
 }

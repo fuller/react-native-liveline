@@ -47,6 +47,7 @@ import {
   observeScrollRate,
   extrapolateScrollDx,
 } from './engine/scrollExtrapolate';
+import { accrualDeltaMs, suspendedDebtSec } from './engine/timeAccrual';
 import {
   computeDelta,
   pointsEqual,
@@ -400,6 +401,17 @@ export function useLivelineEngine(
   const cullRect = useSharedValue<SkHostRect | null>(null);
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
+  // Wall-clock milliseconds the frame loop spent suspended, waiting to be
+  // credited to `timeDebt` by the next frame that runs. Written from JS (the
+  // AppState listener / the `active` effect below, which are the only things
+  // that know a suspension happened) and drained on the UI thread.
+  //
+  // A plain number shared value rather than a reach into `state.value`:
+  // EngineState holds Skia handles and is owned by the UI runtime, so the JS
+  // thread must not touch it. Additive (`+=`) so two suspensions that both
+  // land before a frame runs — app backgrounded and then `active={false}`,
+  // say — can't lose one of the intervals.
+  const pendingSuspendedMs = useSharedValue(0);
   const screenPicture = useSharedValue<SkPicture>(makeEmptyPicture());
   // The 1×1 do-nothing picture the scroll layer falls back to on every frame
   // that can't composite it (see StepOutput.scrollPicture) — and also its
@@ -473,6 +485,32 @@ export function useLivelineEngine(
     }
 
     const now_ms = info.timestamp ?? 0;
+
+    // --- Suspended-loop credit. `frame.setActive(false)` stops accrual but
+    // not the wall clock, and `dt` below is clamped to MAX_DELTA_MS, so a
+    // minute in the background would otherwise contribute 50ms of debt
+    // instead of 60s. For an unpaused chart that is right — it *should*
+    // advance to the new wall-clock — and `suspendedDebtSec` preserves that
+    // by scaling on `pauseProgress`, which is 0 for exactly those charts.
+    // For a paused one, the missing debt is the whole absence: without this
+    // the frozen window jumps a minute to the left on foreground, dumping a
+    // minute of data off the left edge of a chart the user paused precisely
+    // so it would hold still.
+    //
+    // Drained before anything else reads `s.timeDebt`, and before the
+    // quiescence gate, so a chart that comes back still-quiescent (the
+    // common case — nothing changed while it was away) is credited too.
+    const pendingMs = pendingSuspendedMs.value;
+    if (pendingMs > 0) {
+      pendingSuspendedMs.value = 0;
+      s.timeDebt += suspendedDebtSec(pendingMs, s.pauseProgress);
+      // Restart the accrual clock at the resume instant. Everything before
+      // now is accounted for by the credit just applied; leaving the stale
+      // pre-suspension origin here would let the first quiescent frame
+      // credit a clamped MAX_DELTA_MS on top of it.
+      s.lastAccrualTimestamp = now_ms;
+    }
+
     // Wall-clock time since the last frame that actually ran engineStep —
     // not info.timeSincePreviousFrame (vsync-to-vsync). These differ once
     // frame pacing (below) starts skipping vsyncs: every lerp() in the
@@ -513,7 +551,28 @@ export function useLivelineEngine(
       // catch-up animation, so skipping without it would change resume
       // behavior. The picture shared value is left untouched — it still
       // holds the last recorded (pixel-identical) frame.
-      s.timeDebt += dt / 1000;
+      //
+      // Measured against `lastAccrualTimestamp`, NOT `dt`. `dt` is measured
+      // from `lastFrameTimestamp`, which by design does not move while
+      // frames are skipped — so `dt` here is the time since the last
+      // *recorded* frame, and re-crediting it every skipped frame counts
+      // the same interval over and over: 16.7ms, 33.3, 50, 50, 50…, roughly
+      // 3s of debt per 1s of real time at 60Hz (6s at 120Hz). The separate
+      // accrual clock advances on every credited frame, so each frame
+      // credits only its own interval and 1s of quiescence costs exactly 1s
+      // of debt at any refresh rate. See engine/timeAccrual.ts.
+      //
+      // Both properties of `lastFrameTimestamp` documented above survive
+      // untouched, because this branch still does not write it:
+      //   1. `dt` on the frame that breaks quiescence is still one large,
+      //      clamped delta covering the whole skipped span — the resume
+      //      frame's lerps still take a single MAX_DELTA_MS step rather
+      //      than a 16ms one.
+      //   2. The pacing gate below still compares against "when state last
+      //      actually advanced", so the frame that breaks quiescence is
+      //      never itself paced out.
+      s.timeDebt += accrualDeltaMs(s.lastAccrualTimestamp, now_ms) / 1000;
+      s.lastAccrualTimestamp = now_ms;
       return;
     }
 
@@ -608,7 +667,18 @@ export function useLivelineEngine(
     // already known — the paced-out branch above reads it instead of
     // comparing two picture shared values (two JSI reads per vsync, and wrong
     // before the first recorded frame if the placeholders weren't identical).
-    s.scrollActive = result.scrollPicture !== null;
+    const scrollActive = result.scrollPicture !== null;
+    // Did the thing `dx` is an offset OF change since the last recorded
+    // frame? Two ways it can: the layer started or stopped compositing (dx
+    // is 0 on every frame it isn't live), or the prefix picture was rebuilt,
+    // which resets dx to ~0 while the line on screen does not move. Either
+    // makes this frame's dx and the last one's incommensurable, so no rate
+    // is observable across the pair — see observeScrollRate's `layerChanged`
+    // parameter. Read before `s.scrollActive` is overwritten below.
+    const buildRev = s.lineCache.buildRev;
+    const layerChanged =
+      scrollActive !== s.scrollActive || buildRev !== s.scrollDxBuildRev;
+    s.scrollActive = scrollActive;
     const dx = result.scrollDx;
     // Observed dx-per-ms across the last two RECORDED frames, used to
     // extrapolate the transform on paced-out vsyncs above — see
@@ -618,10 +688,12 @@ export function useLivelineEngine(
       s.scrollDxLast,
       s.scrollDxLastT,
       dx,
-      now_ms
+      now_ms,
+      layerChanged
     );
     s.scrollDxLast = dx;
     s.scrollDxLastT = now_ms;
+    s.scrollDxBuildRev = buildRev;
     // Exact value always wins over whatever a skipped vsync extrapolated, so
     // extrapolation error can never accumulate past one frame. Same
     // rotate-mutate-assign as the paced-out branch above.
@@ -633,6 +705,12 @@ export function useLivelineEngine(
     s.lastRecordedW = w;
     s.lastRecordedH = h;
     s.lastFrameTimestamp = now_ms;
+    // This frame credited its own debt inside engineStep (off `dt`), so the
+    // accrual clock advances here too — the two are equal on every recorded
+    // frame and diverge only across skips. Keeping them in step here is what
+    // makes the first quiescent frame after a record measure from that
+    // record rather than from whenever quiescence last ended.
+    s.lastAccrualTimestamp = now_ms;
 
     if (result.valueText !== null) valueText.value = result.valueText;
     if (result.valueColor !== null) valueColor.value = result.valueColor;
@@ -660,20 +738,53 @@ export function useLivelineEngine(
   // cycle. The change listener still uses strict `=== 'active'`.
   const appForegroundRef = useRef(AppState.currentState !== 'background');
 
+  // Wall-clock instant the frame loop was suspended, or null while it runs.
+  // `Date.now()` rather than the frame callback's `info.timestamp`: no frame
+  // callback fires while suspended, so there is no UI-thread clock reading
+  // to be had at either end of the interval.
+  const suspendedAtRef = useRef<number | null>(null);
+  // The single place `frame.setActive` is called, so that no suspension can
+  // be entered or left without the elapsed interval being accounted for.
+  // Both suspension causes route through it: backgrounding and
+  // `active={false}` stop accrual identically, and a chart scrolled off a
+  // FlatList for a minute has exactly the same paused-chart-jumps-forward
+  // bug as a backgrounded one.
+  const setFrameActive = useCallback(
+    (next: boolean) => {
+      if (next) {
+        const at = suspendedAtRef.current;
+        if (at !== null) {
+          suspendedAtRef.current = null;
+          // `Math.max(0, ...)` guards a wall clock that stepped backwards
+          // (NTP correction, user changing the device time zone/clock while
+          // the app was away) — never credit negative debt.
+          pendingSuspendedMs.value += Math.max(0, Date.now() - at);
+        }
+      } else if (suspendedAtRef.current === null) {
+        // Only the FIRST transition into suspension stamps the clock: with
+        // two independent causes, `active={false}` while already
+        // backgrounded must not restart the interval and swallow the time
+        // already spent in the background.
+        suspendedAtRef.current = Date.now();
+      }
+      frame.setActive(next);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- frame and pendingSuspendedMs are identity-stable
+    []
+  );
+
   useEffect(() => {
     const sub = AppState.addEventListener('change', (status) => {
       appForegroundRef.current = status === 'active';
-      frame.setActive(appForegroundRef.current && activePropRef.current);
+      setFrameActive(appForegroundRef.current && activePropRef.current);
     });
     return () => sub.remove();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- frame is identity-stable
-  }, []);
+  }, [setFrameActive]);
 
   useEffect(() => {
     activePropRef.current = activeProp;
-    frame.setActive(appForegroundRef.current && activeProp);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- frame is identity-stable
-  }, [activeProp]);
+    setFrameActive(appForegroundRef.current && activeProp);
+  }, [activeProp, setFrameActive]);
 
   // Touch-drag scrub — mirrors the web version's touchmove handling
   // (crosshair follows the finger; releasing fades it out).

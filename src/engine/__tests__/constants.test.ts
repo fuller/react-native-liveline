@@ -29,7 +29,7 @@ describe('frame-pacing / extrapolation constants', () => {
   it('a vsync one pacing interval after a record still gets an extrapolated dx', () => {
     // The inequalities restated as the behaviour they protect, end to end:
     // observe a rate across a paced interval, then extrapolate across another.
-    const rate = observeScrollRate(0, 0, -1, MIN_FRAME_INTERVAL_MS);
+    const rate = observeScrollRate(0, 0, -1, MIN_FRAME_INTERVAL_MS, false);
     expect(rate).not.toBe(0);
     const dx = extrapolateScrollDx(
       -1,
