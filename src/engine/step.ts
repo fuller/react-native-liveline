@@ -26,6 +26,7 @@ import { drawLoading } from '../draw/loading';
 import { drawEmpty } from '../draw/empty';
 import type { EngineConfigStep } from './types';
 import type { EngineState } from './state';
+import { perSeriesMaps, pruneByIds } from './state';
 import { drawBadge } from './badge';
 import { updateGridLayer } from './gridLayer';
 import { updateLineScrollLayer } from './lineScrollLayer';
@@ -37,6 +38,7 @@ import {
   updateWindowTransition,
   updateRange,
   updateHoverState,
+  makeLayout,
 } from './helpers';
 import {
   computeCandleRange,
@@ -778,9 +780,8 @@ export function engineStep(
     s.rangeInited = rangeResult.rangeInited;
     s.displayMin = rangeResult.displayMin;
     s.displayMax = rangeResult.displayMax;
-    const { minVal, maxVal, valRange } = rangeResult;
 
-    const layout: ChartLayout = {
+    const layout: ChartLayout = makeLayout(
       w,
       h,
       pad,
@@ -788,13 +789,8 @@ export function engineStep(
       chartH,
       leftEdge,
       rightEdge,
-      minVal,
-      maxVal,
-      valRange,
-      toX: (t: number) =>
-        pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
-      toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
-    };
+      rangeResult
+    );
 
     // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
     // while the reveal morph is animating: ctx.drawPicture ignores
@@ -1119,23 +1115,12 @@ export function engineStep(
     if (!useMultiStash && s.displayValues.size > effectiveMultiSeries.length) {
       const currentIds = new Set<string>();
       for (const series of effectiveMultiSeries) currentIds.add(series.id);
-      for (const key of s.displayValues.keys()) {
-        if (!currentIds.has(key)) s.displayValues.delete(key);
-      }
-      for (const key of s.lineCaches.keys()) {
-        if (!currentIds.has(key)) s.lineCaches.delete(key);
-      }
-      // Same pruning for the per-series visible-array and MultiSeriesEntry
-      // pools (see EngineState.multiVisibleScratch/multiSeriesEntryScratch)
-      // — both are keyed and repopulated exactly like lineCaches above, so
-      // they need the same cleanup-on-removal treatment to avoid leaking a
-      // growing set of dead series ids forever.
-      for (const key of s.multiVisibleScratch.keys()) {
-        if (!currentIds.has(key)) s.multiVisibleScratch.delete(key);
-      }
-      for (const key of s.multiSeriesEntryScratch.keys()) {
-        if (!currentIds.has(key)) s.multiSeriesEntryScratch.delete(key);
-      }
+      // Every per-series map that is keyed by the current series set is
+      // registered on `perSeriesMaps` in engine/state.ts, next to the field
+      // declarations — including which maps are deliberately excluded and
+      // why. Adding one here is a one-line change there, not another
+      // hand-written delete loop at this call site.
+      pruneByIds(currentIds, perSeriesMaps(s));
     }
 
     // Use first series data for window transition seeding
@@ -1376,9 +1361,8 @@ export function engineStep(
     s.targetMax = rangeResult.targetMax;
     s.displayMin = rangeResult.displayMin;
     s.displayMax = rangeResult.displayMax;
-    const { minVal, maxVal, valRange } = rangeResult;
 
-    const layout: ChartLayout = {
+    const layout: ChartLayout = makeLayout(
       w,
       h,
       pad,
@@ -1386,13 +1370,8 @@ export function engineStep(
       chartH,
       leftEdge,
       rightEdge,
-      minVal,
-      maxVal,
-      valRange,
-      toX: (t: number) =>
-        pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
-      toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
-    };
+      rangeResult
+    );
 
     // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
     // while the reveal morph is animating (ctx.drawPicture ignores
@@ -1643,9 +1622,9 @@ export function engineStep(
     s.targetMax = rangeResult.targetMax;
     s.displayMin = rangeResult.displayMin;
     s.displayMax = rangeResult.displayMax;
-    const { minVal, maxVal, valRange } = rangeResult;
+    const { valRange } = rangeResult;
 
-    const layout: ChartLayout = {
+    const layout: ChartLayout = makeLayout(
       w,
       h,
       pad,
@@ -1653,13 +1632,8 @@ export function engineStep(
       chartH,
       leftEdge,
       rightEdge,
-      minVal,
-      maxVal,
-      valRange,
-      toX: (t: number) =>
-        pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
-      toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
-    };
+      rangeResult
+    );
 
     // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
     // while the reveal morph is animating (ctx.drawPicture ignores

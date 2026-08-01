@@ -251,3 +251,50 @@ export function updateHoverState(
     emitPoint,
   };
 }
+
+/** The three range fields `makeLayout` reads — structurally satisfied by
+ * both `updateRange`'s and `updateCandleRange`'s result objects. */
+export interface LayoutRange {
+  minVal: number;
+  maxVal: number;
+  valRange: number;
+}
+
+/**
+ * Build the per-frame `ChartLayout` shared by all three pipelines (line,
+ * candle, multi-series). Previously this exact literal — closures included
+ * — was written out three times in `engine/step.ts`.
+ *
+ * `toX`/`toY` stay closures on purpose: one allocation per frame per chart,
+ * which is what the inline literals already did. Do NOT "optimize" them
+ * into a shared object with mutable captured state — the three pipelines
+ * would alias each other's edges and range.
+ */
+export function makeLayout(
+  w: number,
+  h: number,
+  pad: Required<Padding>,
+  chartW: number,
+  chartH: number,
+  leftEdge: number,
+  rightEdge: number,
+  range: LayoutRange
+): ChartLayout {
+  'worklet';
+  const { minVal, maxVal, valRange } = range;
+  return {
+    w,
+    h,
+    pad,
+    chartW,
+    chartH,
+    leftEdge,
+    rightEdge,
+    minVal,
+    maxVal,
+    valRange,
+    toX: (t: number) =>
+      pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
+    toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
+  };
+}

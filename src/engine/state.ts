@@ -262,6 +262,58 @@ export interface EngineState {
   lastFrameTimestamp: number | null;
 }
 
+/** The subset of `Map` that {@link pruneByIds} needs — lets one array hold
+ * per-series maps with differently-typed values (`Map<string, V>` is
+ * invariant in `V`, so `Map<string, unknown>[]` would not accept them). */
+export interface PrunableMap {
+  readonly size: number;
+  keys(): IterableIterator<string>;
+  delete(key: string): boolean;
+}
+
+/**
+ * Every per-series map on `EngineState` whose keys are series ids owned by
+ * the *current* multi-series set, and which therefore must be pruned
+ * together when a series is removed. Registration lives here, next to the
+ * field declarations above: adding a new per-series map means adding one
+ * line to this array, not hand-writing another delete loop at the call
+ * site (which is how `seriesAlpha` came to leak).
+ *
+ * Deliberately NOT included, each for its own reason:
+ * - `smoothValuesScratch` — `.clear()`-ed at the top of every multi frame
+ *   (`step.ts`), so it can never hold a dead id past that frame.
+ * - `lastMultiStashRevs` / `lastMultiStashData` — keyed by the *stashed*
+ *   (previous) series set rather than the current one, and pruned on their
+ *   own in the stash-build block in `step.ts`; pruning them against the
+ *   live ids here would throw away the reverse-morph data that block
+ *   exists to keep.
+ * - `pausedMultiData` — a nullable whole-map snapshot, rebuilt on pause and
+ *   set back to `null` on resume, so it has no cross-series-set lifetime.
+ *
+ * Allocates a small array per call; only ever called from the
+ * series-removal branch (guarded by a size check), never per frame.
+ */
+export function perSeriesMaps(s: EngineState): PrunableMap[] {
+  'worklet';
+  return [
+    s.displayValues,
+    s.seriesAlpha,
+    s.multiVisibleScratch,
+    s.multiSeriesEntryScratch,
+    s.lineCaches,
+  ];
+}
+
+/** Delete every entry whose key is not in `currentIds`, from each map. */
+export function pruneByIds(currentIds: Set<string>, maps: PrunableMap[]): void {
+  'worklet';
+  for (const map of maps) {
+    for (const key of map.keys()) {
+      if (!currentIds.has(key)) map.delete(key);
+    }
+  }
+}
+
 export function createEngineState(
   value: number,
   windowSecs: number,
