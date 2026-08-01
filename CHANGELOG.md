@@ -22,8 +22,8 @@ All notable changes to this project will be documented in this file.
   `<Picture>`) instead of a single picture. The structure never changes after
   mount, so the Reanimated mapper that drives it stays entirely on the UI
   thread and the "keeps animating while the JS thread is blocked" guarantee
-  is preserved. This is an architecture change, not a performance one — see
-  `docs/superpowers/specs/2026-07-31-declarative-shell-design.md`.
+  is preserved. This is an architecture change, not a performance one; no
+  speedup is claimed for it.
 - **The single-series line's prefix stroke moved into that scroll layer** —
   the spline through all but the last data point is recorded once into its
   own `SkPicture` and composited at a horizontal offset via
