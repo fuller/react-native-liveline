@@ -4,7 +4,14 @@ import {
   emitSplineSegments,
   drawSplineTail,
 } from '../math/spline';
-import { ensured, type CachePath } from './pathCache';
+import {
+  ensured,
+  createLayoutKey,
+  writeLayoutKey,
+  layoutKeyMatches,
+  type CachePath,
+  type LayoutKey,
+} from './pathCache';
 
 export type { CachePath } from './pathCache';
 
@@ -95,23 +102,23 @@ export interface LineCacheSlot {
 
   // Invalidation key — flat numbers only, compared field-by-field so a
   // per-frame check allocates nothing. Validity is `prefix !== null` (no
-  // separate boolean — the two are always written together). `layout.w`
-  // isn't keyed: it only reaches the drawn geometry through `chartW`
-  // (already keyed) and pad.left (absorbed by `dx`, see below), so it can
-  // never catch an invalidation those don't already catch.
+  // separate boolean — the two are always written together).
+  //
+  // The data-identity half lives here; the layout half is the shared
+  // `LayoutKey` below (min/max, x scale, h, pads, chartW), which the candle
+  // cache embeds too so the two can't drift apart on spelling again. It is a
+  // nested OBJECT but not a nested allocation: `createLineCacheSlot` builds it
+  // once and `writeLayoutKey` overwrites it in place, so the per-frame
+  // `layoutKeyMatches` call is still just number compares.
   kDataRev: number;
-  kDataSource: number;
+  kDataSource: number; // not layout — stays here, see pathCache.ts LayoutKey
   kLen: number; // visible.length
   kFirstT: number; // visible[0].time
   kLastT: number; // visible[len-1].time
   kLastV: number; // visible[len-1].value
-  kMin: number; // layout.minVal (snaps exactly when settled)
-  kMax: number;
-  kWindow: number; // rightEdge - leftEdge (x scale)
-  kH: number;
-  kPadTop: number;
-  kPadBottom: number;
-  kChartW: number;
+  /** Layout half of the key — see `LayoutKey` in pathCache.ts, including why
+   * `layout.w` is deliberately absent. `minVal` snaps exactly when settled. */
+  layoutKey: LayoutKey;
 }
 
 /** Below this many decimated points the legacy rebuild is cheap anyway. */
@@ -136,13 +143,7 @@ export function createLineCacheSlot(): LineCacheSlot {
     kFirstT: 0,
     kLastT: 0,
     kLastV: 0,
-    kMin: 0,
-    kMax: 0,
-    kWindow: 0,
-    kH: 0,
-    kPadTop: 0,
-    kPadBottom: 0,
-    kChartW: 0,
+    layoutKey: createLayoutKey(),
   };
 }
 
@@ -170,7 +171,6 @@ export function lineCacheHits(
   visLastV: number
 ): boolean {
   'worklet';
-  const window = layout.rightEdge - layout.leftEdge;
   return (
     slot.prefix !== null &&
     slot.kDataRev === dataRev &&
@@ -179,13 +179,7 @@ export function lineCacheHits(
     slot.kFirstT === visFirstT &&
     slot.kLastT === visLastT &&
     slot.kLastV === visLastV &&
-    slot.kMin === layout.minVal &&
-    slot.kMax === layout.maxVal &&
-    slot.kWindow === window &&
-    slot.kH === layout.h &&
-    slot.kPadTop === layout.pad.top &&
-    slot.kPadBottom === layout.pad.bottom &&
-    slot.kChartW === layout.chartW
+    layoutKeyMatches(slot.layoutKey, layout)
   );
 }
 
@@ -461,13 +455,7 @@ export function updateLinePaths(
     slot.kFirstT = visFirstT;
     slot.kLastT = visLastT;
     slot.kLastV = visLastV;
-    slot.kMin = layout.minVal;
-    slot.kMax = layout.maxVal;
-    slot.kWindow = layout.rightEdge - layout.leftEdge;
-    slot.kH = layout.h;
-    slot.kPadTop = layout.pad.top;
-    slot.kPadBottom = layout.pad.bottom;
-    slot.kChartW = layout.chartW;
+    writeLayoutKey(slot.layoutKey, layout);
   }
 
   assembleLineTail(
