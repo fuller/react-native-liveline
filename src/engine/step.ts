@@ -12,6 +12,7 @@ import { detectMomentum } from '../math/momentum';
 import { interpolateAtTime } from '../math/interpolate';
 import { easeInOutCos } from '../math/ease';
 import { filterVisiblePointsInto } from '../math/visible';
+import type { SkPicture } from '@shopify/react-native-skia';
 import type { Ctx2D } from '../draw/canvas2d';
 import {
   drawFrame,
@@ -27,6 +28,10 @@ import type { EngineConfigStep } from './types';
 import type { EngineState } from './state';
 import { drawBadge } from './badge';
 import { updateGridLayer } from './gridLayer';
+import { updateLineScrollLayer } from './lineScrollLayer';
+import { lineCacheHits } from '../draw/lineCache';
+import { lineScrollLayerAlpha } from '../draw/lineScrollLayer';
+import { scrollLayerDx, scrollLayerUsable } from '../draw/scrollLayer';
 import {
   computeAdaptiveSpeed,
   updateWindowTransition,
@@ -67,6 +72,20 @@ import {
 export interface StepOutput {
   /** Hover point to deliver through onHover this frame (undefined = none) */
   emitHover?: HoverPoint;
+  /**
+   * The scroll layer's picture for this frame, or null when nothing may be
+   * composited there and the screen picture already holds the whole frame
+   * (every pipeline except single-series line, and any single-series frame
+   * that fails the alpha gate or the cache check — see
+   * draw/lineScrollLayer.ts). The caller publishes an empty picture for
+   * null; it must never leave a stale picture composited.
+   */
+  scrollPicture: SkPicture | null;
+  /**
+   * `translateX` for the scroll layer, in screen pixels — meaningless (and
+   * always 0) when `scrollPicture` is null.
+   */
+  scrollDx: number;
   /** Live value display text (line mode + showValue), null = leave unchanged */
   valueText: string | null;
   /** Live value display color ('' = default color) */
@@ -143,7 +162,12 @@ export function engineStep(
   multiData: Record<string, LivelinePoint[]>
 ): StepOutput {
   'worklet';
-  const out: StepOutput = { valueText: null, valueColor: null };
+  const out: StepOutput = {
+    valueText: null,
+    valueColor: null,
+    scrollPicture: null,
+    scrollDx: 0,
+  };
 
   const noMotion = cfg.noMotion;
   const hoverPixelX = cfg.scrub ? hoverPixelXRaw : null;
@@ -1705,6 +1729,58 @@ export function engineStep(
     const swingMagnitude =
       valRange > 0 ? Math.min(recentDelta / valRange, 1) : 0;
 
+    // --- Declarative scroll layer: the line's prefix stroke ---------------
+    //
+    // On frames where the prefix provably hasn't changed (a `lineCacheHits`
+    // hit) and the whole line pipeline is at full opacity and untransformed
+    // (`lineScrollLayerAlpha`), the prefix is composited from an SkPicture
+    // under a `<Group transform>` and `drawLine` strokes only the tail. Any
+    // other frame draws the line exactly as before, whole, and publishes an
+    // empty scroll layer — the same both-branches shape the grid picture
+    // uses above, and for the same reason: `ctx.drawPicture` ignores
+    // `globalAlpha`, so a layer that can't be composited at alpha 1 must not
+    // be composited at all.
+    //
+    // Deliberately runs after `updateHoverState` (it reads this frame's
+    // settled `s.scrubAmount`) and before `drawFrame` (which reads
+    // `splitPrefixStroke`). `s.shakeState.amplitude` is read pre-decay,
+    // which is the value `drawFrame`'s own translate will use this frame.
+    const dataSource = dataSourceOf(useStash, s.pausedData !== null);
+    const visLastPoint = visible[visible.length - 1]!;
+    const layerAlpha = lineScrollLayerAlpha(
+      chartReveal,
+      s.scrubAmount,
+      cfg.degenOptions ? s.shakeState.amplitude : 0
+    );
+    let splitPrefixStroke = false;
+    if (
+      layerAlpha >= 1 &&
+      lineCacheHits(
+        s.lineCache,
+        layout,
+        cfg.dataRev,
+        dataSource,
+        visible.length,
+        visible[0]!.time,
+        visLastPoint.time,
+        visLastPoint.value
+      )
+    ) {
+      updateLineScrollLayer(
+        s.lineScroll,
+        s.lineCache,
+        layout,
+        cfg.palette,
+        s.lineScrollCache,
+        fonts
+      );
+      splitPrefixStroke = scrollLayerUsable(s.lineScroll, layerAlpha);
+    }
+    if (splitPrefixStroke) {
+      out.scrollPicture = s.lineScroll.picture;
+      out.scrollDx = scrollLayerDx(s.lineScroll, layout);
+    }
+
     // Draw canvas content (everything except badge)
     drawFrame(ctx, layout, cfg.palette, {
       visible,
@@ -1754,7 +1830,8 @@ export function engineStep(
       lineCache: {
         slot: s.lineCache,
         dataRev: cfg.dataRev,
-        dataSource: dataSourceOf(useStash, s.pausedData !== null),
+        dataSource,
+        splitPrefixStroke,
       },
       gridLayer: s.gridLayer,
     });

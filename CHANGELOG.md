@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`react-native-gesture-handler` peer range widened to `>=2.30.0`** (was
+  `>=3.0.0`). The v3 floor existed only because the engine imported a
+  v3-only type name for a union it never used — the hook always returns a
+  single `Gesture.Pan()`, so the return type is now just `GestureType`,
+  which exists in both majors. Expo SDK 55 pins `~2.30.0`, so every SDK 55
+  consumer previously hit a peer conflict and an `expo-doctor` failure on
+  install. Verified by installing 2.30.0 and running the real typecheck, not
+  by inspection.
+
+### Changed
+
+- **Declarative render shell** — the chart now renders as a fixed four-node
+  Skia tree (`<Canvas>` → `<Group transform>` → `<Picture>`, plus a sibling
+  `<Picture>`) instead of a single picture. The structure never changes after
+  mount, so the Reanimated mapper that drives it stays entirely on the UI
+  thread and the "keeps animating while the JS thread is blocked" guarantee
+  is preserved. This is an architecture change, not a performance one — see
+  `docs/superpowers/specs/2026-07-31-declarative-shell-design.md`.
+- **The single-series line's prefix stroke moved into that scroll layer** —
+  the spline through all but the last data point is recorded once into its
+  own `SkPicture` and composited at a horizontal offset via
+  `<Group transform>`, re-recorded only when the line path cache misses; the
+  per-frame screen picture strokes only the tail. The fill polygon is
+  deliberately **not** split (it is one semi-transparent closed shape; every
+  way of cutting it leaves a seam or a double-darkened column) and is still
+  drawn whole every frame. Any frame that can't composite the layer at
+  alpha 1 — the reveal morph, the loading/empty crossfade, scrub dimming,
+  the degen shake — falls back to drawing the whole line live, because
+  `drawPicture` ignores `globalAlpha`. Multi-series and candle mode are
+  untouched and keep drawing the combined path. In accounting terms this
+  removes roughly one draw call per frame; it was not measurable on device
+  and no speedup is claimed for it.
+- **Time-axis labels no longer re-format every frame** — `formatTime` is a
+  pure function of a label's key, but the axis called it for every label on
+  every frame and overwrote each label's text with a byte-identical string
+  (~360 calls/sec at a 30s window, each allocating a `Date` and three
+  `padStart` results with the default formatter). It now runs only for a key
+  seen for the first time; a formatter swap is caught by reference identity
+  and re-texts live labels in place without disturbing their fades. Also
+  fixes a churn bug found by the new tests: labels one interval beyond each
+  edge — deliberately targeted, but at alpha 0 — were deleted and re-created
+  every single frame forever. Purely internal; per-label alpha, crossfades
+  and edge fades are unchanged. Worth ~35% of that function's JS time in
+  isolation, and undetectable on device (the whole time axis is 4.2% of a
+  core).
+
+### Removed
+
+- **`src/draw/timeAxisLayer.ts` and its tests** — pure label-selection logic
+  built for a time-axis scroll layer that was measured, priced and parked
+  rather than adopted, and which nothing imported. Recoverable from
+  `302df29` / `82d8f6b` on `perf/scroll-layer-architecture` if the axis ever
+  moves into a scroll layer. No API change; the module was never exported.
+- **Non-existent `android`, `ios`, `cpp`, `*.podspec` and
+  `react-native.config.js` entries from `files[]`** — this is a JS-only
+  library. `npm pack` output is unchanged (255 files, 1.3 MB).
+
 ## [0.2.1] - 2026-07-28
 
 ### Changed

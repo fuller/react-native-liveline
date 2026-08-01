@@ -10,6 +10,10 @@ import {
   type CandleCacheSlot,
 } from '../draw/candleCache';
 import { createGridLayerSlot, type GridLayerSlot } from '../draw/gridLayer';
+import {
+  createScrollLayerSlot,
+  type ScrollLayerSlot,
+} from '../draw/scrollLayer';
 import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
 import { createSkiaCache, type SkiaCache } from '../draw/canvas2d';
@@ -126,6 +130,16 @@ export interface EngineState {
    * deliberately not shared with the main frame's SkiaCache (see
    * engine/gridLayer.ts's doc comment). */
   gridLayerCache: SkiaCache;
+  /** Cross-frame SkPicture of the line's prefix stroke, single-series mode —
+   * the declarative shell's scroll layer, composited under a
+   * `<Group transform>` instead of being re-stroked every frame (see
+   * engine/lineScrollLayer, draw/scrollLayer). Only the single-series line
+   * pipeline populates it; multi-series and candle mode keep drawing the
+   * combined path. */
+  lineScroll: ScrollLayerSlot<SkPicture>;
+  /** Dedicated Skia object cache for the line scroll layer's own
+   * sub-recording — same reasoning as `gridLayerCache` above. */
+  lineScrollCache: SkiaCache;
   /** Cross-frame closed-candle body+wick path cache, candle mode (see
    * draw/candleCache). */
   candleCache: CandleCacheSlot;
@@ -295,6 +309,8 @@ export function createEngineState(
     lineCaches: new Map<string, LineCacheSlot>(),
     gridLayer: createGridLayerSlot<SkPicture>(),
     gridLayerCache: createSkiaCache(),
+    lineScroll: createScrollLayerSlot<SkPicture>(),
+    lineScrollCache: createSkiaCache(),
     candleCache: createCandleCacheSlot(),
 
     scrubAmount: 0,

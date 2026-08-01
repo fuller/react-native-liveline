@@ -7,6 +7,7 @@ import { rgbColor } from '../math/color';
 import {
   lineCacheHits,
   assembleLineTail,
+  assembleLineTailStroke,
   updateLinePaths,
   type CachePath,
   type LineCacheRef,
@@ -203,7 +204,10 @@ function paintLineCurve(
   showFill: boolean,
   lineAlpha: number,
   fillAlpha: number,
-  strokeColor?: Style2D
+  strokeColor?: Style2D,
+  /** Stroke `tailScratch` instead of the combined `scratch` — the prefix is
+   * being composited from the scroll layer picture. See LineCacheRef. */
+  splitStroke: boolean = false
 ) {
   'worklet';
   if (cacheReady && cacheSlot !== undefined) {
@@ -211,7 +215,7 @@ function paintLineCurve(
       ctx,
       layout,
       palette,
-      cacheSlot.scratch!,
+      splitStroke ? cacheSlot.tailScratch! : cacheSlot.scratch!,
       wantFill ? cacheSlot.fillScratch : null,
       lineAlpha,
       fillAlpha,
@@ -416,6 +420,34 @@ export function drawLine(
       );
   }
 
+  // Declarative scroll layer: the caller has already composited the prefix
+  // stroke from a picture, so stroke only the tail here — drawing the prefix
+  // again would double-stroke an antialiased line over itself. Honored only
+  // when the cache is actually in use: the immediate-mode fallback rebuilds
+  // the whole spline and has no separable prefix.
+  //
+  // The last two entries of `pts` are the tail's two moving points in both
+  // branches above — [lastX, tailY], [tipX, tailY] on a hit, and
+  // pts[N-1], pts[N] on a rebuild — which is exactly what
+  // `assembleLineTail` was handed, so the tail-only path joins the
+  // translated prefix at the identical point with the identical tangent.
+  const splitStroke =
+    cacheReady &&
+    pathCache !== undefined &&
+    pathCache.splitPrefixStroke === true;
+  if (splitStroke) {
+    const n = pts.length;
+    assembleLineTailStroke(
+      pathCache!.slot,
+      makeSkPath,
+      layout,
+      pts[n - 2]![0],
+      pts[n - 2]![1],
+      pts[n - 1]![0],
+      pts[n - 1]![1]
+    );
+  }
+
   // Clip line + fill to chart area — during big value jumps the range
   // lerps smoothly so the line may extend beyond the chart bounds.
   // Clipping keeps it tidy while the range catches up.
@@ -437,7 +469,8 @@ export function drawLine(
       showFill,
       lineAlpha,
       fillAlpha,
-      strokeColor
+      strokeColor,
+      splitStroke
     );
     ctx.restore();
 
@@ -456,7 +489,8 @@ export function drawLine(
       showFill,
       lineAlpha,
       fillAlpha,
-      strokeColor
+      strokeColor,
+      splitStroke
     );
     ctx.restore();
   } else {
@@ -471,7 +505,8 @@ export function drawLine(
       showFill,
       lineAlpha,
       fillAlpha,
-      strokeColor
+      strokeColor,
+      splitStroke
     );
   }
 

@@ -42,6 +42,23 @@ export interface LineCacheRef {
   /** Which backing array the points came from: 0 = live buffer,
    * 1 = paused snapshot, 2 = reverse-morph stash. */
   dataSource: number;
+  /**
+   * Declarative scroll layer: when true, the caller is compositing the
+   * prefix stroke itself (from a picture recorded by
+   * engine/lineScrollLayer.ts) and `drawLine` must stroke the **tail only**,
+   * so the prefix isn't drawn twice. The fill is unaffected — it is still
+   * drawn whole, from the combined path.
+   *
+   * Advisory, not a command: `drawLine` honors it only on frames where the
+   * path cache is actually in use (`cacheReady`), since the immediate-mode
+   * fallback has no separable prefix. The caller therefore only sets it when
+   * it has independently confirmed a `lineCacheHits` hit for this frame —
+   * see engine/step.ts, which is also where the alpha gate lives.
+   *
+   * Absent (undefined) for the multi-series and candle pipelines, which draw
+   * the combined path exactly as before.
+   */
+  splitPrefixStroke?: boolean;
 }
 
 export interface LineCacheSlot {

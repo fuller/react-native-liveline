@@ -129,9 +129,11 @@ export interface LivelineEngine {
    * horizontally by `scrollTransform` instead of being re-recorded. Render
    * inside a `<Group transform={scrollTransform}>`, *below* `screenPicture`.
    *
-   * Currently always the empty placeholder — the declarative shell ships as a
-   * structural no-op and the line's prefix stroke moves in here in a later
-   * step.
+   * Holds the single-series line's prefix stroke (the spline through all but
+   * the last data point), re-recorded only when the line path cache misses.
+   * Stays the empty placeholder in multi-series and candle mode, and on any
+   * frame where the line can't be composited at alpha 1 — see
+   * draw/lineScrollLayer.ts.
    */
   scrollPicture: SharedValue<SkPicture>;
   /**
@@ -395,15 +397,19 @@ export function useLivelineEngine(
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
   const screenPicture = useSharedValue<SkPicture>(makeEmptyPicture());
-  // The scroll layer. Nothing records into it yet (the declarative shell
-  // ships as a structural no-op), so it stays the 1×1 empty placeholder and
-  // draws nothing — rendering is pixel-identical to the single-picture tree.
+  // The 1×1 do-nothing picture the scroll layer falls back to on every frame
+  // that can't composite it (see StepOutput.scrollPicture). Held in its own
+  // shared value rather than captured from render scope so the frame worklet
+  // reaches it by exactly the same route as any other shared value.
+  const emptyPicture = useSharedValue<SkPicture>(makeEmptyPicture());
+  // The scroll layer — the single-series line's prefix stroke, recorded once
+  // per line-cache miss by engine/lineScrollLayer.ts and translated by
+  // `scrollTransform`. Starts (and, in the multi-series and candle
+  // pipelines, stays) the empty placeholder, which draws nothing.
   const scrollPicture = useSharedValue<SkPicture>(makeEmptyPicture());
   // `[{ translateX: dx }]`, reassigned by the frame callback below (a shared
   // value only notifies its mapper on assignment, so this can't be mutated
-  // in place). dx is always 0 for now, but it's written every recorded frame so
-  // the shared-value → <Group transform> plumbing is real rather than a
-  // constant that a later step would have to re-thread.
+  // in place).
   const scrollTransform = useSharedValue<Transforms3d>([{ translateX: 0 }]);
   // Last dx pushed into `scrollTransform`, so the frame callback can skip the
   // reassignment (and the array/object allocation it needs) when the offset
@@ -521,10 +527,17 @@ export function useLivelineEngine(
       multiDataBuf.value
     );
     screenPicture.value = recorder.finishRecordingAsPicture();
-    // Scroll-layer offset for this frame. Nothing is recorded into
-    // `scrollPicture` yet, so this is always 0 — the write exists so the
-    // shared value is genuinely driven from the frame loop.
-    const dx = 0;
+    // Publish this frame's scroll layer. `null` means the layer must not
+    // composite at all (see StepOutput.scrollPicture) — the empty 1×1
+    // placeholder goes up instead of leaving the previous frame's picture
+    // in place, since the screen picture then already contains the whole
+    // line. Both writes land in this same UI-thread tick as the screen
+    // picture, so the declarative tree's mapper always sees a consistent
+    // pair. Guarded on identity: an unchanged picture must not be
+    // reassigned, or every frame would look like a change to the mapper.
+    const nextScroll = result.scrollPicture ?? emptyPicture.value;
+    if (scrollPicture.value !== nextScroll) scrollPicture.value = nextScroll;
+    const dx = result.scrollDx;
     if (scrollDx.value !== dx) {
       scrollDx.value = dx;
       scrollTransform.value = [{ translateX: dx }];
