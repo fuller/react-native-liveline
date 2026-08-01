@@ -1,5 +1,12 @@
-/* eslint-disable react-native/no-inline-styles -- control styles are theme/prop-derived */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   Platform,
   Pressable,
@@ -88,23 +95,163 @@ function SlidingIndicator({
     opacity: ready.value,
   }));
 
-  const inset = rounded ? 3 : 2;
+  const chrome = useMemo(() => {
+    const inset = rounded ? 3 : 2;
+    return {
+      top: inset,
+      bottom: inset,
+      borderRadius: rounded ? 999 : 4,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.035)',
+    };
+  }, [rounded, isDark]);
+
   return (
     <Animated.View
       pointerEvents="none"
-      style={[
-        styles.indicator,
-        {
-          top: inset,
-          bottom: inset,
-          borderRadius: rounded ? 999 : 4,
-          backgroundColor: isDark
+      style={[styles.indicator, chrome, animStyle]}
+    />
+  );
+}
+
+type WindowStyle = NonNullable<LivelineProps['windowStyle']>;
+
+/**
+ * The style scalars every control bar shares, derived from `windowStyle` and
+ * the theme. Memoized on those two inputs so the style objects handed to the
+ * bars are referentially stable across renders (a live chart re-renders on
+ * every tick; these do not change with it).
+ */
+function useBarStyle(ws: WindowStyle, isDark: boolean) {
+  return useMemo(() => {
+    const isText = ws === 'text';
+    const isRounded = ws === 'rounded';
+    const activeColor = isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.55)';
+    const inactiveColor = isDark
+      ? 'rgba(255,255,255,0.25)'
+      : 'rgba(0,0,0,0.22)';
+    const btnRadius = isRounded ? 999 : 4;
+    return {
+      isText,
+      isRounded,
+      activeColor,
+      inactiveColor,
+      btnRadius,
+      /** The computed half of the bar `<View>` style (see `styles.bar`). */
+      chrome: {
+        gap: isText ? 4 : 2,
+        backgroundColor: isText
+          ? 'transparent'
+          : isDark
+            ? 'rgba(255,255,255,0.03)'
+            : 'rgba(0,0,0,0.02)',
+        borderRadius: isRounded ? 999 : 6,
+        padding: isText ? 0 : isRounded ? 3 : 2,
+      },
+      /** Window-selector pill hit area. */
+      pill: {
+        paddingVertical: isText ? 2 : 3,
+        paddingHorizontal: isText ? 6 : 10,
+        borderRadius: btnRadius,
+      },
+      /** Mode-toggle icon button (pairs with `styles.iconBtn`). */
+      iconBtn: { borderRadius: btnRadius },
+      labelActive: {
+        fontSize: 11,
+        lineHeight: 16,
+        fontWeight: '600' as const,
+        color: activeColor,
+      },
+      labelInactive: {
+        fontSize: 11,
+        lineHeight: 16,
+        fontWeight: '400' as const,
+        color: inactiveColor,
+      },
+    };
+  }, [ws, isDark]);
+}
+
+type BarStyle = ReturnType<typeof useBarStyle>;
+
+/**
+ * Series-chip styles. Separate from `useBarStyle` because they additionally
+ * branch on `seriesToggleCompact`, which the other two bars know nothing about.
+ */
+function useChipStyle(bar: BarStyle, isDark: boolean, compact: boolean) {
+  return useMemo(() => {
+    const { isText, btnRadius, activeColor, inactiveColor } = bar;
+    const labelBase = {
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight: '500' as const,
+    };
+    return {
+      base: {
+        paddingVertical: compact ? (isText ? 2 : 5) : isText ? 2 : 3,
+        paddingHorizontal: compact ? (isText ? 4 : 7) : isText ? 6 : 8,
+        borderRadius: btnRadius,
+        flexDirection: 'row' as const,
+        alignItems: 'center' as const,
+        gap: compact ? 0 : 4,
+        backgroundColor: isText
+          ? 'transparent'
+          : isDark
             ? 'rgba(255,255,255,0.06)'
             : 'rgba(0,0,0,0.035)',
-        },
-        animStyle,
-      ]}
-    />
+      },
+      /** Applied on top of `base` for a toggled-off series. */
+      off: { backgroundColor: 'transparent', opacity: 0.4 },
+      dot: {
+        width: compact ? 8 : 6,
+        height: compact ? 8 : 6,
+        borderRadius: 999,
+      },
+      label: { ...labelBase, color: activeColor },
+      labelOff: { ...labelBase, color: inactiveColor },
+    };
+  }, [bar, isDark, compact]);
+}
+
+/**
+ * The chrome shared by all three control bars: a self-sizing row with the
+ * theme/`windowStyle`-derived background, radius, padding and gap, optionally
+ * hosting the sliding indicator that tracks the active button.
+ *
+ * Note this lives entirely *above* the `<Canvas>` — see the comment on the
+ * Skia subtree below, whose node structure must stay fixed.
+ */
+function PillBar({
+  bar,
+  isDark,
+  indicator = false,
+  indicatorLayout,
+  faded = false,
+  children,
+}: {
+  bar: BarStyle;
+  isDark: boolean;
+  /** Render a sliding indicator behind the active button. */
+  indicator?: boolean;
+  /** Layout of the currently active button; `undefined` until first measured. */
+  indicatorLayout?: BtnLayout;
+  /** Keep the bar mounted but invisible and untappable. */
+  faded?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <View
+      pointerEvents={faded ? 'none' : 'auto'}
+      style={[styles.bar, bar.chrome, faded && styles.barFaded]}
+    >
+      {indicator && !bar.isText && (
+        <SlidingIndicator
+          layout={indicatorLayout}
+          rounded={bar.isRounded}
+          isDark={isDark}
+        />
+      )}
+      {children}
+    </View>
   );
 }
 
@@ -355,18 +502,8 @@ export const Liveline = memo(function LivelineComponent({
         : defaultValueColor,
   }));
 
-  const activeColor = isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.55)';
-  const inactiveColor = isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.22)';
-  const barBg =
-    ws === 'text'
-      ? 'transparent'
-      : isDark
-        ? 'rgba(255,255,255,0.03)'
-        : 'rgba(0,0,0,0.02)';
-  const barRadius = ws === 'rounded' ? 999 : 6;
-  const barPadding = ws === 'text' ? 0 : ws === 'rounded' ? 3 : 2;
-  const barGap = ws === 'text' ? 4 : 2;
-  const btnRadius = ws === 'rounded' ? 999 : 4;
+  const bar = useBarStyle(ws, isDark);
+  const chip = useChipStyle(bar, isDark, seriesToggleCompact);
 
   const activeMode = lineMode ? 'line' : 'candle';
 
@@ -409,24 +546,12 @@ export const Liveline = memo(function LivelineComponent({
         <View style={[styles.controlsRow, { marginLeft: pad.left }]}>
           {/* Time window controls */}
           {windows && windows.length > 0 && (
-            <View
-              style={[
-                styles.bar,
-                {
-                  gap: barGap,
-                  backgroundColor: barBg,
-                  borderRadius: barRadius,
-                  padding: barPadding,
-                },
-              ]}
+            <PillBar
+              bar={bar}
+              isDark={isDark}
+              indicator
+              indicatorLayout={windowBtnLayouts[activeWindowSecs]}
             >
-              {ws !== 'text' && (
-                <SlidingIndicator
-                  layout={windowBtnLayouts[activeWindowSecs]}
-                  rounded={ws === 'rounded'}
-                  isDark={isDark}
-                />
-              )}
               {windows.map((w) => {
                 const isActive = w.secs === activeWindowSecs;
                 return (
@@ -437,85 +562,64 @@ export const Liveline = memo(function LivelineComponent({
                       setActiveWindowSecs(w.secs);
                       onWindowChange?.(w.secs);
                     }}
-                    style={{
-                      paddingVertical: ws === 'text' ? 2 : 3,
-                      paddingHorizontal: ws === 'text' ? 6 : 10,
-                      borderRadius: btnRadius,
-                    }}
+                    style={bar.pill}
                   >
                     <Animated.Text
-                      style={{
-                        fontSize: 11,
-                        lineHeight: 16,
-                        fontWeight: isActive ? '600' : '400',
-                        color: isActive ? activeColor : inactiveColor,
-                      }}
+                      style={isActive ? bar.labelActive : bar.labelInactive}
                     >
                       {w.label}
                     </Animated.Text>
                   </Pressable>
                 );
               })}
-            </View>
+            </PillBar>
           )}
 
           {/* Mode toggle — separate bar with its own sliding indicator */}
           {onModeChange && (
-            <View
-              style={[
-                styles.bar,
-                {
-                  gap: barGap,
-                  backgroundColor: barBg,
-                  borderRadius: barRadius,
-                  padding: barPadding,
-                },
-              ]}
+            <PillBar
+              bar={bar}
+              isDark={isDark}
+              indicator
+              indicatorLayout={modeBtnLayouts[activeMode]}
             >
-              {ws !== 'text' && (
-                <SlidingIndicator
-                  layout={modeBtnLayouts[activeMode]}
-                  rounded={ws === 'rounded'}
-                  isDark={isDark}
-                />
-              )}
               <Pressable
                 onLayout={(e) => onModeBtnLayout('line', e)}
                 onPress={() => onModeChange('line')}
-                style={[styles.iconBtn, { borderRadius: btnRadius }]}
+                style={[styles.iconBtn, bar.iconBtn]}
               >
                 <LineIcon
-                  color={activeMode === 'line' ? activeColor : inactiveColor}
+                  color={
+                    activeMode === 'line' ? bar.activeColor : bar.inactiveColor
+                  }
                   active={activeMode === 'line'}
                 />
               </Pressable>
               <Pressable
                 onLayout={(e) => onModeBtnLayout('candle', e)}
                 onPress={() => onModeChange('candle')}
-                style={[styles.iconBtn, { borderRadius: btnRadius }]}
+                style={[styles.iconBtn, bar.iconBtn]}
               >
                 <CandleIcon
-                  color={activeMode === 'candle' ? activeColor : inactiveColor}
+                  color={
+                    activeMode === 'candle'
+                      ? bar.activeColor
+                      : bar.inactiveColor
+                  }
                 />
               </Pressable>
-            </View>
+            </PillBar>
           )}
 
-          {/* Series toggle chips */}
+          {/*
+            Series toggle chips. No sliding indicator — chips toggle
+            independently, so there is no single "active" one to track.
+            Rendered from lastSeriesPropRef (not seriesProp) and merely faded
+            out when the chart leaves multi-series mode: unmounting the bar
+            would reflow the controls row and drop the hidden-series state.
+          */}
           {showSeriesToggle && (
-            <View
-              pointerEvents={isMultiSeries ? 'auto' : 'none'}
-              style={[
-                styles.bar,
-                {
-                  gap: barGap,
-                  backgroundColor: barBg,
-                  borderRadius: barRadius,
-                  padding: barPadding,
-                  opacity: isMultiSeries ? 1 : 0,
-                },
-              ]}
-            >
+            <PillBar bar={bar} isDark={isDark} faded={!isMultiSeries}>
               {(lastSeriesPropRef.current ?? []).map((s, si) => {
                 const isHidden = hiddenSeries.has(s.id);
                 const seriesColor =
@@ -524,52 +628,18 @@ export const Liveline = memo(function LivelineComponent({
                   <Pressable
                     key={s.id}
                     onPress={() => handleSeriesToggle(s.id)}
-                    style={{
-                      paddingVertical: seriesToggleCompact
-                        ? ws === 'text'
-                          ? 2
-                          : 5
-                        : ws === 'text'
-                          ? 2
-                          : 3,
-                      paddingHorizontal: seriesToggleCompact
-                        ? ws === 'text'
-                          ? 4
-                          : 7
-                        : ws === 'text'
-                          ? 6
-                          : 8,
-                      borderRadius: btnRadius,
-                      backgroundColor: isHidden
-                        ? 'transparent'
-                        : ws === 'text'
-                          ? 'transparent'
-                          : isDark
-                            ? 'rgba(255,255,255,0.06)'
-                            : 'rgba(0,0,0,0.035)',
-                      opacity: isHidden ? 0.4 : 1,
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: seriesToggleCompact ? 0 : 4,
-                    }}
+                    style={[chip.base, isHidden && chip.off]}
                   >
                     <View
-                      style={{
-                        width: seriesToggleCompact ? 8 : 6,
-                        height: seriesToggleCompact ? 8 : 6,
-                        borderRadius: 999,
-                        backgroundColor: seriesColor,
-                        opacity: isHidden ? 0.4 : 1,
-                      }}
+                      style={[
+                        chip.dot,
+                        { backgroundColor: seriesColor },
+                        isHidden && styles.dimmed,
+                      ]}
                     />
                     {!seriesToggleCompact && (
                       <Animated.Text
-                        style={{
-                          fontSize: 11,
-                          lineHeight: 16,
-                          fontWeight: '500',
-                          color: isHidden ? inactiveColor : activeColor,
-                        }}
+                        style={isHidden ? chip.labelOff : chip.label}
                       >
                         {s.label ?? s.id}
                       </Animated.Text>
@@ -577,7 +647,7 @@ export const Liveline = memo(function LivelineComponent({
                   </Pressable>
                 );
               })}
-            </View>
+            </PillBar>
           )}
         </View>
       )}
@@ -645,6 +715,12 @@ const styles = StyleSheet.create({
     position: 'relative',
     flexDirection: 'row',
     alignSelf: 'flex-start',
+  },
+  barFaded: {
+    opacity: 0,
+  },
+  dimmed: {
+    opacity: 0.4,
   },
   indicator: {
     position: 'absolute',
