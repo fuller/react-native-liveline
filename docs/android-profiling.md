@@ -73,6 +73,44 @@ GLES: Google (Apple), Android Emulator OpenGL ES Translator (Apple M2), OpenGL E
 Bad — if the string contains **SwiftShader**, or otherwise names no real GPU,
 you are software-rendering. Stop; do not record a number.
 
+### 1c. Make sure the app is talking to the Metro you think it is
+
+Cost roughly an hour on 2026-08-01. Symptoms looked exactly like a code bug: a
+red screen reading `Unable to resolve module
+@babel/runtime/helpers/createForOfIteratorHelperLoose from src/engine/state.ts`,
+naming a file edited that same day and a `for...of` construct added that same
+day. It was neither.
+
+Two things conspire here:
+
+- **`adb reverse` does not apply.** The app connects to `10.0.2.2:<port>`,
+  which is the emulator's NAT route to the *host*. `adb reverse` maps *device*
+  localhost to the host, so it is bypassed entirely. Mapping `tcp:8082` did
+  nothing.
+- **A stale Metro can hold the port.** There was a second, older Metro on host
+  8082 whose module map had been corrupted earlier (its own error was
+  `Unable to resolve module expo`). Android hits 8082; iOS was on 8083 and
+  perfectly healthy. Same repo, same files, one platform broken.
+
+The diagnostic that settles it in one command — ask each server directly,
+which removes the emulator, the app's cached error screen and your assumptions
+from the picture:
+
+```bash
+for port in 8081 8082 8083; do
+  printf "%s: " $port
+  curl -s -o /tmp/b.txt -w "%{http_code}\n" -m 240 \
+    "http://localhost:$port/.expo/.virtual-metro-entry.bundle?platform=android&dev=true&lazy=true&app=liveline.example"
+done
+```
+
+200 with ~10MB means that server is healthy. A 500 prints a JSON body naming
+the real failure. Do this BEFORE reading anything into a red screen. And check
+for strays: `lsof -nP -iTCP:8082 -sTCP:LISTEN`.
+
+Generalised: an error naming a file you just edited is not evidence that your
+edit caused it.
+
 ### 1b. Host load
 
 This is a **shared** machine and has been measured at load average 24. Relative
