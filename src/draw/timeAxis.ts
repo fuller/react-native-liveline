@@ -248,20 +248,28 @@ export function drawTimeAxis(
     drawn.push(label);
   }
 
+  // No save()/restore() per label. Each pair cost a 14-field StyleSnapshot
+  // allocation plus a canvas.save()/restore() JSI round-trip that recorded a
+  // real save/restore layer into the picture — ~500 objects and ~1,000 JSI
+  // calls a second at 6-10 labels/frame — to protect exactly four properties.
+  // globalAlpha is the only one that actually needs restoring afterwards;
+  // strokeStyle/lineWidth are loop-invariant (hoisted here, and identical to
+  // what the axis line above already set), and fillStyle is reassigned
+  // unconditionally by every iteration and by every subsequent draw call in
+  // the frame. Nothing in the body touches the transform or clip, which is
+  // the only other state canvas.save() was protecting.
+  ctx.strokeStyle = palette.gridLine;
+  ctx.lineWidth = 1;
+  ctx.fillStyle = palette.timeLabel;
   for (const label of drawn) {
-    ctx.save();
     ctx.globalAlpha = baseAlpha * label.alpha;
 
-    ctx.strokeStyle = palette.gridLine;
-    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(label.x, lineY);
     ctx.lineTo(label.x, lineY + tickLen);
     ctx.stroke();
 
-    ctx.fillStyle = palette.timeLabel;
     ctx.fillText(label.text, label.x, lineY + tickLen + 14);
-
-    ctx.restore();
   }
+  ctx.globalAlpha = baseAlpha;
 }
