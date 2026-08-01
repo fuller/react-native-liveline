@@ -402,25 +402,48 @@ export function useLivelineEngine(
   const hoverX = useSharedValue<number | null>(null);
   const screenPicture = useSharedValue<SkPicture>(makeEmptyPicture());
   // The 1×1 do-nothing picture the scroll layer falls back to on every frame
-  // that can't composite it (see StepOutput.scrollPicture). Held in its own
-  // shared value rather than captured from render scope so the frame worklet
-  // reaches it by exactly the same route as any other shared value.
+  // that can't composite it (see StepOutput.scrollPicture) — and also its
+  // initial value, so there is exactly ONE empty picture. Two distinct ones
+  // would make `scrollPicture.value !== emptyPicture.value` read true before
+  // the first recorded frame, i.e. claim a live scroll layer while nothing
+  // is compositing. Liveness is `EngineState.scrollActive` instead, which the
+  // recorded frame sets from an answer it already has.
   const emptyPicture = useSharedValue<SkPicture>(makeEmptyPicture());
   // The scroll layer — the single-series line's prefix stroke, recorded once
   // per line-cache miss by engine/lineScrollLayer.ts and translated by
   // `scrollTransform`. Starts (and, in the multi-series and candle
   // pipelines, stays) the empty placeholder, which draws nothing.
-  const scrollPicture = useSharedValue<SkPicture>(makeEmptyPicture());
-  // `[{ translateX: dx }]`, reassigned by the frame callback below (a shared
-  // value only notifies its mapper on assignment, so this can't be mutated
-  // in place).
+  const scrollPicture = useSharedValue<SkPicture>(emptyPicture.value);
+  // `[{ translateX: dx }]` — the current transform, always one of the three
+  // buffers in `scrollTransformBufs` below.
   const scrollTransform = useSharedValue<Transforms3d>([{ translateX: 0 }]);
-  // Last dx pushed into `scrollTransform`, so the frame callback can skip the
-  // reassignment (and the array/object allocation it needs) when the offset
-  // hasn't moved. `Transform3d` is a union of single-key objects, so reading
-  // the current translateX back out of `scrollTransform.value` isn't
-  // type-safe; mirroring the scalar here is.
-  const scrollDx = useSharedValue(0);
+  // Preallocated transform buffers, rotated through by `pushScrollDx` below.
+  //
+  // A shared value only notifies its mapper when it is REASSIGNED, never when
+  // its contents are mutated — so `scrollTransform.value = [{ translateX: dx }]`
+  // was the obvious shape, and it allocates an array AND an object on every
+  // assignment: up to 120 assignments/sec on a ProMotion display, 240
+  // short-lived allocations/sec on the UI thread, in a library whose entire
+  // point is to allocate nothing per frame. Guarding on `dx` changing doesn't
+  // help; dx is a continuously varying float, so the guard essentially never
+  // fires while the chart scrolls.
+  //
+  // Rotating through a fixed ring gives both properties at once: the object
+  // identity changes on every assignment (so the mapper always sees a change)
+  // while steady-state allocation is exactly zero. Three slots rather than
+  // two gives two frames of separation before a buffer is reused, so a
+  // consumer still holding last frame's array can't observe it mutate.
+  //
+  // Rejected alternatives: `useDerivedValue` allocates the same array inside
+  // the derivation instead of outside it, and self-assignment
+  // (`x.value = x.value` after mutating) is not a notification contract
+  // Reanimated documents or honors.
+  const scrollTransformBufs = useSharedValue<Transforms3d[]>([
+    [{ translateX: 0 }],
+    [{ translateX: 0 }],
+    [{ translateX: 0 }],
+  ]);
+  const scrollBufIdx = useSharedValue(0);
   const valueText = useSharedValue('');
   const valueColor = useSharedValue('');
 
@@ -516,10 +539,10 @@ export function useLivelineEngine(
       //
       // `dx` cannot be recomputed here — it needs `layout`, which lives
       // inside engineStep — so it is extrapolated from the last two recorded
-      // frames (see EngineState.scrollDxRate). Guarded three ways: only when
-      // a scroll layer is actually compositing, only when a rate has been
-      // observed, and only across a gap short enough for that rate to still
-      // be true (MAX_SCROLL_EXTRAPOLATION_MS).
+      // frames (see engine/scrollExtrapolate.ts). Guarded three ways: only
+      // when a scroll layer is actually compositing, only when a rate has
+      // been observed, and only across a gap short enough for that rate to
+      // still be true (MAX_SCROLL_EXTRAPOLATION_MS).
       //
       // Known consequence: the prefix now moves at 120Hz while the tail is
       // re-recorded at 60Hz, so on skipped vsyncs they shear by one frame of
@@ -527,16 +550,22 @@ export function useLivelineEngine(
       // window and ~0.08px on 30s. Sub-pixel, but it is a shimmer at the
       // join rather than a clean offset. Verify on real 120Hz hardware; the
       // simulator renders at 60 and cannot show this either way.
-      if (scrollPicture.value !== emptyPicture.value) {
+      if (s.scrollActive) {
         const dxEx = extrapolateScrollDx(
           s.scrollDxLast,
           s.scrollDxLastT,
           s.scrollDxRate,
           now_ms
         );
-        if (dxEx !== null && scrollDx.value !== dxEx) {
-          scrollDx.value = dxEx;
-          scrollTransform.value = [{ translateX: dxEx }];
+        if (dxEx !== null) {
+          // Rotate to the next preallocated buffer, mutate it, then assign:
+          // a fresh identity for the mapper with no allocation. See
+          // `scrollTransformBufs`.
+          const i = (scrollBufIdx.value + 1) % 3;
+          scrollBufIdx.value = i;
+          const buf = scrollTransformBufs.value[i]!;
+          (buf[0] as { translateX: number }).translateX = dxEx;
+          scrollTransform.value = buf;
         }
       }
       return;
@@ -575,14 +604,16 @@ export function useLivelineEngine(
     // reassigned, or every frame would look like a change to the mapper.
     const nextScroll = result.scrollPicture ?? emptyPicture.value;
     if (scrollPicture.value !== nextScroll) scrollPicture.value = nextScroll;
+    // Whether a scroll layer is live this frame, recorded where the answer is
+    // already known — the paced-out branch above reads it instead of
+    // comparing two picture shared values (two JSI reads per vsync, and wrong
+    // before the first recorded frame if the placeholders weren't identical).
+    s.scrollActive = result.scrollPicture !== null;
     const dx = result.scrollDx;
     // Observed dx-per-ms across the last two RECORDED frames, used to
-    // extrapolate the transform on paced-out vsyncs above. Derived from what
-    // the chart actually did rather than from windowSecs/chartW, so pause,
-    // window transitions and time-debt catch-up need no special cases. Only
-    // updated across a gap short enough to be a real paced interval —
-    // otherwise a quiescence or background gap would divide a large dx change
-    // by a large dt and bake in a meaningless rate.
+    // extrapolate the transform on paced-out vsyncs above — see
+    // engine/scrollExtrapolate.ts for why the rate is observed rather than
+    // derived, and for the guards.
     s.scrollDxRate = observeScrollRate(
       s.scrollDxLast,
       s.scrollDxLastT,
@@ -592,11 +623,13 @@ export function useLivelineEngine(
     s.scrollDxLast = dx;
     s.scrollDxLastT = now_ms;
     // Exact value always wins over whatever a skipped vsync extrapolated, so
-    // extrapolation error can never accumulate past one frame.
-    if (scrollDx.value !== dx) {
-      scrollDx.value = dx;
-      scrollTransform.value = [{ translateX: dx }];
-    }
+    // extrapolation error can never accumulate past one frame. Same
+    // rotate-mutate-assign as the paced-out branch above.
+    const bufIdx = (scrollBufIdx.value + 1) % 3;
+    scrollBufIdx.value = bufIdx;
+    const buf = scrollTransformBufs.value[bufIdx]!;
+    (buf[0] as { translateX: number }).translateX = dx;
+    scrollTransform.value = buf;
     s.lastRecordedW = w;
     s.lastRecordedH = h;
     s.lastFrameTimestamp = now_ms;

@@ -80,6 +80,19 @@ export interface LineCacheSlot {
   cutY: number;
   endTangent: number; // tangent the prefix actually ended with (post-clamp)
 
+  /**
+   * Monotonic counter bumped every time `prefix` is rebuilt — i.e. in the one
+   * place `slot.prefix` is written, the miss branch of `updateLinePaths`.
+   *
+   * This is the whole invalidation key for anything downstream that caches a
+   * *rendering* of `prefix` (the scroll layer's SkPicture). "Has the prefix
+   * changed since I recorded it?" is exactly one question, and copying the 13
+   * `kFoo` dimensions into a second key to re-answer it is a mirror that goes
+   * stale the moment a 14th dimension is added to `lineCacheHits`. One counter
+   * cannot.
+   */
+  buildRev: number;
+
   // Invalidation key — flat numbers only, compared field-by-field so a
   // per-frame check allocates nothing. Validity is `prefix !== null` (no
   // separate boolean — the two are always written together). `layout.w`
@@ -116,6 +129,7 @@ export function createLineCacheSlot(): LineCacheSlot {
     cutX: 0,
     cutY: 0,
     endTangent: 0,
+    buildRev: 0,
     kDataRev: 0,
     kDataSource: 0,
     kLen: 0,
@@ -187,9 +201,10 @@ export function lineCacheHits(
  * Returns 0 for a slot with no prefix (tRef/xRefAtBuild are both still 0
  * only by coincidence there, so callers should gate on `slot.prefix`).
  *
- * Identical formula to `scrollLayer.ts`'s `scrollLayerDx` — a scroll-layer
- * slot wrapping the prefix picture takes its `tRef`/`xRefAtBuild` straight
- * from this slot, and the two then agree by construction.
+ * The scroll layer (draw/scrollLayer.ts) uses this same function against this
+ * same slot rather than mirroring `tRef`/`xRefAtBuild` into a slot of its own:
+ * its picture is a recording *of* `slot.prefix`, so the picture and the
+ * translated path are the same geometry and must move by the same number.
  */
 export function lineScrollDx(slot: LineCacheSlot, layout: ChartLayout): number {
   'worklet';
@@ -216,6 +231,12 @@ export function lineScrollDx(slot: LineCacheSlot, layout: ChartLayout): number {
  * path: it isn't part of the invalidation key, so — matching the pre-split
  * behavior exactly — it's still recomputed fresh by the caller every frame
  * rather than trusted from a prior build.
+ *
+ * `splitStroke` (the declarative scroll layer is stroking `tailScratch`
+ * instead of `scratch` this frame) makes the combined path *unread as a
+ * stroke* — but NOT unused: the fill polygon is built by extending `scratch`,
+ * so it is only genuinely dead work when there is no fill. Hence the guard is
+ * `splitStroke && !wantFill`, and with fill on the assembly is unchanged.
  */
 export function assembleLineTail(
   slot: LineCacheSlot,
@@ -226,9 +247,11 @@ export function assembleLineTail(
   lastY: number,
   tipX: number,
   tipY: number,
-  firstY: number
+  firstY: number,
+  splitStroke: boolean = false
 ): void {
   'worklet';
+  if (splitStroke && !wantFill) return;
   const dx = lineScrollDx(slot, layout);
 
   // Assemble the stroke path: translated prefix + live tail.
@@ -398,7 +421,9 @@ export function updateLinePaths(
   visLen: number,
   visFirstT: number,
   visLastT: number,
-  visLastV: number
+  visLastV: number,
+  /** Forwarded to `assembleLineTail` — see its doc comment. */
+  splitStroke: boolean = false
 ): boolean {
   'worklet';
   const N = decimated.length;
@@ -417,6 +442,8 @@ export function updateLinePaths(
 
   if (!hit) {
     slot.prefix = ensured(slot.prefix, makePath);
+    // The ONE place `prefix` is written, so the ONE place `buildRev` moves.
+    slot.buildRev++;
     const prefix = slot.prefix;
     prefix.rewind();
     prefix.moveTo(pts[0]![0], pts[0]![1]);
@@ -452,7 +479,8 @@ export function updateLinePaths(
     pts[N - 1]![1],
     pts[N]![0],
     pts[N]![1],
-    pts[0]![1]
+    pts[0]![1],
+    splitStroke
   );
 
   return true;

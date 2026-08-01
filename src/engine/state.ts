@@ -141,22 +141,15 @@ export interface EngineState {
    * sub-recording — same reasoning as `gridLayerCache` above. */
   lineScrollCache: SkiaCache;
 
-  // --- Scroll-transform extrapolation (see useLivelineEngine's frame
-  // callback). Picture re-recording is paced to ~60fps, but translating an
-  // already-recorded picture is nearly free, so the scroll transform is
-  // allowed to update on every vsync — 120fps on a ProMotion display. On a
-  // vsync that the pacing gate skips there is no `layout` (it is computed
-  // inside engineStep), so `dx` cannot be recomputed; it is linearly
-  // extrapolated from the last two *recorded* frames instead.
-  //
-  // Extrapolating the observed motion, rather than recomputing from
-  // windowSecs/chartW, is deliberate: it needs no copy of the engine's
-  // time-advance rules, so it cannot drift out of sync with them, and it
-  // handles pause, window transitions and time-debt catch-up for free —
-  // whatever the chart actually did over the last interval is what it is
-  // assumed to keep doing for the next few milliseconds. Every recorded
-  // frame overwrites the extrapolation with the exact value, so error can
-  // never accumulate across more than one skipped vsync.
+  // --- Scroll-transform extrapolation. On a vsync the frame-pacing gate
+  // skips, the scroll layer's translate is extrapolated from the last two
+  // recorded frames instead of recomputed. Full rationale in
+  // engine/scrollExtrapolate.ts, which owns it.
+  /** Whether the last recorded frame published a scroll picture — i.e.
+   * whether there is anything for the extrapolated transform to move. Set
+   * from `result.scrollPicture !== null`, where the answer is already
+   * known. */
+  scrollActive: boolean;
   /** dx at the last recorded frame. */
   scrollDxLast: number;
   /** Timestamp (ms) of the last recorded frame; -1 before the first. */
@@ -334,6 +327,7 @@ export function createEngineState(
     gridLayerCache: createSkiaCache(),
     lineScroll: createScrollLayerSlot<SkPicture>(),
     lineScrollCache: createSkiaCache(),
+    scrollActive: false,
     scrollDxLast: 0,
     scrollDxLastT: -1,
     scrollDxRate: 0,

@@ -313,6 +313,13 @@ export function drawLine(
   const isScrubbing = scrubX !== null;
   const visLen = visible.length;
 
+  // The caller's request to stroke only the tail (the scroll layer has already
+  // composited the prefix). Read up here, before the cache branches, purely so
+  // the assembly below can skip building the combined `scratch` path when
+  // nothing will read it — see `assembleLineTail`. Only *honored* on frames
+  // where the cache is actually in use, which is what `splitStroke` below adds.
+  const wantSplitStroke = pathCache?.splitPrefixStroke === true;
+
   // Cross-frame path cache: the key/identity check runs FIRST, before any
   // per-frame array is built. On a hit, decimateMinMax and the O(decimated)
   // interior-points loop (in the miss branch below) are skipped entirely —
@@ -361,7 +368,8 @@ export function drawLine(
       tailY,
       tipX,
       tailY,
-      firstY
+      firstY,
+      wantSplitStroke
     );
     cacheReady = true;
     pts = [
@@ -416,7 +424,8 @@ export function drawLine(
         visLen,
         visible[0]!.time,
         visible[visLen - 1]!.time,
-        visible[visLen - 1]!.value
+        visible[visLen - 1]!.value,
+        wantSplitStroke
       );
   }
 
@@ -431,10 +440,7 @@ export function drawLine(
   // pts[N-1], pts[N] on a rebuild — which is exactly what
   // `assembleLineTail` was handed, so the tail-only path joins the
   // translated prefix at the identical point with the identical tangent.
-  const splitStroke =
-    cacheReady &&
-    pathCache !== undefined &&
-    pathCache.splitPrefixStroke === true;
+  const splitStroke = cacheReady && wantSplitStroke;
   if (splitStroke) {
     const n = pts.length;
     assembleLineTailStroke(

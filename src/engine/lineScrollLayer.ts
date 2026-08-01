@@ -33,14 +33,10 @@ import { writeLineScrollKey } from '../draw/lineScrollLayer';
  *
  * ## Why the clip is baked in, not applied at composite time
  *
- * `draw/scrollLayer.ts`'s invariant 2 has each slot clip to its own region
- * *at composite time*, because its intended consumer composites with
- * `ctx.clipRect` + `ctx.translate` + `ctx.drawPicture`. This consumer does
- * not: it composites through a Skia `<Group transform>` node in the
- * declarative tree, which applies a matrix and nothing else, and adding a
- * clip there would mean another node whose rect changes with layout. So the
- * clip is recorded into the picture, in build-time coordinates, and
- * `slot.clipX..clipH` stay unused (`setScrollLayerClip` is never called).
+ * The composite is a Skia `<Group transform>` node in the declarative tree,
+ * which applies a matrix and nothing else; clipping there would mean another
+ * node whose rect changes with layout. So `drawLine`'s clip is recorded into
+ * the picture instead, in build-time coordinates.
  *
  * That is sound here specifically because the layer only ever moves
  * *horizontally*:
@@ -103,13 +99,9 @@ export function updateLineScrollLayer(
   // alpha 1 in the unblended `palette.line`.
   strokeLinePath(subCtx, palette, prefix, 1);
 
-  // `tRef`/`xRefAtBuild` are taken straight from the line cache slot rather
-  // than recomputed, so `scrollLayerDx` and `lineScrollDx` agree by
-  // construction (see the note on `lineScrollDx`).
-  scrollLayerBuilt(
-    slot,
-    recorder.finishRecordingAsPicture(),
-    lineSlot.tRef,
-    lineSlot.xRefAtBuild
-  );
+  // No position reference is stored on the slot: the picture is a rendering
+  // of `lineSlot.prefix`, so the caller translates it with
+  // `lineScrollDx(lineSlot, layout)` — the same number `assembleLineTail`
+  // offsets the path by, so the two cannot disagree.
+  scrollLayerBuilt(slot, recorder.finishRecordingAsPicture());
 }

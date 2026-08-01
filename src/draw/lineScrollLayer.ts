@@ -39,10 +39,10 @@ import {
  */
 
 /**
- * Composite alpha the prefix stroke would be drawn at this frame, as the
- * `alpha` argument for `scrollLayerUsable`. Returns 1 only when the whole
- * line pipeline is at full opacity *and* untransformed, i.e. when
- * compositing a pre-recorded picture is pixel-identical to drawing live:
+ * True when the prefix stroke may be composited from a pre-recorded picture
+ * this frame — i.e. when the whole line pipeline is at full opacity *and*
+ * untransformed, so compositing is pixel-identical to drawing live. Three
+ * things disqualify a frame:
  *
  * - `chartReveal < 1` — the reveal morph / loading / empty crossfade. The
  *   line is drawn at a breathing alpha, in a blended color, and its geometry
@@ -58,42 +58,44 @@ import {
  *   frame and the scroll layer (outside that translate) would tear away
  *   from the rest of the chart.
  *
- * Returns 0, not the true fractional alpha: `scrollLayerUsable` only ever
- * asks "is this >= 1", and inventing a partial alpha would suggest the
- * layer could be faded, which `ctx.drawPicture` cannot do (see
- * `scrollLayer.ts` invariant 1).
+ * A boolean, not an alpha: the first two conditions are opacity conditions
+ * and the third is a transform condition, and `scrollLayerUsable` only ever
+ * asks "is this >= 1" anyway. Returning a fraction would suggest the layer
+ * could be faded, which `ctx.drawPicture` cannot do (see `scrollLayer.ts`'s
+ * alpha invariant).
  */
-export function lineScrollLayerAlpha(
+export function canCompositeLineScroll(
   chartReveal: number,
   scrubAmount: number,
   shakeAmplitude: number
-): number {
+): boolean {
   'worklet';
-  if (chartReveal < 1) return 0;
-  if (scrubAmount > 0) return 0;
-  if (shakeAmplitude > 0) return 0;
-  return 1;
+  if (chartReveal < 1) return false;
+  if (scrubAmount > 0) return false;
+  if (shakeAmplitude > 0) return false;
+  return true;
 }
-
 /**
  * Writes this frame's candidate key for the prefix picture: begin, then one
  * push per dimension, unconditionally and always in this order (the push
  * order *is* the field identity — see the doc comment on
  * `ScrollLayerSlot`).
  *
- * The key is the line cache slot's **committed** key, verbatim, plus what a
- * picture bakes that a path does not (stroke color and width) plus
- * `pad.left`. Keying off the committed key rather than off this frame's raw
- * inputs is the point: the recorded picture is a rendering of
- * `slot.prefix`, so it is stale exactly when `slot.prefix` has been rebuilt,
- * and `slot.kFoo` is precisely the identity `slot.prefix` was built from.
- * Re-deriving the same dimensions from `layout`/`visible` would be a second
- * copy of `lineCacheHits` that could drift from the first.
+ * Four dimensions, and no more, because the picture is a rendering of
+ * `lineSlot.prefix` and the only question worth asking is **"has that prefix
+ * been rebuilt since I recorded it?"** `lineSlot.buildRev` answers exactly
+ * that, in one number, from the one place `prefix` is written. Copying the 13
+ * `kFoo` dimensions of `lineCacheHits` in here instead would re-derive the
+ * same answer from a mirror that silently misses any 14th dimension added to
+ * the line cache later.
  *
- * `pad.left` is the one dimension the line cache deliberately omits (it is a
- * pure x-shift, absorbed by `dx`) but this layer needs: the composite clip
- * is baked into the recording at `pad.left - 1`, so a padding change must
- * re-record.
+ * The other three are what a *picture* bakes that the path did not:
+ *
+ * - `palette.lineWidth` / `palette.line` — stroke geometry and color are
+ *   recorded into the picture; the cached path carries neither.
+ * - `pad.left` — deliberately omitted from the line cache's key (it is a
+ *   pure x-shift, absorbed by `dx`), but the composite clip is baked into
+ *   this recording at `pad.left - 1`, so a padding change must re-record.
  */
 export function writeLineScrollKey<Picture>(
   slot: ScrollLayerSlot<Picture>,
@@ -103,19 +105,7 @@ export function writeLineScrollKey<Picture>(
 ): void {
   'worklet';
   scrollLayerBeginKey(slot);
-  scrollLayerPushNum(slot, lineSlot.kDataRev);
-  scrollLayerPushNum(slot, lineSlot.kDataSource);
-  scrollLayerPushNum(slot, lineSlot.kLen);
-  scrollLayerPushNum(slot, lineSlot.kFirstT);
-  scrollLayerPushNum(slot, lineSlot.kLastT);
-  scrollLayerPushNum(slot, lineSlot.kLastV);
-  scrollLayerPushNum(slot, lineSlot.kMin);
-  scrollLayerPushNum(slot, lineSlot.kMax);
-  scrollLayerPushNum(slot, lineSlot.kWindow);
-  scrollLayerPushNum(slot, lineSlot.kH);
-  scrollLayerPushNum(slot, lineSlot.kPadTop);
-  scrollLayerPushNum(slot, lineSlot.kPadBottom);
-  scrollLayerPushNum(slot, lineSlot.kChartW);
+  scrollLayerPushNum(slot, lineSlot.buildRev);
   scrollLayerPushNum(slot, padLeft);
   scrollLayerPushNum(slot, palette.lineWidth);
   scrollLayerPushRef(slot, palette.line);

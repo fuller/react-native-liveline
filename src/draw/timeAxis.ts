@@ -53,6 +53,31 @@ export interface TimeAxisState {
 }
 
 const FADE = 0.08;
+/** Width of the fade-out band at each end of the axis, in px. */
+const FADE_ZONE = 50;
+
+// NOTE: worklet declaration order — these two are hoisted to module scope
+// (rather than being reallocated as closures on every frame) and are therefore
+// declared BEFORE `drawTimeAxis`, which calls them. See the same NOTE at
+// draw/canvas2d.ts.
+
+/** Label opacity as a function of screen x: 1 in the body of the axis, ramping
+ * to 0 across `FADE_ZONE` px at either end. `chartLeft`/`chartRight` are
+ * parameters rather than captured so this can live at module scope. */
+function edgeAlpha(x: number, chartLeft: number, chartRight: number): number {
+  'worklet';
+  const fromEdge = Math.min(x - chartLeft, chartRight - x);
+  if (fromEdge >= FADE_ZONE) return 1;
+  if (fromEdge <= 0) return 0;
+  return fromEdge / FADE_ZONE;
+}
+
+/** Left-to-right label ordering — the overlap resolution below walks the
+ * labels in screen order. */
+function byX(a: TimeLabelEntry, b: TimeLabelEntry): number {
+  'worklet';
+  return a.x - b.x;
+}
 
 export function drawTimeAxis(
   ctx: Ctx2D,
@@ -69,16 +94,6 @@ export function drawTimeAxis(
   const chartLeft = pad.left;
   const chartRight = layout.w - pad.right;
   const chartW = chartRight - chartLeft;
-  const fadeZone = 50;
-
-  const edgeAlpha = (x: number): number => {
-    const fromLeft = x - chartLeft;
-    const fromRight = chartRight - x;
-    const fromEdge = Math.min(fromLeft, fromRight);
-    if (fromEdge >= fadeZone) return 1;
-    if (fromEdge <= 0) return 0;
-    return fromEdge / fadeZone;
-  };
 
   ctx.font = ctx.fonts.label;
 
@@ -159,7 +174,7 @@ export function drawTimeAxis(
   for (const [key, label] of state.labels) {
     const x = toX(key / 100);
     const isTarget = targets.has(key);
-    const target = isTarget ? edgeAlpha(x) : 0;
+    const target = isTarget ? edgeAlpha(x, chartLeft, chartRight) : 0;
     let next = lerp(label.alpha, target, FADE, dt);
     if (Math.abs(next - target) < 0.02) next = target;
     if (next < 0.01 && target === 0 && !isTarget) {
@@ -209,7 +224,7 @@ export function drawTimeAxis(
     poolIdx++;
     labels.push(entry);
   }
-  labels.sort((a, b) => a.x - b.x);
+  labels.sort(byX);
 
   // Resolve overlaps: when two labels collide, keep the higher-alpha one.
   // This gives a clean one-time crossover (no flickering) because one alpha

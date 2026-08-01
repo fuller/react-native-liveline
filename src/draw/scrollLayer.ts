@@ -1,5 +1,3 @@
-import type { ChartLayout } from '../types';
-
 /**
  * Generic cross-frame cache for a **scroll layer**: an SkPicture recorded
  * once in build-time screen coordinates and re-composited every frame at a
@@ -11,42 +9,40 @@ import type { ChartLayout } from '../types';
  * that the chart scrolls left because "now" advanced; for that content a
  * rebuild is pure waste.
  *
- * Composition at draw time is always this shape (see `scrollLayerDx`):
+ * Composition happens in the declarative tree, not with canvas calls: the
+ * picture goes under a transform-only Skia `<Group>`, whose `translateX` is
+ * the slot's `dx` (`lineScrollDx` in draw/lineCache.ts for today's one
+ * consumer). See `Liveline.tsx`:
  *
- * ```ts
- * ctx.save();
- * ctx.clipRect(slot.clipX, slot.clipY, slot.clipW, slot.clipH);
- * ctx.translate(scrollLayerDx(slot, layout), 0);
- * ctx.drawPicture(slot.picture);
- * ctx.restore();
+ * ```tsx
+ * <Group transform={scrollTransform}>
+ *   <Picture picture={scrollPicture} />
+ * </Group>
  * ```
  *
- * Two invariants future maintainers must not break:
+ * A transform-only `<Group>` creates no layer, so the scroll layer and the
+ * per-frame screen picture share one surface and composite in tree order.
+ * Any clipping the content needs is recorded *into* the picture at build time
+ * (see engine/lineScrollLayer.ts, which explains why that is sound for
+ * horizontal-only motion); this module deliberately holds no clip state.
  *
- * 1. **Alpha must be exactly 1.** `ctx.drawPicture` ignores `globalAlpha` —
- *    Skia's drawPicture takes no paint argument (canvas2d.ts:139-143). Fading
- *    a picture would need `saveLayerAlpha`, which allocates an offscreen
- *    render target, precisely the Android cost this work exists to avoid. So
- *    every consumer gates on `scrollLayerUsable(slot, alpha)` and falls back
- *    to live drawing during the reveal morph, the loading/empty crossfade and
- *    scrub dimming. draw/index.ts:218 already gates the grid picture on
- *    `reveal >= 1` for exactly this reason.
- * 2. **Each slot clips to its OWN region.** `lineScroll`/`candleScroll` clip
- *    to the plot area; `axisScroll` clips to the axis strip below it
- *    (`h - pad.bottom` downward). A single shared chart-area clip would erase
- *    the axis entirely. The clip is also the guard that stops translated
- *    content from bleeding into the padding, the badge, or across the
- *    plot/axis boundary — a picture's cull rect lives in its own build-time
- *    coordinate space, so translating it can carry content into places the
- *    cull rect never intended to cover.
+ * The invariant future maintainers must not break: **alpha must be exactly
+ * 1.** `ctx.drawPicture` ignores `globalAlpha` — Skia's drawPicture takes no
+ * paint argument (canvas2d.ts:139-143). Fading a picture would need
+ * `saveLayerAlpha`, which allocates an offscreen render target, precisely the
+ * Android cost this work exists to avoid. So every consumer gates on
+ * `scrollLayerUsable(slot, alpha)` and falls back to live drawing during the
+ * reveal morph, the loading/empty crossfade and scrub dimming.
+ * draw/index.ts:218 already gates the grid picture on `reveal >= 1` for
+ * exactly this reason.
  *
  * A second consequence of caching pictures rather than paths: **palette is
  * part of every scroll-layer key**. A picture bakes color, stroke width and
  * gradient stops that a path did not.
  *
  * Kept free of Skia imports (`Picture` is a structural type parameter, exactly
- * like draw/gridLayer.ts) so jest can exercise the key comparison and the `dx`
- * arithmetic with fake picture objects, with no native binding loaded.
+ * like draw/gridLayer.ts) so jest can exercise the key comparison with fake
+ * picture objects, with no native binding loaded.
  */
 
 /**
@@ -61,13 +57,14 @@ export type ScrollLayerKeyRef = string | object | null;
  *
  * The existing caches (lineCache, gridLayer) spell every key dimension out as
  * a named `kFoo` field and compare them field-by-field. That is ideal when one
- * module owns one cache — but this module is shared by three consumers
- * (`lineScroll`, `candleScroll`, `axisScroll`) whose key dimensions barely
- * overlap: the line keys on data revision and spline geometry, candles on the
- * closed-candle revision and candle width, the axis on the tick interval and
- * the visible label set. Named fields would force every new dimension of any
- * consumer to be added to this module, i.e. every consumer would either fork
- * the module or bloat it with fields the other two never read.
+ * module owns one cache — but this module is **designed for N consumers and
+ * currently has exactly 1** (`lineScroll`; `candleScroll` and `axisScroll` are
+ * plausible future ones). Their key dimensions would barely overlap: the line
+ * keys on whether its prefix was rebuilt, candles on the closed-candle
+ * revision and candle width, the axis on the tick interval and the visible
+ * label set. Named fields would force every new dimension of any consumer to
+ * be added to this module, i.e. every consumer would either fork the module or
+ * bloat it with fields the others never read.
  *
  * So the key is a **positional array the consumer pushes into**, and the
  * comparison lives here, written exactly once. A consumer adds a dimension by
@@ -103,20 +100,6 @@ export interface ScrollLayerSlot<Picture> {
    * `LineCacheSlot.prefix` and `GridLayerSlot.picture`. */
   picture: Picture | null;
 
-  /** The time value whose screen X was captured in `xRefAtBuild`. Anything
-   * with a stable identity across the picture's life works — in practice the
-   * time of the layer's leftmost content. */
-  tRef: number;
-  /** `layout.toX(tRef)` evaluated at build time. */
-  xRefAtBuild: number;
-
-  // Per-slot composite clip, in screen coordinates. See invariant 2 above:
-  // slots do NOT share one region.
-  clipX: number;
-  clipY: number;
-  clipW: number;
-  clipH: number;
-
   /** Committed numeric key (the inputs the current `picture` was built from). */
   kNum: number[];
   kNumLen: number;
@@ -136,12 +119,6 @@ export function createScrollLayerSlot<Picture>(): ScrollLayerSlot<Picture> {
   'worklet';
   return {
     picture: null,
-    tRef: 0,
-    xRefAtBuild: 0,
-    clipX: 0,
-    clipY: 0,
-    clipW: 0,
-    clipH: 0,
     kNum: [],
     kNumLen: 0,
     kRef: [],
@@ -162,26 +139,6 @@ export function createScrollLayerSlot<Picture>(): ScrollLayerSlot<Picture> {
 // this file is therefore declared *after* the one it calls:
 //   scrollLayerCommitKey  →  called by scrollLayerBuilt
 // Keep that ordering if you add anything here.
-
-/**
- * Sets a slot's composite clip region. Split out from the build so a consumer
- * can refresh the region on a layout change without discarding the picture:
- * the clip is applied at composite time and is not baked into the recording,
- * so it is deliberately NOT part of the invalidation key.
- */
-export function setScrollLayerClip<Picture>(
-  slot: ScrollLayerSlot<Picture>,
-  x: number,
-  y: number,
-  w: number,
-  h: number
-): void {
-  'worklet';
-  slot.clipX = x;
-  slot.clipY = y;
-  slot.clipW = w;
-  slot.clipH = h;
-}
 
 /**
  * Starts building this frame's candidate key. Call before any push; every
@@ -227,7 +184,7 @@ export function scrollLayerPushRef<Picture>(
  * Read-only — it does not commit. A consumer calls this before doing any
  * expensive work, exactly as `lineCacheHits` is called before building
  * `decimated`/`pts`, and this is the ONE place the comparison is written so
- * the three consumers cannot drift apart.
+ * consumers cannot drift apart.
  *
  * Arity is compared first: a consumer that changed how many dimensions it
  * pushes gets a miss rather than a silent prefix match.
@@ -260,55 +217,29 @@ export function scrollLayerCommitKey<Picture>(
 }
 
 /**
- * Records a completed rebuild: stores the picture, captures the build-time
- * reference `dx` will be measured against, and commits the key.
+ * Records a completed rebuild: stores the picture and commits the key. The
+ * two are written together on purpose — `picture` is the slot's validity
+ * flag, so committing one without the other would leave the slot advertising
+ * a picture it is stale for (or throwing away a good one).
  *
- * These three are written together on purpose. `picture` is the slot's
- * validity flag, and a picture whose `xRefAtBuild` came from a *different*
- * `toX` than the one that positioned its content would render permanently
- * offset — a bug with no visible symptom until the chart scrolls. Pass
- * `xRefAtBuild` from the same `layout.toX(tRef)` call the recording used.
+ * The slot deliberately keeps no build-time position reference of its own.
+ * The offset the picture is composited at is the consumer's to supply, from
+ * whatever the recording was made from — for today's one consumer that is
+ * `lineScrollDx(lineSlot, layout)` against the line cache slot the prefix
+ * came from, so the picture and the transform cannot disagree.
  */
 export function scrollLayerBuilt<Picture>(
   slot: ScrollLayerSlot<Picture>,
-  picture: Picture,
-  tRef: number,
-  xRefAtBuild: number
+  picture: Picture
 ): void {
   'worklet';
   slot.picture = picture;
-  slot.tRef = tRef;
-  slot.xRefAtBuild = xRefAtBuild;
   scrollLayerCommitKey(slot);
 }
 
 /**
- * Horizontal offset to composite this slot's picture at, in screen pixels.
- *
- * Always recomputed against the build-time reference, **never accumulated**.
- * This is the identical formula lineCache.ts:189 uses, and the reasoning at
- * lineCache.ts:166-175 applies unchanged: right after a fresh build, `tRef`
- * and `xRefAtBuild` come from the very same `layout.toX` this frame, so the
- * subtraction is exactly 0 with no special-casing; on a reused picture it
- * recovers the full horizontal scroll since the build in one subtraction, so
- * per-frame rounding error cannot compound over the thousands of frames a
- * picture may survive.
- *
- * Never rewrite this as `slot.dx += perFrameDelta`. That drifts, and it drifts
- * slowly enough to pass every test and only show up as a visibly misaligned
- * axis after a chart has been left running for minutes.
- */
-export function scrollLayerDx<Picture>(
-  slot: ScrollLayerSlot<Picture>,
-  layout: ChartLayout
-): number {
-  'worklet';
-  return layout.toX(slot.tRef) - slot.xRefAtBuild;
-}
-
-/**
  * True when the slot may be composited this frame: it holds a picture and the
- * composite alpha is exactly 1. See invariant 1 above — `drawPicture` ignores
+ * composite alpha is exactly 1. See the header invariant — `drawPicture` ignores
  * `globalAlpha`, so at alpha < 1 the consumer must fall back to live drawing
  * rather than compositing at the wrong opacity. `>= 1` rather than `=== 1`
  * mirrors draw/index.ts:218's `reveal >= 1`, which tolerates a lerp that

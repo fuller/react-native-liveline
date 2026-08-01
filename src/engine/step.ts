@@ -29,9 +29,9 @@ import type { EngineState } from './state';
 import { drawBadge } from './badge';
 import { updateGridLayer } from './gridLayer';
 import { updateLineScrollLayer } from './lineScrollLayer';
-import { lineCacheHits } from '../draw/lineCache';
-import { lineScrollLayerAlpha } from '../draw/lineScrollLayer';
-import { scrollLayerDx, scrollLayerUsable } from '../draw/scrollLayer';
+import { lineCacheHits, lineScrollDx } from '../draw/lineCache';
+import { canCompositeLineScroll } from '../draw/lineScrollLayer';
+import { scrollLayerUsable } from '../draw/scrollLayer';
 import {
   computeAdaptiveSpeed,
   updateWindowTransition,
@@ -1733,7 +1733,7 @@ export function engineStep(
     //
     // On frames where the prefix provably hasn't changed (a `lineCacheHits`
     // hit) and the whole line pipeline is at full opacity and untransformed
-    // (`lineScrollLayerAlpha`), the prefix is composited from an SkPicture
+    // (`canCompositeLineScroll`), the prefix is composited from an SkPicture
     // under a `<Group transform>` and `drawLine` strokes only the tail. Any
     // other frame draws the line exactly as before, whole, and publishes an
     // empty scroll layer — the same both-branches shape the grid picture
@@ -1747,14 +1747,14 @@ export function engineStep(
     // which is the value `drawFrame`'s own translate will use this frame.
     const dataSource = dataSourceOf(useStash, s.pausedData !== null);
     const visLastPoint = visible[visible.length - 1]!;
-    const layerAlpha = lineScrollLayerAlpha(
+    const canComposite = canCompositeLineScroll(
       chartReveal,
       s.scrubAmount,
       cfg.degenOptions ? s.shakeState.amplitude : 0
     );
     let splitPrefixStroke = false;
     if (
-      layerAlpha >= 1 &&
+      canComposite &&
       lineCacheHits(
         s.lineCache,
         layout,
@@ -1774,11 +1774,16 @@ export function engineStep(
         s.lineScrollCache,
         fonts
       );
-      splitPrefixStroke = scrollLayerUsable(s.lineScroll, layerAlpha);
+      // `canComposite` is already true inside this branch, so the alpha
+      // argument is 1; `scrollLayerUsable` keeps its alpha-1 contract for a
+      // future consumer that genuinely is alpha-driven.
+      splitPrefixStroke = scrollLayerUsable(s.lineScroll, 1);
     }
     if (splitPrefixStroke) {
       out.scrollPicture = s.lineScroll.picture;
-      out.scrollDx = scrollLayerDx(s.lineScroll, layout);
+      // Same dx the cached prefix path is offset by — the picture IS that
+      // path, rendered (see draw/lineCache.ts's `lineScrollDx`).
+      out.scrollDx = lineScrollDx(s.lineCache, layout);
     }
 
     // Draw canvas content (everything except badge)

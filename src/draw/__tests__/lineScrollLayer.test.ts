@@ -1,4 +1,4 @@
-import { lineScrollLayerAlpha, writeLineScrollKey } from '../lineScrollLayer';
+import { canCompositeLineScroll, writeLineScrollKey } from '../lineScrollLayer';
 import {
   createScrollLayerSlot,
   scrollLayerBuilt,
@@ -29,26 +29,12 @@ function makePalette(overrides: Partial<LivelinePalette> = {}) {
   } as LivelinePalette;
 }
 
-/** A line cache slot with a plausible committed key (the fields
- * `writeLineScrollKey` reads). `prefix` is set so the slot looks built. */
+/** A line cache slot that looks like it has a built prefix. `buildRev` is
+ * the only field `writeLineScrollKey` reads off it. */
 function makeLineSlot(): LineCacheSlot {
   const slot = createLineCacheSlot();
   slot.prefix = {} as LineCacheSlot['prefix'];
-  slot.tRef = 1000;
-  slot.xRefAtBuild = 10;
-  slot.kDataRev = 7;
-  slot.kDataSource = 0;
-  slot.kLen = 120;
-  slot.kFirstT = 1000;
-  slot.kLastT = 1060;
-  slot.kLastV = 101.5;
-  slot.kMin = 90;
-  slot.kMax = 110;
-  slot.kWindow = 60;
-  slot.kH = 200;
-  slot.kPadTop = 10;
-  slot.kPadBottom = 20;
-  slot.kChartW = 370;
+  slot.buildRev = 7;
   return slot;
 }
 
@@ -60,44 +46,36 @@ function record(
   palette: LivelinePalette
 ) {
   writeLineScrollKey(slot, lineSlot, padLeft, palette);
-  scrollLayerBuilt(slot, PICTURE, lineSlot.tRef, lineSlot.xRefAtBuild);
+  scrollLayerBuilt(slot, PICTURE);
 }
 
-describe('lineScrollLayerAlpha', () => {
-  it('is 1 only when fully revealed, not scrubbing and not shaking', () => {
-    expect(lineScrollLayerAlpha(1, 0, 0)).toBe(1);
+describe('canCompositeLineScroll', () => {
+  it('is true only when fully revealed, not scrubbing and not shaking', () => {
+    expect(canCompositeLineScroll(1, 0, 0)).toBe(true);
   });
 
-  it('is 0 during the reveal morph', () => {
-    expect(lineScrollLayerAlpha(0, 0, 0)).toBe(0);
-    expect(lineScrollLayerAlpha(0.999, 0, 0)).toBe(0);
+  it('is false during the reveal morph', () => {
+    expect(canCompositeLineScroll(0, 0, 0)).toBe(false);
+    expect(canCompositeLineScroll(0.999, 0, 0)).toBe(false);
   });
 
   it('tolerates a reveal lerp that overshoots its target', () => {
     // Mirrors scrollLayerUsable's `>= 1` rather than `=== 1`.
-    expect(lineScrollLayerAlpha(1.0001, 0, 0)).toBe(1);
+    expect(canCompositeLineScroll(1.0001, 0, 0)).toBe(true);
   });
 
-  it('is 0 for any non-zero scrub, and 1 again once scrub snaps to 0', () => {
-    expect(lineScrollLayerAlpha(1, 0.4, 0)).toBe(0);
+  it('is false for any non-zero scrub, and true again once scrub snaps to 0', () => {
+    expect(canCompositeLineScroll(1, 0.4, 0)).toBe(false);
     // updateHoverState snaps scrubAmount to exactly 0 below 0.01, which is
     // what makes the gate re-enable rather than asymptote.
-    expect(lineScrollLayerAlpha(1, 0, 0)).toBe(1);
+    expect(canCompositeLineScroll(1, 0, 0)).toBe(true);
   });
 
-  it('is 0 while the degen shake is translating the frame', () => {
-    expect(lineScrollLayerAlpha(1, 0, 0.2)).toBe(0);
-    expect(lineScrollLayerAlpha(1, 0, 12)).toBe(0);
-  });
-
-  it('never returns a partial alpha — drawPicture cannot fade', () => {
-    const values = [
-      lineScrollLayerAlpha(0.5, 0, 0),
-      lineScrollLayerAlpha(1, 0.5, 0),
-      lineScrollLayerAlpha(1, 0, 1),
-      lineScrollLayerAlpha(1, 0, 0),
-    ];
-    for (const v of values) expect(v === 0 || v === 1).toBe(true);
+  it('is false while the degen shake is translating the frame', () => {
+    // A transform condition, not an opacity one — which is why this predicate
+    // is a boolean rather than an alpha.
+    expect(canCompositeLineScroll(1, 0, 0.2)).toBe(false);
+    expect(canCompositeLineScroll(1, 0, 12)).toBe(false);
   });
 });
 
@@ -118,29 +96,35 @@ describe('writeLineScrollKey', () => {
     expect(scrollLayerKeyHits(slot)).toBe(false);
   });
 
-  it.each([
-    ['kDataRev', (s: LineCacheSlot) => (s.kDataRev = 8)],
-    ['kDataSource', (s: LineCacheSlot) => (s.kDataSource = 1)],
-    ['kLen', (s: LineCacheSlot) => (s.kLen = 121)],
-    ['kFirstT', (s: LineCacheSlot) => (s.kFirstT = 1001)],
-    ['kLastT', (s: LineCacheSlot) => (s.kLastT = 1061)],
-    ['kLastV', (s: LineCacheSlot) => (s.kLastV = 101.6)],
-    ['kMin', (s: LineCacheSlot) => (s.kMin = 89)],
-    ['kMax', (s: LineCacheSlot) => (s.kMax = 111)],
-    ['kWindow', (s: LineCacheSlot) => (s.kWindow = 300)],
-    ['kH', (s: LineCacheSlot) => (s.kH = 201)],
-    ['kPadTop', (s: LineCacheSlot) => (s.kPadTop = 11)],
-    ['kPadBottom', (s: LineCacheSlot) => (s.kPadBottom = 21)],
-    ['kChartW', (s: LineCacheSlot) => (s.kChartW = 371)],
-  ])('misses when the line cache key changes: %s', (_name, mutate) => {
+  it('misses when the prefix has been rebuilt (buildRev moved)', () => {
+    // The one dimension that matters: the picture is a rendering of
+    // `prefix`, so it is stale exactly when `prefix` was rebuilt. One counter
+    // stands in for all 13 of `lineCacheHits`' dimensions, and cannot go
+    // stale when a 14th is added there.
     const slot = createScrollLayerSlot<FakePicture>();
     const lineSlot = makeLineSlot();
     const palette = makePalette();
     record(slot, lineSlot, 10, palette);
 
-    mutate(lineSlot);
+    lineSlot.buildRev++;
     writeLineScrollKey(slot, lineSlot, 10, palette);
     expect(scrollLayerKeyHits(slot)).toBe(false);
+  });
+
+  it('hits across changes to the line cache key that did NOT rebuild the prefix', () => {
+    // The scroll key deliberately does not mirror `lineCacheHits`. A cache
+    // key field moving without a rebuild is not a state `updateLinePaths`
+    // produces (a changed key IS a miss IS a rebuild), so tracking it here
+    // would only ever throw away a valid picture.
+    const slot = createScrollLayerSlot<FakePicture>();
+    const lineSlot = makeLineSlot();
+    const palette = makePalette();
+    record(slot, lineSlot, 10, palette);
+
+    lineSlot.kDataRev = 99;
+    lineSlot.kLastV = 0;
+    writeLineScrollKey(slot, lineSlot, 10, palette);
+    expect(scrollLayerKeyHits(slot)).toBe(true);
   });
 
   it('misses on a pad.left change — the clip is baked into the picture', () => {
@@ -198,8 +182,7 @@ describe('writeLineScrollKey', () => {
     const refLen = slot.nRefLen;
 
     const other = makeLineSlot();
-    other.kDataSource = 2;
-    other.kLastV = 0;
+    other.buildRev = 99;
     writeLineScrollKey(slot, other, 0, makePalette({ line: '#000' }));
     expect(slot.nNumLen).toBe(numLen);
     expect(slot.nRefLen).toBe(refLen);

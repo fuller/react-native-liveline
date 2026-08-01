@@ -159,3 +159,31 @@ different things, and the frame callback converts the former into the latter.
 - **Text subpixel.** Nothing text-bearing is in the scroll layer in this design,
   so the jitter risk flagged earlier does not apply yet. It returns if the axis
   is ever moved in.
+
+---
+
+## Addendum 2026-08-01 — what the cleanup pass changed
+
+This document is a dated record of what was decided *before* implementation.
+Two API names it references no longer exist; the design itself is unchanged.
+
+- **`scrollLayerDx` is gone.** It and `lineCache.ts`'s `lineScrollDx` had
+  identical bodies and both doc comments claimed to be the single place the
+  `toX(tRef) - xRefAtBuild` subtraction was written. `lineScrollDx` survives;
+  `ScrollLayerSlot` no longer carries `tRef`/`xRefAtBuild` at all, because they
+  were copied from the line cache slot and could therefore go stale.
+- **`setScrollLayerClip` and the `clipX/clipY/clipW/clipH` fields are gone,**
+  along with the "each slot clips to its OWN region" invariant above. They
+  described an imperative `ctx.clipRect` + `ctx.translate` + `ctx.drawPicture`
+  composite. The implementation composites through `<Group transform>` and
+  bakes the clip into the recording instead, so none of it ever executed.
+- **The scroll layer's invalidation key is four dimensions, not sixteen.** A
+  `buildRev` counter on `LineCacheSlot` replaced the thirteen dimensions that
+  were being copied verbatim out of the line cache's own key — which would have
+  silently missed a fourteenth had one ever been added there.
+
+Also added, and not anticipated here: `MIN_FRAME_INTERVAL_MS` and
+`MAX_SCROLL_EXTRAPOLATION_MS` turn out to be coupled by two inequalities, now
+documented in `engine/constants.ts` and asserted in `engine/__tests__/
+constants.test.ts`. Tuning either alone can silently disable high-refresh
+scrolling in a way only 120Hz hardware would reveal.
