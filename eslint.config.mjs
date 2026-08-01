@@ -24,6 +24,10 @@ export default defineConfig([
     },
   },
   {
-    ignores: ['node_modules/', 'lib/'],
+    // `.claude/` holds agent worktrees, each a full copy of the repo. Without
+    // this, `yarn lint` reports errors from files that are not in the working
+    // tree at all — the same trap `jest.modulePathIgnorePatterns` covers in
+    // package.json. Git already excludes the path via .git/info/exclude.
+    ignores: ['node_modules/', 'lib/', '.claude/'],
   },
 ]);
