@@ -242,6 +242,32 @@ export interface EngineState {
     oldWidth: number;
   };
   prevCandleData: { candles: CandlePoint[]; width: number };
+  /** `cfg.candlesRev` the `prevCandleData.candles` copy was taken at, so the
+   * copy is skipped on every frame where the candle buffer hasn't changed
+   * (same mechanism, and same reason, as `lastDataStashRev` above — the only
+   * consumer is the candle-width-change branch, which fires when the *user*
+   * changes candle width). `.width` is still refreshed every frame: it must
+   * always describe the previous frame's width for that branch to read.
+   * -1 (never a real revision) forces the first copy. */
+  prevCandleDataRev: number;
+  /** Pooled frozen copy of the live candle for the reverse-morph stash.
+   * `s.displayCandle` (== `smoothLive`, and the last element of the visible
+   * array) is lerped in place every frame, so `lastCandles = visible.slice()`
+   * alone would leave the "frozen" stash still moving. Safe to pool: it is
+   * only written on `hasData` frames and only read on `!hasData` frames (see
+   * `useStash` in step.ts), which are disjoint. */
+  lastLiveStash: CandlePoint;
+  /** Scratch array for candle mode's per-frame *old*-candles visible build
+   * (the candle-width morph's outgoing set). Reused/refilled like
+   * `candleVisibleScratch`; never retained past the frame — `drawCandleFrame`
+   * reads `oldCandles` synchronously (and `.map()`s it into a fresh array
+   * when the OHLC collapse is active). */
+  candleOldVisibleScratch: CandlePoint[];
+  /** Pooled candle handed to `drawCandleFrame` as `closePriceCandle` — the
+   * raw live candle with its close replaced by the smoothed close. Read
+   * synchronously by `drawClosePrice` and never retained, so one reused
+   * object beats a fresh spread every candle frame. */
+  closePriceScratch: CandlePoint;
   pausedCandles: CandlePoint[] | null;
   pausedLive: CandlePoint | null;
   pausedLineData: LivelinePoint[] | null;
@@ -464,6 +490,10 @@ export function createEngineState(
       oldWidth: candleWidth,
     },
     prevCandleData: { candles: [], width: candleWidth },
+    prevCandleDataRev: -1,
+    lastLiveStash: { time: 0, open: 0, high: 0, low: 0, close: 0 },
+    candleOldVisibleScratch: [],
+    closePriceScratch: { time: 0, open: 0, high: 0, low: 0, close: 0 },
     pausedCandles: null,
     pausedLive: null,
     pausedLineData: null,
