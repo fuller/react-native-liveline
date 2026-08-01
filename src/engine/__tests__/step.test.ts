@@ -220,6 +220,50 @@ describe('live value readout', () => {
     expect(out.valueText).toBe('');
   });
 
+  // The three early returns that draw the empty/loading state and bail used to
+  // skip the readout publish entirely, so `null` reached the caller and it kept
+  // showing whatever the PREVIOUS mode last wrote — the exact bug the candle and
+  // multi publishes above were added to fix, still live on the paths where no
+  // chart is drawn at all. Found by an independent review AFTER those two
+  // landed, which is why each of the three gets its own test here.
+
+  it('publishes a blank when single-series has no points in the window', () => {
+    const s = makeState();
+    const out = run(
+      s,
+      makeCfg({ showValue: true }),
+      // Points far in the past: real data, but nothing inside the window.
+      pointsEnding(1).map((p) => ({ ...p, time: p.time - 100000 })),
+      []
+    );
+    expect(out.valueText).toBe('');
+  });
+
+  it('publishes a blank when multi-series has no visible series', () => {
+    const s = makeState();
+    const out = run(
+      s,
+      makeCfg({
+        showValue: true,
+        isMultiSeries: true,
+        multiSeries: [{ id: 'a', value: 100, palette: PALETTE }],
+        multiRevs: { a: 1 },
+      }),
+      [],
+      [],
+      { a: [] }
+    );
+    expect(out.valueText).toBe('');
+  });
+
+  it('leaves the readout alone when the consumer never asked for it', () => {
+    // showValue false must publish NOTHING — null keeps the caller from
+    // touching a shared value it does not own, and costs nothing per frame.
+    const s = makeState();
+    const out = run(s, makeCfg({ showValue: false }), [], []);
+    expect(out.valueText).toBeNull();
+  });
+
   it('candle mode publishes its own value rather than leaving it stale', () => {
     const now = Date.now() / 1000;
     const candles: CandlePoint[] = [

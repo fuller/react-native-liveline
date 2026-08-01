@@ -154,6 +154,28 @@ function multiSeriesData(
  *
  * Candle mode is not yet ported; it renders the loading/empty fallback.
  */
+/**
+ * Publish a blank live-value readout before an early return.
+ *
+ * `StepOutput.valueText` is `null` by default and the caller treats `null` as
+ * "leave the shared value unchanged" — which is right for the modes that do
+ * not own the readout, but wrong for an early return that draws no chart at
+ * all. Without this, a chart that mounts with no data, loses every point out
+ * of the window, or switches to a multi-series config whose data has not
+ * arrived, keeps displaying whatever number the *previous* mode last wrote,
+ * forever.
+ *
+ * `''` (not `null`) is the point: it is a real value that overwrites the stale
+ * one. Only written when the consumer actually asked for the readout, so
+ * charts without `showValue` publish nothing and cost nothing.
+ */
+function publishBlankValue(out: StepOutput, cfg: EngineConfigStep): void {
+  'worklet';
+  if (!cfg.showValue) return;
+  out.valueText = '';
+  out.valueColor = '';
+}
+
 export function engineStep(
   ctx: Ctx2D,
   cfg: EngineConfigStep,
@@ -464,6 +486,7 @@ export function engineStep(
       );
     }
     drawEdgeFade(ctx, pad.left, h);
+    publishBlankValue(out, cfg);
     return out;
   }
 
@@ -1468,6 +1491,7 @@ export function engineStep(
         );
       }
       drawEdgeFade(ctx, pad.left, h);
+      publishBlankValue(out, cfg);
       return out;
     }
 
@@ -1772,6 +1796,7 @@ export function engineStep(
         );
       }
       drawEdgeFade(ctx, pad.left, h);
+      publishBlankValue(out, cfg);
       return out;
     }
 

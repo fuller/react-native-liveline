@@ -891,3 +891,74 @@ describe('split stroke (prefix / tail)', () => {
 // decimateMinMax's own correctness (including the bucketSecs absolute-grid
 // path) is covered in math/__tests__/math.test.ts, next to its other tests —
 // this file only tests what's specific to the cache built on top of it.
+
+// ── buildRev ───────────────────────────────────────────────────────────────
+//
+// `slot.buildRev` is the sole invalidation signal the scroll layer keys on
+// (`writeLineScrollKey` pushes it as dimension 0) and the input to
+// `observeScrollRate`'s `layerChanged` guard. Deleting the `buildRev++` in
+// `updateLinePaths`' miss branch used to break BOTH of those and fail no test:
+// lineScrollLayer.test.ts bumps the field by hand, so nothing asserted that a
+// real rebuild moves it. These close that gap.
+
+describe('buildRev tracks actual prefix rebuilds', () => {
+  const NOW = 1000;
+  const N = 20;
+
+  it('increments on a rebuild and stays put on a cache hit', () => {
+    const hz = makeHarness();
+    const layout = makeLayout(NOW, 0, 100);
+    const data = makeData(N, NOW);
+
+    const start = hz.slot.buildRev;
+    update(hz, layout, data, data[N - 1]!.value, NOW);
+    const afterBuild = hz.slot.buildRev;
+    expect(afterBuild).toBeGreaterThan(start);
+
+    // Same inputs — a hit. The prefix is reused, so the revision must not move,
+    // or the scroll layer would re-record a picture it already has.
+    update(hz, layout, data, data[N - 1]!.value, NOW);
+    expect(hz.slot.buildRev).toBe(afterBuild);
+  });
+
+  it('increments again when new data forces another rebuild', () => {
+    const hz = makeHarness();
+    const layout = makeLayout(NOW, 0, 100);
+    const data = makeData(N, NOW);
+
+    update(hz, layout, data, data[N - 1]!.value, NOW);
+    const afterFirst = hz.slot.buildRev;
+
+    // A new point: different length and last-time, so the key misses.
+    const grown = [...data, { time: NOW + 1, value: data[N - 1]!.value + 1 }];
+    update(
+      hz,
+      layout,
+      grown,
+      grown[grown.length - 1]!.value,
+      NOW + 1,
+      false,
+      1
+    );
+
+    expect(hz.slot.buildRev).toBeGreaterThan(afterFirst);
+  });
+
+  it('moves strictly forward — never reused for a different prefix', () => {
+    // The scroll layer treats equal buildRev as "same picture". If the counter
+    // could ever repeat a value for different geometry, a stale picture would
+    // composite with no visual symptom until it scrolled.
+    const hz = makeHarness();
+    const layout = makeLayout(NOW, 0, 100);
+    const seen = new Set<number>();
+
+    for (let i = 0; i < 12; i++) {
+      const data = makeData(N + i, NOW + i);
+      update(hz, layout, data, data[data.length - 1]!.value, NOW + i, false, i);
+      seen.add(hz.slot.buildRev);
+    }
+
+    // Every rebuild produced a distinct revision.
+    expect(seen.size).toBe(12);
+  });
+});
