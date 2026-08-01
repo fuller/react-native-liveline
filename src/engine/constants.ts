@@ -35,6 +35,19 @@ export const QUIESCENT_FRAME_THRESHOLD = 90;
 // while still roughly halving work on a 120Hz display.
 export const MIN_FRAME_INTERVAL_MS = 15;
 
+// --- Scroll-transform extrapolation window ---
+// On a vsync that frame pacing skips, the scroll layer's translate is
+// extrapolated from the last two recorded frames rather than recomputed (see
+// EngineState.scrollDxRate). That is only sound across a gap of roughly one
+// paced interval; beyond it the stored rate is stale and extrapolating would
+// fling the layer somewhere it never was. Any longer gap — quiescence
+// resuming, the app returning from background, a JS-thread stall — leaves the
+// transform untouched until the next recorded frame supplies an exact value.
+// 20ms is just over one 60Hz interval, so it covers the intended case (a
+// 120Hz vsync landing ~8ms after a record) with margin for jitter, and
+// nothing else.
+export const MAX_SCROLL_EXTRAPOLATION_MS = 20;
+
 // --- Candle-specific constants ---
 export const CANDLE_LERP_SPEED = 0.25;
 // Relative snap threshold for the live candle's OHLC lerp (see step.ts).

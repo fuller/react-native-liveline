@@ -140,6 +140,29 @@ export interface EngineState {
   /** Dedicated Skia object cache for the line scroll layer's own
    * sub-recording — same reasoning as `gridLayerCache` above. */
   lineScrollCache: SkiaCache;
+
+  // --- Scroll-transform extrapolation (see useLivelineEngine's frame
+  // callback). Picture re-recording is paced to ~60fps, but translating an
+  // already-recorded picture is nearly free, so the scroll transform is
+  // allowed to update on every vsync — 120fps on a ProMotion display. On a
+  // vsync that the pacing gate skips there is no `layout` (it is computed
+  // inside engineStep), so `dx` cannot be recomputed; it is linearly
+  // extrapolated from the last two *recorded* frames instead.
+  //
+  // Extrapolating the observed motion, rather than recomputing from
+  // windowSecs/chartW, is deliberate: it needs no copy of the engine's
+  // time-advance rules, so it cannot drift out of sync with them, and it
+  // handles pause, window transitions and time-debt catch-up for free —
+  // whatever the chart actually did over the last interval is what it is
+  // assumed to keep doing for the next few milliseconds. Every recorded
+  // frame overwrites the extrapolation with the exact value, so error can
+  // never accumulate across more than one skipped vsync.
+  /** dx at the last recorded frame. */
+  scrollDxLast: number;
+  /** Timestamp (ms) of the last recorded frame; -1 before the first. */
+  scrollDxLastT: number;
+  /** Observed dx change per ms across the last two recorded frames. */
+  scrollDxRate: number;
   /** Cross-frame closed-candle body+wick path cache, candle mode (see
    * draw/candleCache). */
   candleCache: CandleCacheSlot;
@@ -311,6 +334,9 @@ export function createEngineState(
     gridLayerCache: createSkiaCache(),
     lineScroll: createScrollLayerSlot<SkPicture>(),
     lineScrollCache: createSkiaCache(),
+    scrollDxLast: 0,
+    scrollDxLastT: -1,
+    scrollDxRate: 0,
     candleCache: createCandleCacheSlot(),
 
     scrubAmount: 0,

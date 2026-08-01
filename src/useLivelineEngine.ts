@@ -44,6 +44,10 @@ import {
   MIN_FRAME_INTERVAL_MS,
 } from './engine/constants';
 import {
+  observeScrollRate,
+  extrapolateScrollDx,
+} from './engine/scrollExtrapolate';
+import {
   computeDelta,
   pointsEqual,
   candlesEqual,
@@ -501,6 +505,40 @@ export function useLivelineEngine(
       s.lastFrameTimestamp !== null &&
       now_ms - s.lastFrameTimestamp < MIN_FRAME_INTERVAL_MS
     ) {
+      // Paced out — no re-record this vsync. But translating an
+      // already-recorded picture is nearly free, so the scroll layer's
+      // transform still advances, giving the scrolled content the display's
+      // full refresh rate (120fps on ProMotion) while recording stays at ~60.
+      // This is the point of putting scroll in a <Group transform> at all;
+      // without it the layer would judder in lockstep with the paced
+      // recording and the split would have bought a draw call and nothing
+      // else.
+      //
+      // `dx` cannot be recomputed here — it needs `layout`, which lives
+      // inside engineStep — so it is extrapolated from the last two recorded
+      // frames (see EngineState.scrollDxRate). Guarded three ways: only when
+      // a scroll layer is actually compositing, only when a rate has been
+      // observed, and only across a gap short enough for that rate to still
+      // be true (MAX_SCROLL_EXTRAPOLATION_MS).
+      //
+      // Known consequence: the prefix now moves at 120Hz while the tail is
+      // re-recorded at 60Hz, so on skipped vsyncs they shear by one frame of
+      // scroll — chartW / (windowSecs * refreshHz), i.e. ~0.25px on a 10s
+      // window and ~0.08px on 30s. Sub-pixel, but it is a shimmer at the
+      // join rather than a clean offset. Verify on real 120Hz hardware; the
+      // simulator renders at 60 and cannot show this either way.
+      if (scrollPicture.value !== emptyPicture.value) {
+        const dxEx = extrapolateScrollDx(
+          s.scrollDxLast,
+          s.scrollDxLastT,
+          s.scrollDxRate,
+          now_ms
+        );
+        if (dxEx !== null && scrollDx.value !== dxEx) {
+          scrollDx.value = dxEx;
+          scrollTransform.value = [{ translateX: dxEx }];
+        }
+      }
       return;
     }
 
@@ -538,6 +576,23 @@ export function useLivelineEngine(
     const nextScroll = result.scrollPicture ?? emptyPicture.value;
     if (scrollPicture.value !== nextScroll) scrollPicture.value = nextScroll;
     const dx = result.scrollDx;
+    // Observed dx-per-ms across the last two RECORDED frames, used to
+    // extrapolate the transform on paced-out vsyncs above. Derived from what
+    // the chart actually did rather than from windowSecs/chartW, so pause,
+    // window transitions and time-debt catch-up need no special cases. Only
+    // updated across a gap short enough to be a real paced interval —
+    // otherwise a quiescence or background gap would divide a large dx change
+    // by a large dt and bake in a meaningless rate.
+    s.scrollDxRate = observeScrollRate(
+      s.scrollDxLast,
+      s.scrollDxLastT,
+      dx,
+      now_ms
+    );
+    s.scrollDxLast = dx;
+    s.scrollDxLastT = now_ms;
+    // Exact value always wins over whatever a skipped vsync extrapolated, so
+    // extrapolation error can never accumulate past one frame.
     if (scrollDx.value !== dx) {
       scrollDx.value = dx;
       scrollTransform.value = [{ translateX: dx }];
