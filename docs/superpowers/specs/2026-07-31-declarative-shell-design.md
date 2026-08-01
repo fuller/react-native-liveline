@@ -1,7 +1,8 @@
 # Declarative render shell (react-native-graph-shaped)
 
 **Date:** 2026-07-31
-**Status:** Design approved, implementation dispatched
+**Status:** Implemented and verified against this document 2026-08-01
+(see "Conformance check" at the end)
 **Branch:** `perf/declarative-shell` (off `e2c56d8`)
 
 ## Goal
@@ -187,3 +188,66 @@ Also added, and not anticipated here: `MIN_FRAME_INTERVAL_MS` and
 documented in `engine/constants.ts` and asserted in `engine/__tests__/
 constants.test.ts`. Tuning either alone can silently disable high-refresh
 scrolling in a way only 120Hz hardware would reveal.
+
+## Addendum 2 — the high-refresh transform, added after this doc was written
+
+`33c23cb` added behaviour this document does not describe, and it is arguably
+the most consequential runtime change on the branch. Recorded here so the spec
+is not silently incomplete.
+
+**Picture recording stays paced at ~60fps; the scroll transform advances on
+every vsync** — 120fps on a ProMotion display. Translating an already-recorded
+picture is nearly free, so the layer moves at the display's refresh rate while
+recording cost is unchanged. Without this the layer would judder in lockstep
+with the paced recording, and the split would have bought a draw call rather
+than smoother motion.
+
+On a vsync the pacing gate skips there is no `layout` — it is computed inside
+`engineStep` — so `dx` cannot be recomputed and is linearly extrapolated from
+the last two *recorded* frames (`engine/scrollExtrapolate.ts`, Skia-free so
+jest can reach it). Extrapolating observed motion rather than recomputing from
+`windowSecs`/`chartW` keeps no second copy of the engine's time-advance rules,
+so pause, window transitions and time-debt catch-up need no special cases.
+Every recorded frame overwrites with the exact value, so error cannot
+accumulate past one vsync.
+
+Three guards, all load-bearing:
+- Only when a layer is actually compositing (`EngineState.scrollActive`).
+- Only within `MAX_SCROLL_EXTRAPOLATION_MS` of the last recorded frame — a
+  quiescence resume or a JS stall leaves the transform untouched rather than
+  flinging it.
+- **`layerChanged`** — no rate is observable across a frame where the layer's
+  identity moved. `dx` is an offset *of a particular recorded picture*, so two
+  frames 16ms apart can report `-35` then `0` with the line perfectly
+  continuous, because the prefix was rebuilt in between. Differencing those
+  describes a jump that never happened; unguarded, the next paced-out vsync
+  shoves the layer ~35px sideways and the following frame snaps it back. The
+  gap bound cannot catch this — a rebuild happens on an ordinary 16ms frame.
+
+**Known and unverified:** the prefix now moves at 120Hz while the tail is
+re-recorded at 60Hz, so on skipped vsyncs they shear by one frame of scroll —
+`chartW / (windowSecs * refreshHz)`, about 0.25px on a 10s window and 0.08px on
+30s. Sub-pixel, but a shimmer at the join rather than a clean offset. The iOS
+simulator renders at 60Hz and cannot show it either way; this needs real
+ProMotion hardware.
+
+## Conformance check — 2026-08-01
+
+Verified against the implementation at `0350072`, claim by claim:
+
+| Claim | Status |
+|---|---|
+| Four-node tree, no conditionals | matches |
+| `scrollPicture` = prefix stroke only | matches |
+| `screenPicture` = everything else | matches |
+| Fill deliberately not split, still built whole | matches |
+| Alpha gate, binary, via `scrollLayerUsable` | matches |
+| `dx` never accumulated | matches (no `dx +=` anywhere in src/) |
+| No double-draw — split selects tail, not both | matches |
+| Nothing text-bearing in the scroll layer | matches |
+| Addendum 1: `scrollLayerDx` removed | matches |
+| Addendum 1: clip API removed | matches |
+| Addendum 1: key is 4 dimensions | matches (`buildRev`, `padLeft`, `lineWidth`, `line`) |
+
+The one divergence was omission, not contradiction: the high-refresh transform
+above shipped without a design record. Now written down.
