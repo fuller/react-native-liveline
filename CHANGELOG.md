@@ -52,6 +52,24 @@ All notable changes to this project will be documented in this file.
   isolation, and undetectable on device (the whole time axis is 4.2% of a
   core).
 
+- **The scroll layer's transform now runs at the display's full refresh
+  rate.** Picture re-recording stays paced at ~60fps, but translating an
+  already-recorded picture is nearly free, so the `<Group transform>` advances
+  on every vsync — 120fps on a ProMotion display — while recording cost is
+  unchanged. On a vsync that pacing skips there is no layout to recompute `dx`
+  from, so it is linearly extrapolated from the last two recorded frames and
+  overwritten with the exact value on the next one; a quiescence resume, a
+  return from background or a JS stall leaves the transform untouched rather
+  than flinging it. Note the consequence: the prefix moves at 120Hz while the
+  tail is re-recorded at 60Hz, so on skipped vsyncs they shear by one frame of
+  scroll — roughly 0.25px on a 10s window, 0.08px on 30s. Sub-pixel, but
+  unverified: the iOS simulator renders at 60Hz and cannot show it either way.
+- **`MIN_FRAME_INTERVAL_MS` and `MAX_SCROLL_EXTRAPOLATION_MS` are coupled** by
+  two inequalities that are now documented in `engine/constants.ts` and
+  asserted in `engine/__tests__/constants.test.ts`. Tuning either alone can
+  silently disable high-refresh scrolling in a way only 120Hz hardware would
+  reveal.
+
 ### Removed
 
 - **`src/draw/timeAxisLayer.ts` and its tests** — pure label-selection logic
