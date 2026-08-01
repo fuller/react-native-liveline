@@ -121,6 +121,48 @@ function roundedRect(
 }
 
 /**
+ * Draws a candle body's rounded rect at (cx, bodyTop, bodyH). Was a per-call
+ * closure inside drawCandlesticks capturing ctx/halfBody/bodyW/radius —
+ * hoisted to module scope taking those as explicit params instead, since it
+ * runs unconditionally on every drawCandlesticks call (both the batched and
+ * non-batched paths use it) and a fresh closure was being allocated every
+ * candle frame regardless of whether scrub dimming was active.
+ */
+function bodyRectAt(
+  ctx: Ctx2D,
+  cx: number,
+  bodyTop: number,
+  bodyH: number,
+  halfBody: number,
+  bodyW: number,
+  radius: number
+) {
+  'worklet';
+  roundedRect(ctx, cx - halfBody, bodyTop, bodyW, bodyH, radius);
+}
+
+/**
+ * Spatial dimming factor for the non-batched scrub-dimming fallback — a
+ * candle fades the further it sits past the scrub cursor. Was a per-call
+ * closure capturing scrubX/bodyW/scrubDim; hoisted to module scope taking
+ * those as explicit params since it (like bodyRectAt above) was allocated
+ * unconditionally even on frames/paths where it's never invoked (the batched
+ * fast path never calls it).
+ */
+function candleSpatialDim(
+  cx: number,
+  scrubX: number,
+  bodyW: number,
+  scrubDim: number
+): number {
+  'worklet';
+  const dist = cx - scrubX;
+  if (dist <= 0) return 1;
+  const dimT = Math.min(dist / (bodyW * 1.5), 1);
+  return 1 - scrubDim * 0.5 * dimT;
+}
+
+/**
  * Draw OHLC candlesticks with live candle glow + scrub dimming.
  * Respects incoming ctx.globalAlpha for cross-fade/reveal support.
  *
@@ -190,16 +232,6 @@ export function drawCandlesticks(
   const bearColor: SkColor = hasAccent
     ? blendToAccent(BEAR_RGB, accentColor!, accentBlend)
     : rgbColor(BEAR_RGB[0], BEAR_RGB[1], BEAR_RGB[2]);
-
-  const bodyRect = (cx: number, bodyTop: number, bodyH: number) => {
-    roundedRect(ctx, cx - halfBody, bodyTop, bodyW, bodyH, radius);
-  };
-  const spatialDim = (cx: number): number => {
-    const dist = cx - scrubX;
-    if (dist <= 0) return 1;
-    const dimT = Math.min(dist / (bodyW * 1.5), 1);
-    return 1 - scrubDim * 0.5 * dimT;
-  };
 
   let liveCandle: CandlePoint | null = null;
 
@@ -292,7 +324,15 @@ export function drawCandlesticks(
           if (cx + halfBody < padL || cx - halfBody > padR) continue;
           const bodyTop = toY(Math.max(c.open, c.close));
           const bodyBottom = toY(Math.min(c.open, c.close));
-          bodyRect(cx, bodyTop, Math.max(1, bodyBottom - bodyTop));
+          bodyRectAt(
+            ctx,
+            cx,
+            bodyTop,
+            Math.max(1, bodyBottom - bodyTop),
+            halfBody,
+            bodyW,
+            radius
+          );
           bodyCount++;
         }
         if (bodyCount > 0) {
@@ -341,7 +381,8 @@ export function drawCandlesticks(
 
       const isBull = c.close >= c.open;
       const color = isBull ? bullColor : bearColor;
-      ctx.globalAlpha = baseAlpha * spatialDim(cx);
+      ctx.globalAlpha =
+        baseAlpha * candleSpatialDim(cx, scrubX, bodyW, scrubDim);
 
       const bodyTop = toY(Math.max(c.open, c.close));
       const bodyBottom = toY(Math.min(c.open, c.close));
@@ -367,7 +408,15 @@ export function drawCandlesticks(
 
       ctx.fillStyle = color;
       ctx.beginPath();
-      bodyRect(cx, bodyTop, Math.max(1, bodyBottom - bodyTop));
+      bodyRectAt(
+        ctx,
+        cx,
+        bodyTop,
+        Math.max(1, bodyBottom - bodyTop),
+        halfBody,
+        bodyW,
+        radius
+      );
       ctx.fill();
 
       ctx.globalAlpha = baseAlpha;
@@ -399,7 +448,9 @@ export function drawCandlesticks(
       const wickTop = toY(liveCandle.high);
       const wickBottom = toY(liveCandle.low);
 
-      const candleAlpha = canBatch ? liveAlpha : liveAlpha * spatialDim(cx);
+      const candleAlpha = canBatch
+        ? liveAlpha
+        : liveAlpha * candleSpatialDim(cx, scrubX, bodyW, scrubDim);
       ctx.globalAlpha = baseAlpha * candleAlpha;
 
       ctx.lineCap = 'round';
@@ -421,7 +472,7 @@ export function drawCandlesticks(
 
       ctx.fillStyle = liveColor;
       ctx.beginPath();
-      bodyRect(cx, bodyTop, bodyH);
+      bodyRectAt(ctx, cx, bodyTop, bodyH, halfBody, bodyW, radius);
       ctx.fill();
 
       if (showLivePulse) {
@@ -431,7 +482,7 @@ export function drawCandlesticks(
         ctx.shadowBlur = 8;
         ctx.fillStyle = liveColor;
         ctx.beginPath();
-        bodyRect(cx, bodyTop, bodyH);
+        bodyRectAt(ctx, cx, bodyTop, bodyH, halfBody, bodyW, radius);
         ctx.fill();
         ctx.restore();
       }

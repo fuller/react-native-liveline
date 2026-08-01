@@ -1,5 +1,4 @@
 import type { LivelinePalette, ChartLayout, OrderbookData } from '../types';
-import { rgbColor } from '../math/color';
 import type { SkColor } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 
@@ -32,6 +31,11 @@ export interface OrderbookState {
   outlineColorG: number;
   outlineColorB: number;
   outlineColor: string;
+  // Pooled SkColor scratch buffers for the per-label fill blend (mixColorInto
+  // below) — one Float32Array(4) per label slot, mutated in place every
+  // frame instead of allocating a fresh one per label per frame (see
+  // mixColorInto for why reusing these across labels/frames is safe).
+  colorPool: SkColor[];
 }
 
 // NOTE: these consts MUST be declared above createOrderbookState. The
@@ -48,6 +52,10 @@ const MAX_SPEED = 160; // px/s during big activity
 
 export function createOrderbookState(): OrderbookState {
   'worklet';
+  const colorPool: SkColor[] = [];
+  for (let i = 0; i < MAX_LABELS; i++) {
+    colorPool.push(new Float32Array(4) as unknown as SkColor);
+  }
   return {
     labels: [],
     spawnTimer: 0,
@@ -61,19 +69,41 @@ export function createOrderbookState(): OrderbookState {
     outlineColorG: -1,
     outlineColorB: -1,
     outlineColor: '',
+    colorPool,
   };
 }
 
-function mixColor(
-  from: [number, number, number],
-  to: [number, number, number],
+// Blends `from` -> `to` by `t` and writes the RGBA into `out` in place
+// (out is a pooled Float32Array(4) — see OrderbookState.colorPool) instead
+// of allocating a fresh SkColor per call. This runs once per active label
+// per frame (up to MAX_LABELS = 50 times), so at 60fps that's up to ~3,000
+// Float32Array allocations/sec avoided.
+//
+// Aliasing: `out` is safe to mutate and reuse because every write is
+// consumed synchronously before the next write happens. The draw loop below
+// does, per label, in order: mixColorInto(...) -> ctx.fillStyle = fillColor
+// -> ctx.fillText(...). fillText's paint.setColor(style) (see canvas2d.ts's
+// applyStyle) copies the 4 floats into Skia's native paint state
+// synchronously on the same JS-thread call — there is no deferred/async read
+// of the array later. So by the time the loop moves on to the next label and
+// reuses the *next* pool slot (or, next frame, wraps back to slot 0), Skia
+// has already consumed every previously-written value; nothing is reading a
+// stale or in-flight reference to a pool slot. Each iteration also uses a
+// distinct slot (indexed by loop position, not label identity), so there is
+// no intra-frame slot collision either.
+function mixColorInto(
+  out: SkColor,
+  from: readonly [number, number, number],
+  to: readonly [number, number, number],
   t: number
 ): SkColor {
   'worklet';
-  const r = Math.round(from[0] + (to[0] - from[0]) * t);
-  const g = Math.round(from[1] + (to[1] - from[1]) * t);
-  const b = Math.round(from[2] + (to[2] - from[2]) * t);
-  return rgbColor(r, g, b);
+  const o = out as unknown as Float32Array;
+  o[0] = Math.round(from[0] + (to[0] - from[0]) * t) / 255;
+  o[1] = Math.round(from[1] + (to[1] - from[1]) * t) / 255;
+  o[2] = Math.round(from[2] + (to[2] - from[2]) * t) / 255;
+  o[3] = 1;
+  return out;
 }
 
 function formatSize(size: number): string {
@@ -271,7 +301,12 @@ export function drawOrderbook(
 
     const colorStrength = l.intensity * fadeIn * fadeOut;
     const baseColor = l.green ? GREEN : RED;
-    const fillColor = mixColor(baseColor, bg, 1 - colorStrength);
+    const fillColor = mixColorInto(
+      state.colorPool[i]!,
+      baseColor,
+      bg,
+      1 - colorStrength
+    );
 
     ctx.strokeStyle = outlineColor;
     ctx.lineWidth = 4;

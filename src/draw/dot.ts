@@ -132,6 +132,58 @@ export function drawSimpleDot(
   ctx.fill();
 }
 
+/**
+ * Draws one chevron stack (up or down) for drawArrows below. Was a per-call
+ * closure inside drawArrows capturing ctx/x/y/palette/baseAlpha/cycle —
+ * hoisted to module scope taking those as explicit params instead, since
+ * drawArrows allocated a fresh closure every frame it ran (60-120x/sec) even
+ * though the closure body itself is identical call to call.
+ */
+function drawChevronStack(
+  ctx: Ctx2D,
+  x: number,
+  y: number,
+  palette: LivelinePalette,
+  baseAlpha: number,
+  cycle: number,
+  dir: -1 | 1,
+  opacity: number
+) {
+  'worklet';
+  if (opacity < 0.01) return;
+  const baseX = x + 19;
+  const baseY = y;
+
+  ctx.save();
+  ctx.strokeStyle = palette.gridLabel;
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let i = 0; i < 2; i++) {
+    // Stagger: arrow 0 brightens at t=0, arrow 1 at t=0.2
+    // Both always visible (min 0.3), cascade just brightens each in sequence
+    const start = i * 0.2;
+    const dur = 0.35;
+    const localT = cycle - start;
+    const wave =
+      localT >= 0 && localT < dur ? Math.sin((localT / dur) * Math.PI) : 0;
+    const pulse = 0.3 + 0.7 * wave;
+
+    ctx.globalAlpha = baseAlpha * opacity * pulse;
+
+    const nudge = dir === -1 ? -3 : 3;
+    const cy = baseY + dir * (i * 8 - 4) + nudge;
+    ctx.beginPath();
+    ctx.moveTo(baseX - 5, cy - dir * 3.5);
+    ctx.lineTo(baseX, cy);
+    ctx.lineTo(baseX + 5, cy - dir * 3.5);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 /** Draw momentum arrows (chevrons) next to the dot. */
 export function drawArrows(
   ctx: Ctx2D,
@@ -175,43 +227,8 @@ export function drawArrows(
   // UP: bottom arrow fires first, then top (energy moves upward).
   // DOWN: top arrow fires first, then bottom.
   const cycle = (now_ms % 1400) / 1400;
-  const drawChevrons = (dir: -1 | 1, opacity: number) => {
-    if (opacity < 0.01) return;
-    const baseX = x + 19;
-    const baseY = y;
-
-    ctx.save();
-    ctx.strokeStyle = palette.gridLabel;
-    ctx.lineWidth = 2.5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    for (let i = 0; i < 2; i++) {
-      // Stagger: arrow 0 brightens at t=0, arrow 1 at t=0.2
-      // Both always visible (min 0.3), cascade just brightens each in sequence
-      const start = i * 0.2;
-      const dur = 0.35;
-      const localT = cycle - start;
-      const wave =
-        localT >= 0 && localT < dur ? Math.sin((localT / dur) * Math.PI) : 0;
-      const pulse = 0.3 + 0.7 * wave;
-
-      ctx.globalAlpha = baseAlpha * opacity * pulse;
-
-      const nudge = dir === -1 ? -3 : 3;
-      const cy = baseY + dir * (i * 8 - 4) + nudge;
-      ctx.beginPath();
-      ctx.moveTo(baseX - 5, cy - dir * 3.5);
-      ctx.lineTo(baseX, cy);
-      ctx.lineTo(baseX + 5, cy - dir * 3.5);
-      ctx.stroke();
-    }
-
-    ctx.restore();
-  };
-
-  drawChevrons(-1, arrows.up);
-  drawChevrons(1, arrows.down);
+  drawChevronStack(ctx, x, y, palette, baseAlpha, cycle, -1, arrows.up);
+  drawChevronStack(ctx, x, y, palette, baseAlpha, cycle, 1, arrows.down);
 
   ctx.globalAlpha = baseAlpha;
 }

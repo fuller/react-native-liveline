@@ -824,22 +824,25 @@ export function drawCandleFrame(
     // OHLC expansion uses smoothstep on reveal — this keeps shape and alpha
     // in sync (at 50% visible, candles are ~50% expanded rather than flat).
     const ohlcScale = reveal * reveal * (3 - 2 * reveal);
-    const collapseC = (c: CandlePoint): CandlePoint =>
-      ohlcScale >= 0.99
-        ? c
-        : {
-            time: c.time,
-            open: c.close + (c.open - c.close) * ohlcScale,
-            high: c.close + (c.high - c.close) * ohlcScale,
-            low: c.close + (c.low - c.close) * ohlcScale,
-            close: c.close,
-          };
-    const revealCandles =
-      ohlcScale < 0.99 ? opts.candles.map(collapseC) : opts.candles;
-    const revealOld =
-      ohlcScale < 0.99 && opts.oldCandles.length > 0
-        ? opts.oldCandles.map(collapseC)
-        : opts.oldCandles;
+    // collapseC is only ever invoked during the brief reveal-collapse window
+    // (ohlcScale < 0.99); gate its allocation behind that same check instead
+    // of building a fresh closure every candle frame regardless of whether
+    // it's used.
+    let revealCandles = opts.candles;
+    let revealOld = opts.oldCandles;
+    if (ohlcScale < 0.99) {
+      const collapseC = (c: CandlePoint): CandlePoint => ({
+        time: c.time,
+        open: c.close + (c.open - c.close) * ohlcScale,
+        high: c.close + (c.high - c.close) * ohlcScale,
+        low: c.close + (c.low - c.close) * ohlcScale,
+        close: c.close,
+      });
+      revealCandles = opts.candles.map(collapseC);
+      if (opts.oldCandles.length > 0) {
+        revealOld = opts.oldCandles.map(collapseC);
+      }
+    }
 
     ctx.save();
     ctx.clipRect(pad.left - 1, pad.top, chartW + 2, chartH);
