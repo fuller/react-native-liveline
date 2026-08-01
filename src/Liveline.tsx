@@ -32,7 +32,12 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { GestureDetector } from 'react-native-gesture-handler';
-import type { LivelineProps, Momentum, DegenOptions } from './types';
+import type {
+  LivelineProps,
+  Momentum,
+  DegenOptions,
+  WindowOption,
+} from './types';
 import { resolveTheme, resolveSeriesPalettes, SERIES_COLORS } from './theme';
 import { makeDefaultFonts } from './draw/fonts';
 import { useLivelineEngine } from './useLivelineEngine';
@@ -61,6 +66,101 @@ const INDICATOR_TIMING = {
 interface BtnLayout {
   x: number;
   width: number;
+}
+
+/**
+ * `useMemo` keyed by an explicit signature instead of a dependency array.
+ *
+ * A live chart re-renders on every tick, and consumers build most array props
+ * inline, so those arrays are a new *identity* every tick even when nothing in
+ * them changed. Projecting them through here gives the control bars props that
+ * are referentially stable, which is what lets their `memo` actually bail out.
+ */
+function useStableValue<T>(signature: string, build: () => T): T {
+  const ref = useRef<{ signature: string; value: T } | null>(null);
+  if (ref.current === null || ref.current.signature !== signature) {
+    ref.current = { signature, value: build() };
+  }
+  return ref.current.value;
+}
+
+/**
+ * A referentially stable wrapper around an optional consumer callback. Same
+ * reasoning as `useStableValue`: `onModeChange` &co. are typically inline
+ * arrows, so they are a new function on every consumer render. The wrapper is
+ * created once and always dispatches to the latest prop.
+ */
+function useStableHandler<A extends unknown[]>(
+  fn: ((...args: A) => void) | undefined
+) {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current?.(...args), []);
+}
+
+/**
+ * State for the built-in window selector. Only meaningful when `windows` is
+ * supplied; otherwise the `window` prop stays authoritative and this state
+ * sits inert (kept mounted so it survives `windows` appearing later).
+ */
+function useActiveWindow(
+  windows: WindowOption[] | undefined,
+  windowSecs: number,
+  onWindowChange: ((secs: number) => void) | undefined
+) {
+  const [activeWindowSecs, setActiveWindowSecs] = useState(
+    windows && windows.length > 0 ? windows[0]!.secs : windowSecs
+  );
+  const notify = useStableHandler(onWindowChange);
+  const selectWindow = useCallback(
+    (secs: number) => {
+      setActiveWindowSecs(secs);
+      notify(secs);
+    },
+    [notify]
+  );
+  return {
+    activeWindowSecs,
+    effectiveWindowSecs: windows ? activeWindowSecs : windowSecs,
+    selectWindow,
+  };
+}
+
+/** Which series the user has toggled off, plus the engine-facing id list. */
+function useHiddenSeries(
+  seriesCount: number,
+  onSeriesToggle: ((id: string, visible: boolean) => void) | undefined
+) {
+  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
+  const notify = useStableHandler(onSeriesToggle);
+  // Read through a ref so the toggle handler stays referentially stable as
+  // series come and go — it crosses the `memo` boundary into the chip bar.
+  const countRef = useRef(seriesCount);
+  countRef.current = seriesCount;
+
+  const toggleSeries = useCallback(
+    (id: string) => {
+      setHiddenSeries((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+          notify(id, true);
+        } else {
+          // Count visible series — don't hide last one
+          const visibleCount = countRef.current - next.size;
+          if (visibleCount <= 1) return prev;
+          next.add(id);
+          notify(id, false);
+        }
+        return next;
+      });
+    },
+    [notify]
+  );
+
+  const hiddenSeriesIds = useMemo(() => [...hiddenSeries], [hiddenSeries]);
+
+  return { hiddenSeries, hiddenSeriesIds, toggleSeries };
 }
 
 /** Sliding indicator behind the active button in a pill bar. */
@@ -282,6 +382,258 @@ function CandleIcon({ color }: { color: string }) {
   );
 }
 
+/** Time-window selector. Owns the button layouts its indicator tracks. */
+const WindowBar = memo(function WindowBarComponent({
+  bar,
+  isDark,
+  windows,
+  activeSecs,
+  onSelect,
+}: {
+  bar: BarStyle;
+  isDark: boolean;
+  windows: WindowOption[];
+  activeSecs: number;
+  onSelect: (secs: number) => void;
+}) {
+  const [layouts, setLayouts] = useState<Record<number, BtnLayout>>({});
+  const onBtnLayout = useCallback((secs: number, e: LayoutChangeEvent) => {
+    const { x, width } = e.nativeEvent.layout;
+    setLayouts((prev) => {
+      const cur = prev[secs];
+      if (cur && cur.x === x && cur.width === width) return prev;
+      return { ...prev, [secs]: { x, width } };
+    });
+  }, []);
+
+  return (
+    <PillBar
+      bar={bar}
+      isDark={isDark}
+      indicator
+      indicatorLayout={layouts[activeSecs]}
+    >
+      {windows.map((w) => {
+        const isActive = w.secs === activeSecs;
+        return (
+          <Pressable
+            key={w.secs}
+            onLayout={(e) => onBtnLayout(w.secs, e)}
+            onPress={() => onSelect(w.secs)}
+            style={bar.pill}
+          >
+            <Animated.Text
+              style={isActive ? bar.labelActive : bar.labelInactive}
+            >
+              {w.label}
+            </Animated.Text>
+          </Pressable>
+        );
+      })}
+    </PillBar>
+  );
+});
+
+/** Line/candle mode toggle — its own bar with its own sliding indicator. */
+const ModeBar = memo(function ModeBarComponent({
+  bar,
+  isDark,
+  activeMode,
+  onSelect,
+}: {
+  bar: BarStyle;
+  isDark: boolean;
+  activeMode: 'line' | 'candle';
+  onSelect: (mode: 'line' | 'candle') => void;
+}) {
+  const [layouts, setLayouts] = useState<Record<string, BtnLayout>>({});
+  const onBtnLayout = useCallback((key: string, e: LayoutChangeEvent) => {
+    const { x, width } = e.nativeEvent.layout;
+    setLayouts((prev) => {
+      const cur = prev[key];
+      if (cur && cur.x === x && cur.width === width) return prev;
+      return { ...prev, [key]: { x, width } };
+    });
+  }, []);
+
+  return (
+    <PillBar
+      bar={bar}
+      isDark={isDark}
+      indicator
+      indicatorLayout={layouts[activeMode]}
+    >
+      <Pressable
+        onLayout={(e) => onBtnLayout('line', e)}
+        onPress={() => onSelect('line')}
+        style={[styles.iconBtn, bar.iconBtn]}
+      >
+        <LineIcon
+          color={activeMode === 'line' ? bar.activeColor : bar.inactiveColor}
+          active={activeMode === 'line'}
+        />
+      </Pressable>
+      <Pressable
+        onLayout={(e) => onBtnLayout('candle', e)}
+        onPress={() => onSelect('candle')}
+        style={[styles.iconBtn, bar.iconBtn]}
+      >
+        <CandleIcon
+          color={activeMode === 'candle' ? bar.activeColor : bar.inactiveColor}
+        />
+      </Pressable>
+    </PillBar>
+  );
+});
+
+/**
+ * What a series chip needs to draw itself — deliberately *not* the series
+ * itself, whose `data`/`value` change on every tick.
+ */
+interface SeriesChip {
+  id: string;
+  label: string;
+  color: string;
+}
+
+/**
+ * Series toggle chips. No sliding indicator — chips toggle independently, so
+ * there is no single "active" one to track.
+ */
+const SeriesChipBar = memo(function SeriesChipBarComponent({
+  bar,
+  chip,
+  isDark,
+  chips,
+  hidden,
+  compact,
+  faded,
+  onToggle,
+}: {
+  bar: BarStyle;
+  chip: ReturnType<typeof useChipStyle>;
+  isDark: boolean;
+  chips: SeriesChip[];
+  hidden: Set<string>;
+  compact: boolean;
+  /** Keep the chips mounted but invisible (chart left multi-series mode). */
+  faded: boolean;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <PillBar bar={bar} isDark={isDark} faded={faded}>
+      {chips.map((s) => {
+        const isHidden = hidden.has(s.id);
+        return (
+          <Pressable
+            key={s.id}
+            onPress={() => onToggle(s.id)}
+            style={[chip.base, isHidden && chip.off]}
+          >
+            <View
+              style={[
+                chip.dot,
+                { backgroundColor: s.color },
+                isHidden && styles.dimmed,
+              ]}
+            />
+            {!compact && (
+              <Animated.Text style={isHidden ? chip.labelOff : chip.label}>
+                {s.label}
+              </Animated.Text>
+            )}
+          </Pressable>
+        );
+      })}
+    </PillBar>
+  );
+});
+
+/**
+ * The whole controls row, above the chart.
+ *
+ * Memoized, and this is the point of the whole file's shape: a live tick hands
+ * `Liveline` a new `data` array every frame, so `Liveline` itself re-renders
+ * constantly. None of the props below change on a tick, so React bails out
+ * here and the three bars, their style hooks and their `<Canvas>` icons are
+ * skipped entirely. Nothing tick-varying may be added to this prop list.
+ */
+const LivelineControls = memo(function LivelineControlsComponent({
+  windowStyle,
+  isDark,
+  padLeft,
+  windows,
+  activeWindowSecs,
+  onWindowSelect,
+  showModeToggle,
+  activeMode,
+  onModeSelect,
+  showSeriesToggle,
+  seriesChips,
+  seriesFaded,
+  hiddenSeries,
+  seriesToggleCompact,
+  onSeriesToggle,
+}: {
+  windowStyle: WindowStyle;
+  isDark: boolean;
+  padLeft: number;
+  windows: WindowOption[] | undefined;
+  activeWindowSecs: number;
+  onWindowSelect: (secs: number) => void;
+  showModeToggle: boolean;
+  activeMode: 'line' | 'candle';
+  onModeSelect: (mode: 'line' | 'candle') => void;
+  showSeriesToggle: boolean;
+  seriesChips: SeriesChip[];
+  seriesFaded: boolean;
+  hiddenSeries: Set<string>;
+  seriesToggleCompact: boolean;
+  onSeriesToggle: (id: string) => void;
+}) {
+  const bar = useBarStyle(windowStyle, isDark);
+  const chip = useChipStyle(bar, isDark, seriesToggleCompact);
+
+  const showWindows = windows != null && windows.length > 0;
+  if (!showWindows && !showModeToggle && !showSeriesToggle) return null;
+
+  return (
+    <View style={[styles.controlsRow, { marginLeft: padLeft }]}>
+      {showWindows && (
+        <WindowBar
+          bar={bar}
+          isDark={isDark}
+          windows={windows}
+          activeSecs={activeWindowSecs}
+          onSelect={onWindowSelect}
+        />
+      )}
+
+      {showModeToggle && (
+        <ModeBar
+          bar={bar}
+          isDark={isDark}
+          activeMode={activeMode}
+          onSelect={onModeSelect}
+        />
+      )}
+
+      {showSeriesToggle && (
+        <SeriesChipBar
+          bar={bar}
+          chip={chip}
+          isDark={isDark}
+          chips={seriesChips}
+          hidden={hiddenSeries}
+          compact={seriesToggleCompact}
+          faded={seriesFaded}
+          onToggle={onSeriesToggle}
+        />
+      )}
+    </View>
+  );
+});
+
 /**
  * Memoized: in a list of charts (the `active`-prop scenario), unrelated
  * parent re-renders must not re-render every row. Live ticks still pass
@@ -338,13 +690,6 @@ export const Liveline = memo(function LivelineComponent({
   fonts: fontsOverride,
   style,
 }: LivelineProps) {
-  const [windowBtnLayouts, setWindowBtnLayouts] = useState<
-    Record<number, BtnLayout>
-  >({});
-  const [modeBtnLayouts, setModeBtnLayouts] = useState<
-    Record<string, BtnLayout>
-  >({});
-  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
   const lastSeriesPropRef = useRef(seriesProp);
   if (seriesProp && seriesProp.length > 0)
     lastSeriesPropRef.current = seriesProp;
@@ -408,37 +753,15 @@ export const Liveline = memo(function LivelineComponent({
       : {}
     : undefined;
 
-  // Window buttons state
-  const [activeWindowSecs, setActiveWindowSecs] = useState(
-    windows && windows.length > 0 ? windows[0]!.secs : windowSecs
-  );
-  const effectiveWindowSecs = windows ? activeWindowSecs : windowSecs;
+  const { activeWindowSecs, effectiveWindowSecs, selectWindow } =
+    useActiveWindow(windows, windowSecs, onWindowChange);
 
-  // Series toggle handler — prevent hiding the last visible series
-  const handleSeriesToggle = useCallback(
-    (id: string) => {
-      setHiddenSeries((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-          onSeriesToggle?.(id, true);
-        } else {
-          // Count visible series — don't hide last one
-          const totalSeries = seriesProp?.length ?? 0;
-          const visibleCount = totalSeries - next.size;
-          if (visibleCount <= 1) return prev;
-          next.add(id);
-          onSeriesToggle?.(id, false);
-        }
-        return next;
-      });
-    },
-    [seriesProp?.length, onSeriesToggle]
+  const { hiddenSeries, hiddenSeriesIds, toggleSeries } = useHiddenSeries(
+    seriesProp?.length ?? 0,
+    onSeriesToggle
   );
 
   const ws = windowStyle ?? 'default';
-
-  const hiddenSeriesIds = useMemo(() => [...hiddenSeries], [hiddenSeries]);
 
   const engine = useLivelineEngine(
     {
@@ -502,31 +825,32 @@ export const Liveline = memo(function LivelineComponent({
         : defaultValueColor,
   }));
 
-  const bar = useBarStyle(ws, isDark);
-  const chip = useChipStyle(bar, isDark, seriesToggleCompact);
-
   const activeMode = lineMode ? 'line' : 'candle';
 
-  const onWindowBtnLayout = useCallback(
-    (secs: number, e: LayoutChangeEvent) => {
-      const { x, width } = e.nativeEvent.layout;
-      setWindowBtnLayouts((prev) => {
-        const cur = prev[secs];
-        if (cur && cur.x === x && cur.width === width) return prev;
-        return { ...prev, [secs]: { x, width } };
-      });
-    },
-    []
+  // --- Controls-row props ---------------------------------------------------
+  // Everything below exists to keep <LivelineControls/> memo-stable across a
+  // tick: consumers rebuild `windows`/`series` inline and pass inline arrow
+  // callbacks, so those identities churn even when their contents do not.
+  const windowsSignature = windows
+    ? `${windows.length}|${windows.map((w) => `${w.secs} ${w.label}`).join('')}`
+    : '';
+  const stableWindows = useStableValue(windowsSignature, () => windows);
+
+  const chipSource = lastSeriesPropRef.current;
+  const chipSignature = chipSource
+    ? `${chipSource.length}|${chipSource
+        .map((s) => `${s.id} ${s.label ?? ''} ${s.color ?? ''}`)
+        .join('')}`
+    : '';
+  const seriesChips = useStableValue(chipSignature, () =>
+    (chipSource ?? []).map((s, si) => ({
+      id: s.id,
+      label: s.label ?? s.id,
+      color: s.color || SERIES_COLORS[si % SERIES_COLORS.length]!,
+    }))
   );
 
-  const onModeBtnLayout = useCallback((key: string, e: LayoutChangeEvent) => {
-    const { x, width } = e.nativeEvent.layout;
-    setModeBtnLayouts((prev) => {
-      const cur = prev[key];
-      if (cur && cur.x === x && cur.width === width) return prev;
-      return { ...prev, [key]: { x, width } };
-    });
-  }, []);
+  const selectMode = useStableHandler(onModeChange);
 
   return (
     <>
@@ -539,118 +863,29 @@ export const Liveline = memo(function LivelineComponent({
         />
       )}
 
-      {/* Control bars row — window pills + mode toggle + series chips side by side */}
-      {((windows && windows.length > 0) ||
-        onModeChange ||
-        showSeriesToggle) && (
-        <View style={[styles.controlsRow, { marginLeft: pad.left }]}>
-          {/* Time window controls */}
-          {windows && windows.length > 0 && (
-            <PillBar
-              bar={bar}
-              isDark={isDark}
-              indicator
-              indicatorLayout={windowBtnLayouts[activeWindowSecs]}
-            >
-              {windows.map((w) => {
-                const isActive = w.secs === activeWindowSecs;
-                return (
-                  <Pressable
-                    key={w.secs}
-                    onLayout={(e) => onWindowBtnLayout(w.secs, e)}
-                    onPress={() => {
-                      setActiveWindowSecs(w.secs);
-                      onWindowChange?.(w.secs);
-                    }}
-                    style={bar.pill}
-                  >
-                    <Animated.Text
-                      style={isActive ? bar.labelActive : bar.labelInactive}
-                    >
-                      {w.label}
-                    </Animated.Text>
-                  </Pressable>
-                );
-              })}
-            </PillBar>
-          )}
-
-          {/* Mode toggle — separate bar with its own sliding indicator */}
-          {onModeChange && (
-            <PillBar
-              bar={bar}
-              isDark={isDark}
-              indicator
-              indicatorLayout={modeBtnLayouts[activeMode]}
-            >
-              <Pressable
-                onLayout={(e) => onModeBtnLayout('line', e)}
-                onPress={() => onModeChange('line')}
-                style={[styles.iconBtn, bar.iconBtn]}
-              >
-                <LineIcon
-                  color={
-                    activeMode === 'line' ? bar.activeColor : bar.inactiveColor
-                  }
-                  active={activeMode === 'line'}
-                />
-              </Pressable>
-              <Pressable
-                onLayout={(e) => onModeBtnLayout('candle', e)}
-                onPress={() => onModeChange('candle')}
-                style={[styles.iconBtn, bar.iconBtn]}
-              >
-                <CandleIcon
-                  color={
-                    activeMode === 'candle'
-                      ? bar.activeColor
-                      : bar.inactiveColor
-                  }
-                />
-              </Pressable>
-            </PillBar>
-          )}
-
-          {/*
-            Series toggle chips. No sliding indicator — chips toggle
-            independently, so there is no single "active" one to track.
-            Rendered from lastSeriesPropRef (not seriesProp) and merely faded
-            out when the chart leaves multi-series mode: unmounting the bar
-            would reflow the controls row and drop the hidden-series state.
-          */}
-          {showSeriesToggle && (
-            <PillBar bar={bar} isDark={isDark} faded={!isMultiSeries}>
-              {(lastSeriesPropRef.current ?? []).map((s, si) => {
-                const isHidden = hiddenSeries.has(s.id);
-                const seriesColor =
-                  s.color || SERIES_COLORS[si % SERIES_COLORS.length]!;
-                return (
-                  <Pressable
-                    key={s.id}
-                    onPress={() => handleSeriesToggle(s.id)}
-                    style={[chip.base, isHidden && chip.off]}
-                  >
-                    <View
-                      style={[
-                        chip.dot,
-                        { backgroundColor: seriesColor },
-                        isHidden && styles.dimmed,
-                      ]}
-                    />
-                    {!seriesToggleCompact && (
-                      <Animated.Text
-                        style={isHidden ? chip.labelOff : chip.label}
-                      >
-                        {s.label ?? s.id}
-                      </Animated.Text>
-                    )}
-                  </Pressable>
-                );
-              })}
-            </PillBar>
-          )}
-        </View>
-      )}
+      {/*
+        Control bars row — window pills + mode toggle + series chips side by
+        side. The chips are driven by lastSeriesPropRef (not seriesProp) and
+        merely faded out when the chart leaves multi-series mode: unmounting
+        the bar would reflow the controls row and drop the hidden-series state.
+      */}
+      <LivelineControls
+        windowStyle={ws}
+        isDark={isDark}
+        padLeft={pad.left}
+        windows={stableWindows}
+        activeWindowSecs={activeWindowSecs}
+        onWindowSelect={selectWindow}
+        showModeToggle={onModeChange != null}
+        activeMode={activeMode}
+        onModeSelect={selectMode}
+        showSeriesToggle={showSeriesToggle}
+        seriesChips={seriesChips}
+        seriesFaded={!isMultiSeries}
+        hiddenSeries={hiddenSeries}
+        seriesToggleCompact={seriesToggleCompact}
+        onSeriesToggle={toggleSeries}
+      />
 
       <GestureDetector gesture={engine.gesture}>
         <View
