@@ -23,6 +23,32 @@ export interface WindowTransState {
   rangeToMax: number;
 }
 
+/**
+ * The slice of `EngineState` the window transition reads and writes. Declared
+ * as its own narrow interface rather than taking `EngineState` itself: these
+ * helpers get handed the engine state object directly (structural typing —
+ * `engineStep` just passes `s`), so no allocation is involved, but the
+ * signature still says exactly which four fields are in play.
+ */
+export interface WindowTransInputs {
+  windowTransition: WindowTransState;
+  displayWindow: number;
+  displayMin: number;
+  displayMax: number;
+}
+
+/** The slice of `EngineState` the Y-range smoothing reads. Same rationale as
+ * `WindowTransInputs`. The updated values come back on the result object,
+ * which the caller writes back — unchanged from before. */
+export interface RangeInputs {
+  windowTransition: WindowTransState;
+  rangeInited: boolean;
+  targetMin: number;
+  targetMax: number;
+  displayMin: number;
+  displayMax: number;
+}
+
 /** Lerp display value with adaptive speed — slow for big jumps, fast for small ticks. */
 export function computeAdaptiveSpeed(
   value: number,
@@ -42,10 +68,9 @@ export function computeAdaptiveSpeed(
 /** Update window transition state, returning current display window and transition progress. */
 export function updateWindowTransition(
   cfg: EngineConfigStep,
-  wt: WindowTransState,
-  displayWindow: number,
-  displayMin: number,
-  displayMax: number,
+  /** The engine state — see `WindowTransInputs`. `windowTransition` is
+   * mutated in place, exactly as the old `wt` argument was. */
+  s: WindowTransInputs,
   noMotion: boolean,
   now_ms: number,
   now: number,
@@ -54,8 +79,11 @@ export function updateWindowTransition(
   buffer: number
 ): { windowSecs: number; windowTransProgress: number } {
   'worklet';
+  const wt = s.windowTransition;
+  const displayMin = s.displayMin;
+  const displayMax = s.displayMax;
   if (wt.to !== cfg.windowSecs) {
-    wt.from = displayWindow;
+    wt.from = s.displayWindow;
     wt.to = cfg.windowSecs;
     wt.startMs = now_ms;
     wt.rangeFromMin = displayMin;
@@ -102,15 +130,12 @@ export function updateWindowTransition(
 
 /** Smooth Y range with lerp. During window transitions, interpolates between pre-computed ranges. */
 export function updateRange(
+  /** The engine state — see `RangeInputs`. Read only; the new values come
+   * back on the result object for the caller to write back. */
+  s: RangeInputs,
   computedRange: { min: number; max: number },
-  rangeInited: boolean,
-  targetMin: number,
-  targetMax: number,
-  displayMin: number,
-  displayMax: number,
   isTransitioning: boolean,
   windowTransProgress: number,
-  wt: WindowTransState,
   adaptiveSpeed: number,
   chartH: number,
   dt: number
@@ -125,7 +150,12 @@ export function updateRange(
   rangeInited: boolean;
 } {
   'worklet';
-  if (!rangeInited) {
+  const wt = s.windowTransition;
+  let targetMin = s.targetMin;
+  let targetMax = s.targetMax;
+  let displayMin = s.displayMin;
+  let displayMax = s.displayMax;
+  if (!s.rangeInited) {
     return {
       minVal: computedRange.min,
       maxVal: computedRange.max,
@@ -179,22 +209,27 @@ export interface HoverStateResult {
   emitPoint: HoverPoint | null;
 }
 
-/** Compute hover position, interpolated value, and scrub amount. */
+/**
+ * Compute hover position, interpolated value, and scrub amount.
+ *
+ * Took `pad`, `w`, `leftEdge`, `rightEdge` and `chartW` as five extra
+ * positional arguments alongside `layout` — every one of them a field of the
+ * `layout` it was handed (see `makeLayout`, which is built from exactly those
+ * values). Reading them off `layout` costs nothing, removes five arguments,
+ * and makes it impossible to hand this function a layout and a set of edges
+ * that disagree.
+ */
 export function updateHoverState(
   hoverPixelX: number | null,
-  pad: Required<Padding>,
-  w: number,
   layout: ChartLayout,
   now: number,
   visible: LivelinePoint[],
   scrubAmount: number,
   lastHover: { x: number; value: number; time: number } | null,
-  noMotion: boolean,
-  leftEdge: number,
-  rightEdge: number,
-  chartW: number
+  noMotion: boolean
 ): HoverStateResult {
   'worklet';
+  const { pad, w, leftEdge, rightEdge, chartW } = layout;
   let hoverValue: number | null = null;
   let hoverTime: number | null = null;
   let hoverChartX: number | null = null;
@@ -249,5 +284,52 @@ export function updateHoverState(
     isActiveHover,
     lastHover,
     emitPoint,
+  };
+}
+
+/** The three range fields `makeLayout` reads — structurally satisfied by
+ * both `updateRange`'s and `updateCandleRange`'s result objects. */
+export interface LayoutRange {
+  minVal: number;
+  maxVal: number;
+  valRange: number;
+}
+
+/**
+ * Build the per-frame `ChartLayout` shared by all three pipelines (line,
+ * candle, multi-series). Previously this exact literal — closures included
+ * — was written out three times in `engine/step.ts`.
+ *
+ * `toX`/`toY` stay closures on purpose: one allocation per frame per chart,
+ * which is what the inline literals already did. Do NOT "optimize" them
+ * into a shared object with mutable captured state — the three pipelines
+ * would alias each other's edges and range.
+ */
+export function makeLayout(
+  w: number,
+  h: number,
+  pad: Required<Padding>,
+  chartW: number,
+  chartH: number,
+  leftEdge: number,
+  rightEdge: number,
+  range: LayoutRange
+): ChartLayout {
+  'worklet';
+  const { minVal, maxVal, valRange } = range;
+  return {
+    w,
+    h,
+    pad,
+    chartW,
+    chartH,
+    leftEdge,
+    rightEdge,
+    minVal,
+    maxVal,
+    valRange,
+    toX: (t: number) =>
+      pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
+    toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
   };
 }

@@ -2,6 +2,164 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Native `SkPicture`s are now disposed, not left to GC.** The screen picture
+  is replaced every recorded frame (~60/sec) and the grid/scroll layer
+  pictures on every rebuild; each replacement dropped a native picture whose
+  tiny JS wrapper gave the garbage collector no reason to hurry. Every swap
+  site now retires the outgoing picture and `dispose()`s it one frame later,
+  once the tree has composited its replacement — bounding native memory on
+  exactly the long-running live charts the library targets.
+- **Suspended-time credit is race-free.** The wall-clock interval accrued
+  while the frame loop was suspended was added from the JS thread while the
+  UI thread drained the same shared value — a fast background/foreground flap
+  could double-credit an interval and leave a paused chart further in the
+  past than it ever was. Both writes now run serialized on the UI runtime.
+- **Removed series no longer haunt the toggle state.** A series removed from
+  `series` and later re-added came back hidden, and its dead id still counted
+  against the "don't hide the last visible series" guard, which could
+  therefore be defeated into a blank chart. Hidden ids are now pruned when
+  the series list changes.
+- The unrecognized-color dev warning no longer mutates a module-level
+  binding from the UI runtime (worklet-captured bindings are per-runtime
+  copies); the dedupe flag lives on the runtime's own global instead.
+
+### Changed
+
+- **`formatValue` / `formatTime` must be pure functions of their input.**
+  Axis and grid label text is cached per tick and re-evaluated when the
+  formatter's identity changes, not every frame (a per-frame `Date` +
+  string-format per label was measurable UI-thread churn). Formatters that
+  read ambient state — relative time, a captured mutable locale — now render
+  stale text; pass a new function instance to invalidate. Documented in the
+  README.
+
+### Added
+
+- **Accessibility.** The chart is a Skia surface, so a screen reader previously
+  found an unlabelled blank region. `Liveline` now announces itself as an
+  `image` (React Native has no chart role) with a default label of
+  `'Live chart'`, overridable via the new **`accessibilityLabel`** prop, and
+  exposes the live number through `accessibilityValue` — run through the
+  consumer's `formatValue`, with the momentum direction appended
+  (`"64,201.55, rising"`).
+
+  This costs nothing when no screen reader is running. The value is gated on
+  `AccessibilityInfo.isScreenReaderEnabled()` plus its `screenReaderChanged`
+  listener; with no reader active there is no sampling timer, no state and no
+  accessibility value — one boolean test per render, and no UI→JS traffic. The
+  reading is taken from the props already on the JS thread rather than bridged
+  from the engine's UI-thread shared value, so the per-frame render path is
+  untouched and the chart still does not re-render on tick. When a reader *is*
+  active the value is sampled once a second, and readings that format
+  identically are skipped so a still chart stays quiet. `formatValue` is
+  therefore also called on the JS thread, roughly 1Hz, while a reader runs.
+
+  The built-in controls gained labels and selected/checked state — most
+  importantly the icon-only line/candle toggle, which had no text for a reader
+  to fall back on. The live-value overlay (`showValue`) is hidden from
+  assistive tech, since it is a `TextInput` driven at frame rate.
+
+- **`testID`** prop on the chart container. The built-in controls derive their
+  own ids from it (`-window-<secs>`, `-mode-line`, `-mode-candle`,
+  `-series-<id>`), so Detox and Maestro can target the chart and drive its
+  controls.
+
+### Fixed
+
+- **`parseColorRgb` (used to derive the palette from the `color` prop) no
+  longer produces `NaN` channels for 4-digit hex shorthand** (`#rgba`, the
+  CSS Color 4 shorthand-with-alpha form, e.g. `"#38fc"`). It also now handles
+  8-digit hex (`#rrggbbaa`) correctly, and rejects any hex length other than
+  3/4/6/8 instead of silently mangling it — both now fall back to the
+  existing grey default. In development, an unparseable `color` (including
+  named CSS colors like `"red"`, which were never supported) logs a warning
+  naming the offending value instead of failing silently into gradients and
+  paints. See the `color` prop docs in the README for the full list of
+  supported formats.
+- **`LivelineTransition` now warns in development when `active` matches no
+  child's `key`.** Previously a typo'd or conditionally-absent `active` value
+  produced a blank chart area with no signal until `active` later changed to
+  a key that does exist. The warning names both the bad value and the keys
+  that are actually available.
+- **`react-native-gesture-handler` peer range widened to `>=2.30.0`** (was
+  `>=3.0.0`). The v3 floor existed only because the engine imported a
+  v3-only type name for a union it never used — the hook always returns a
+  single `Gesture.Pan()`, so the return type is now just `GestureType`,
+  which exists in both majors. Expo SDK 55 pins `~2.30.0`, so every SDK 55
+  consumer previously hit a peer conflict and an `expo-doctor` failure on
+  install. Verified by installing 2.30.0 and running the real typecheck, not
+  by inspection.
+
+### Changed
+
+- **Declarative render shell** — the chart now renders as a fixed four-node
+  Skia tree (`<Canvas>` → `<Group transform>` → `<Picture>`, plus a sibling
+  `<Picture>`) instead of a single picture. The structure never changes after
+  mount, so the Reanimated mapper that drives it stays entirely on the UI
+  thread and the "keeps animating while the JS thread is blocked" guarantee
+  is preserved. This is an architecture change, not a performance one; no
+  speedup is claimed for it.
+- **The single-series line's prefix stroke moved into that scroll layer** —
+  the spline through all but the last data point is recorded once into its
+  own `SkPicture` and composited at a horizontal offset via
+  `<Group transform>`, re-recorded only when the line path cache misses; the
+  per-frame screen picture strokes only the tail. The fill polygon is
+  deliberately **not** split (it is one semi-transparent closed shape; every
+  way of cutting it leaves a seam or a double-darkened column) and is still
+  drawn whole every frame. Any frame that can't composite the layer at
+  alpha 1 — the reveal morph, the loading/empty crossfade, scrub dimming,
+  the degen shake — falls back to drawing the whole line live, because
+  `drawPicture` ignores `globalAlpha`. Multi-series and candle mode are
+  untouched and keep drawing the combined path. In accounting terms this
+  removes roughly one draw call per frame; it was not measurable on device
+  and no speedup is claimed for it.
+- **Time-axis labels no longer re-format every frame** — `formatTime` is a
+  pure function of a label's key, but the axis called it for every label on
+  every frame and overwrote each label's text with a byte-identical string
+  (~360 calls/sec at a 30s window, each allocating a `Date` and three
+  `padStart` results with the default formatter). It now runs only for a key
+  seen for the first time; a formatter swap is caught by reference identity
+  and re-texts live labels in place without disturbing their fades. Also
+  fixes a churn bug found by the new tests: labels one interval beyond each
+  edge — deliberately targeted, but at alpha 0 — were deleted and re-created
+  every single frame forever. Purely internal; per-label alpha, crossfades
+  and edge fades are unchanged. Worth ~35% of that function's JS time in
+  isolation, and undetectable on device (the whole time axis is 4.2% of a
+  core).
+
+- **The scroll layer's transform now runs at the display's full refresh
+  rate.** Picture re-recording stays paced at ~60fps, but translating an
+  already-recorded picture is nearly free, so the `<Group transform>` advances
+  on every vsync — 120fps on a ProMotion display — while recording cost is
+  unchanged. On a vsync that pacing skips there is no layout to recompute `dx`
+  from, so it is linearly extrapolated from the last two recorded frames and
+  overwritten with the exact value on the next one; a quiescence resume, a
+  return from background or a JS stall leaves the transform untouched rather
+  than flinging it. Note the consequence: the prefix moves at 120Hz while the
+  tail is re-recorded at 60Hz, so on skipped vsyncs they shear by one frame of
+  scroll — roughly 0.25px on a 10s window, 0.08px on 30s. Sub-pixel, but
+  unverified: the iOS simulator renders at 60Hz and cannot show it either way.
+- **`MIN_FRAME_INTERVAL_MS` and `MAX_SCROLL_EXTRAPOLATION_MS` are coupled** by
+  two inequalities that are now documented in `engine/constants.ts` and
+  asserted in `engine/__tests__/constants.test.ts`. Tuning either alone can
+  silently disable high-refresh scrolling in a way only 120Hz hardware would
+  reveal.
+
+### Removed
+
+- **`src/draw/timeAxisLayer.ts` and its tests** — pure label-selection logic
+  built for a time-axis scroll layer that was measured, priced and parked
+  rather than adopted, and which nothing imported. Recoverable from
+  `302df29` / `82d8f6b` on `perf/scroll-layer-architecture` if the axis ever
+  moves into a scroll layer. No API change; the module was never exported.
+- **Non-existent `android`, `ios`, `cpp`, `*.podspec` and
+  `react-native.config.js` entries from `files[]`** — this is a JS-only
+  library. `npm pack` output is unchanged (255 files, 1.3 MB).
+
 ## [0.2.1] - 2026-07-28
 
 ### Changed

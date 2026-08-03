@@ -30,6 +30,12 @@ import type { LivelineFonts } from '../types';
 // worklets that capture it (see the closure-capture note below).
 const BLUR_SHADOWS = Platform.OS !== 'android';
 
+// The "no dash" value for the shim's `lineDash` state. Shared module-level
+// constant so retargeting the ctx for a new recording can reset the dash
+// state without allocating a fresh empty array — same INVARIANT as
+// setLineDash's callers: nothing may ever mutate a dash array in place.
+const NO_DASH: number[] = [];
+
 /**
  * A Canvas2D-flavored adapter over Skia's SkCanvas.
  *
@@ -143,6 +149,31 @@ export interface Ctx2D {
   drawPicture(picture: SkPicture): void;
 }
 
+/**
+ * The internal, retargetable flavor of `Ctx2D` stored on `SkiaCache.ctx`.
+ *
+ * `createCanvas2D` used to build a fresh ~36-property object with ~28 method
+ * closures on every recording (60x/sec on the UI thread) purely because every
+ * method closed over the frame's `SkCanvas`. The closures now read a mutable
+ * `cv` instead, so one instance can serve every recording made through a
+ * given cache — `retarget()` points it at the new canvas and resets all
+ * per-recording state.
+ *
+ * `fonts` is re-declared writable here (it's `readonly` on `Ctx2D`, which is
+ * what draw code sees) so `retarget` can swap the font set along with the
+ * canvas.
+ */
+export interface ReusableCtx2D extends Ctx2D {
+  fonts: LivelineFonts;
+  /**
+   * Point this ctx at a new recording canvas and clear every piece of
+   * per-recording state. See the implementation in `createCanvas2D` for the
+   * full enumeration — anything not reset there leaks from one recording
+   * into the next.
+   */
+  retarget(canvas: SkCanvas, fonts: LivelineFonts): void;
+}
+
 interface StyleSnapshot {
   fillStyle: Style2D;
   strokeStyle: Style2D;
@@ -174,9 +205,10 @@ interface StyleSnapshot {
  * Cross-frame cache for Skia objects created by the Canvas2D shim: immutable
  * objects (gradients, dash effects, blur mask filters, parsed colors), plus
  * memoized text measurements (widths, font metrics), plus a pool of the
- * mutable path/paint host objects the shim draws through (see `pool`).
- * `createCanvas2D` is recreated
- * every frame, so this cache must live outside it — the caller
+ * mutable path/paint host objects the shim draws through (see `pool`), plus
+ * the reusable Canvas2D adapter itself (see `ctx`).
+ * Everything here outlives a single recording, so this cache must live
+ * outside `createCanvas2D` — the caller
  * (`useLivelineEngine`) owns one on a `useSharedValue` on the UI runtime and
  * passes it in every frame. Plain string-keyed records only (no Map/WeakMap):
  * this object crosses the Reanimated worklet boundary, which doesn't support
@@ -218,6 +250,22 @@ export interface SkiaCache {
     // "assign now, consume later" gap here to create aliasing risk.
     rect: SkHostRect;
   } | null;
+  /**
+   * The reusable Canvas2D adapter for this cache (see `ReusableCtx2D`), built
+   * lazily on the UI thread by the first `createCanvas2D` call and retargeted
+   * — never rebuilt — on every subsequent one.
+   *
+   * CRITICAL: this lives on the cache, not at module scope, and must stay
+   * there. Recordings nest: `engine/gridLayer.ts` opens its own
+   * `PictureRecorder` *during* the main frame's recording, and it already
+   * passes a separate `SkiaCache` (`EngineState.gridLayerCache`) precisely so
+   * the pooled path/paints can't alias between the two live recordings. One
+   * ctx per cache inherits that isolation exactly: the nested recording gets
+   * its own ctx with its own `cv`, path, save-stack and style state, so it
+   * cannot scribble into the outer one. A single module-global ctx would
+   * retarget the outer recording's canvas out from under it mid-frame.
+   */
+  ctx: ReusableCtx2D | null;
   colors: Record<string, SkColor>;
   colorCount: number;
   gradients: Record<string, SkShader>;
@@ -245,6 +293,7 @@ export function createSkiaCache(): SkiaCache {
   'worklet';
   return {
     pool: null,
+    ctx: null,
     colors: {},
     colorCount: 0,
     gradients: {},
@@ -467,6 +516,22 @@ function baselineDy(
   return -m.ascent; // 'top'
 }
 
+/**
+ * Returns the Canvas2D adapter for `cache`, pointed at `canvas`.
+ *
+ * Despite the name this allocates nothing after the first call per cache: the
+ * ctx (and the path/paint pool it draws through) is stored on the cache and
+ * `retarget`-ed for each new recording, because it used to cost ~31
+ * allocations 60 times a second in a library that pools paints, paths and
+ * rects specifically to avoid that. The name is kept because every call site
+ * reads as "make me a ctx for this recording", which is still exactly what it
+ * does. Two rules follow from the reuse, both enforced by construction:
+ *  - the returned ctx is valid only until the next `createCanvas2D(_, _,
+ *    cache)` with the SAME cache; don't hold one across recordings.
+ *  - concurrently-live recordings (the nested grid-layer recorder inside the
+ *    main frame's) must pass DIFFERENT caches — as they already must for the
+ *    pooled path/paints. See `SkiaCache.ctx`.
+ */
 export function createCanvas2D(
   canvas: SkCanvas,
   fonts: LivelineFonts,
@@ -552,10 +617,36 @@ export function createCanvas2D(
     gradient: ownGradient,
     rect: ownRect,
   } = cache.pool;
-  ownPath.rewind(); // discard last frame's verbs
+
+  // Reuse this cache's adapter if it already has one — see SkiaCache.ctx for
+  // why it hangs off the cache (nested recordings) and `retarget` below for
+  // the per-recording state it clears.
+  const existing = cache.ctx;
+  if (existing !== null) {
+    existing.retarget(canvas, fonts);
+    return existing;
+  }
+
+  // ---- per-recording state (everything `retarget` must reset) ----
+  // 1. the recording canvas itself — every method below reads this mutable
+  //    binding rather than capturing the frame's canvas as a const, which is
+  //    the whole reason this object is reusable at all.
+  let cv = canvas;
+  // 2. the current path: normally the pooled path, but beginPathFrom() can
+  //    adopt a caller-owned one, which must not survive into the next
+  //    recording.
   let path = ownPath;
-  let lineDash: number[] = [];
+  // 3. the dash pattern set by setLineDash().
+  let lineDash: number[] = NO_DASH;
+  // 4. the save()/restore() snapshot stack. Balanced call sites leave it
+  //    empty, but an unbalanced one would otherwise leak a snapshot (and its
+  //    styles) into the next recording via a stray restore().
   const stack: StyleSnapshot[] = [];
+  // 5. the thirteen public style properties + `fonts`, reset on the ctx
+  //    object itself in retarget().
+  // (`cache` and the pooled path/paints/gradient/rect are per-cache, not
+  //  per-recording: the ctx and the pool it draws through always belong to
+  //  the same cache, so they never need reassigning.)
 
   // Applies a fill/stroke style + globalAlpha to a paint. For color strings
   // the string's own alpha is multiplied by globalAlpha; for gradients the
@@ -615,7 +706,7 @@ export function createCanvas2D(
         ? StrokeJoin.Bevel
         : StrokeJoin.Miter;
 
-  const ctx: Ctx2D = {
+  const ctx: ReusableCtx2D = {
     fillStyle: '#000000',
     strokeStyle: '#000000',
     lineWidth: 1,
@@ -630,6 +721,40 @@ export function createCanvas2D(
     shadowBlur: 0,
     shadowOffsetY: 0,
     fonts,
+
+    // Points this adapter at a new recording canvas and resets EVERY piece
+    // of per-recording state, so a reused ctx is indistinguishable from the
+    // freshly-built one this used to be. The enumeration, in order:
+    //   canvas       -> the new one (all methods read `cv`)
+    //   fonts        -> the new set (methods read `this.fonts`)
+    //   pooled path  -> rewound; discards the last recording's verbs
+    //   path         -> back to the pooled path (drops any adopted one)
+    //   lineDash     -> NO_DASH
+    //   stack        -> emptied
+    //   13 styles    -> the same defaults the object literal above declares
+    // Missing any one of these leaks state across recordings — a stuck dash
+    // pattern, a stale gradient, or a wrong alpha in an unrelated layer.
+    retarget(nextCanvas, nextFonts) {
+      cv = nextCanvas;
+      ownPath.rewind();
+      path = ownPath;
+      lineDash = NO_DASH;
+      stack.length = 0;
+      this.fonts = nextFonts;
+      this.fillStyle = '#000000';
+      this.strokeStyle = '#000000';
+      this.lineWidth = 1;
+      this.globalAlpha = 1;
+      this.lineCap = 'butt';
+      this.lineJoin = 'miter';
+      this.font = nextFonts.label;
+      this.textAlign = 'left';
+      this.textBaseline = 'alphabetic';
+      this.globalCompositeOperation = 'source-over';
+      this.shadowColor = 'rgba(0,0,0,0)';
+      this.shadowBlur = 0;
+      this.shadowOffsetY = 0;
+    },
 
     save() {
       stack.push({
@@ -654,7 +779,7 @@ export function createCanvas2D(
         // place, which no caller in this codebase does.
         lineDash,
       });
-      canvas.save();
+      cv.save();
     },
 
     restore() {
@@ -675,7 +800,7 @@ export function createCanvas2D(
         this.shadowOffsetY = s.shadowOffsetY;
         lineDash = s.lineDash;
       }
-      canvas.restore();
+      cv.restore();
     },
 
     beginPath() {
@@ -766,12 +891,12 @@ export function createCanvas2D(
         );
         // Draw the same path through a translated canvas instead of
         // allocating an offset copy per shadowed fill.
-        canvas.save();
-        canvas.translate(0, this.shadowOffsetY);
-        canvas.drawPath(path, sp);
-        canvas.restore();
+        cv.save();
+        cv.translate(0, this.shadowOffsetY);
+        cv.drawPath(path, sp);
+        cv.restore();
       }
-      canvas.drawPath(path, paint);
+      cv.drawPath(path, paint);
     },
 
     stroke() {
@@ -791,7 +916,7 @@ export function createCanvas2D(
       paint.setPathEffect(
         lineDash.length > 0 ? cachedDash(cache, lineDash) : null
       );
-      canvas.drawPath(path, paint);
+      cv.drawPath(path, paint);
     },
 
     // Every call site clips to an axis-aligned rect built immediately before
@@ -805,7 +930,7 @@ export function createCanvas2D(
     // antialias, so there's no visual cost to the non-AA path.
     clipRect(x, y, w, h) {
       ownRect.setXYWH(x, y, w, h);
-      canvas.clipRect(ownRect, ClipOp.Intersect, false);
+      cv.clipRect(ownRect, ClipOp.Intersect, false);
     },
 
     fillRect(x, y, w, h) {
@@ -817,7 +942,7 @@ export function createCanvas2D(
           : BlendMode.SrcOver
       );
       ownRect.setXYWH(x, y, w, h);
-      canvas.drawRect(ownRect, paint);
+      cv.drawRect(ownRect, paint);
     },
 
     fillText(text, x, y) {
@@ -828,10 +953,10 @@ export function createCanvas2D(
       // this paint is shared with fill()/fillRect() it must not inherit
       // DstOut from a prior destination-out fill.
       paint.setBlendMode(BlendMode.SrcOver);
-      canvas.drawText(
+      cv.drawText(
         text,
-        x + alignDx(cache, fonts, this.font, text, this.textAlign),
-        y + baselineDy(cache, fonts, this.font, this.textBaseline),
+        x + alignDx(cache, this.fonts, this.font, text, this.textAlign),
+        y + baselineDy(cache, this.fonts, this.font, this.textBaseline),
         paint,
         this.font
       );
@@ -849,17 +974,17 @@ export function createCanvas2D(
       // strokeText never dashes; must not inherit a dash from stroke().
       paint.setPathEffect(null);
       paint.setBlendMode(BlendMode.SrcOver);
-      canvas.drawText(
+      cv.drawText(
         text,
-        x + alignDx(cache, fonts, this.font, text, this.textAlign),
-        y + baselineDy(cache, fonts, this.font, this.textBaseline),
+        x + alignDx(cache, this.fonts, this.font, text, this.textAlign),
+        y + baselineDy(cache, this.fonts, this.font, this.textBaseline),
         paint,
         this.font
       );
     },
 
     measureText(text) {
-      return { width: cachedTextWidth(cache, fonts, this.font, text) };
+      return { width: cachedTextWidth(cache, this.fonts, this.font, text) };
     },
 
     // No defensive copy: `segments` used to be sliced here because callers
@@ -904,13 +1029,20 @@ export function createCanvas2D(
     },
 
     translate(dx, dy) {
-      canvas.translate(dx, dy);
+      cv.translate(dx, dy);
     },
 
     drawPicture(picture) {
-      canvas.drawPicture(picture);
+      cv.drawPicture(picture);
     },
   };
 
+  // Run the same reset the reuse path runs, so the first recording is
+  // byte-for-byte identical to every later one (and so the pooled path is
+  // rewound before the first use). The literal's initial values above exist
+  // only to satisfy the type — retarget() is the single source of truth for
+  // the defaults.
+  ctx.retarget(canvas, fonts);
+  cache.ctx = ctx;
   return ctx;
 }

@@ -1,20 +1,36 @@
 import type { SkPath, SkPicture } from '@shopify/react-native-skia';
-import type { LivelinePoint, LivelinePalette, CandlePoint } from '../types';
+import type {
+  LivelinePoint,
+  LivelinePalette,
+  CandlePoint,
+  LivelineFonts,
+} from '../types';
 import type { ArrowState, ShakeState, MultiSeriesEntry } from '../draw';
 import type { GridState } from '../draw/grid';
 import type { TimeAxisState } from '../draw/timeAxis';
 import { createOrderbookState, type OrderbookState } from '../draw/orderbook';
-import { createLineCacheSlot, type LineCacheSlot } from '../draw/lineCache';
+import {
+  createLineCacheSlot,
+  type LineCacheSlot,
+  type LineCacheRef,
+} from '../draw/lineCache';
+import { createLineDrawArgs, type LineDrawArgs } from '../draw/line';
+import { createCandleDrawArgs, type CandleDrawArgs } from '../draw/candlestick';
 import {
   createCandleCacheSlot,
   type CandleCacheSlot,
+  type CandleCacheRef,
 } from '../draw/candleCache';
 import { createGridLayerSlot, type GridLayerSlot } from '../draw/gridLayer';
+import {
+  createScrollLayerSlot,
+  type ScrollLayerSlot,
+} from '../draw/scrollLayer';
 import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
 import { createSkiaCache, type SkiaCache } from '../draw/canvas2d';
 import type { WindowTransState } from './helpers';
-import type { EngineConfigStep } from './types';
+import type { EngineConfigStep, FrameInputs } from './types';
 
 export interface BadgeState {
   displayW: number; // current lerped text width (0 = uninited)
@@ -115,9 +131,42 @@ export interface EngineState {
   badge: BadgeState;
   /** Cross-frame line SkPath cache, single-series mode (see draw/lineCache) */
   lineCache: LineCacheSlot;
+  /** Pooled `LineCacheRef` — the (slot, dataRev, dataSource,
+   * splitPrefixStroke) bundle `lineCacheHits`/`drawLine` take. Overwritten in
+   * place each frame instead of allocating a fresh literal, and repointed at
+   * each series' own slot inside the multi-series loop (`drawMultiFrame`
+   * reads it synchronously per series and retains nothing). Starts pointing
+   * at `lineCache` above, which is the single-series pipeline's slot. */
+  lineCacheRef: LineCacheRef;
+  /** Pooled argument struct for `drawLine` — see `LineDrawArgs`. One
+   * instance, refilled before every call (including once per series in
+   * multi-series mode); only one pipeline draws per frame, and `drawLine`
+   * never retains it. Same pooling rationale as `multiSeriesEntryScratch`. */
+  lineDrawArgs: LineDrawArgs;
+  /** Pooled argument struct for `drawCandlesticks` — see `CandleDrawArgs`.
+   * Refilled between the two halves of the candle-width cross-fade. */
+  candleDrawArgs: CandleDrawArgs;
   /** Per-series line path caches, multi-series mode — keyed by series id,
    * pruned alongside displayValues when series are removed */
   lineCaches: Map<string, LineCacheSlot>;
+  /** Pooled `{ caches, ref }` pairing handed to `drawMultiFrame` (see
+   * MultiSeriesDrawOptions.lineCache, which requires the two together).
+   * Both members are the stable `lineCaches`/`lineCacheRef` objects above,
+   * so this is built once here rather than as a fresh literal every
+   * multi-series frame at the call site. */
+  multiLineCache: { caches: Map<string, LineCacheSlot>; ref: LineCacheRef };
+  /** Screen pictures replaced by a newer recording, awaiting `dispose()`.
+   * The screen picture is swapped every recorded frame (~60/sec), and the
+   * grid and scroll layers swap theirs on every rebuild — each swap drops a
+   * native SkPicture whose JS wrapper is tiny, so waiting on the UI
+   * runtime's GC lets tens of native pictures per second pile up on a live
+   * feed. Instead every swap site retires the outgoing picture (this array
+   * for the screen picture; `GridLayerSlot.retired` / `ScrollLayerSlot.retired`
+   * for the layer caches, which never see `EngineState`), and
+   * `disposeRetired` drains all three at the top of the next frame
+   * callback — by which point the declarative tree has composited the
+   * replacement, so nothing retired can still be on screen. */
+  retiredPictures: SkPicture[];
   /** Cross-frame grid (gridlines + Y-axis labels) SkPicture cache (see
    * engine/gridLayer). Single shared instance across modes since only one
    * mode draws per frame. */
@@ -126,9 +175,57 @@ export interface EngineState {
    * deliberately not shared with the main frame's SkiaCache (see
    * engine/gridLayer.ts's doc comment). */
   gridLayerCache: SkiaCache;
+  /** Cross-frame SkPicture of the line's prefix stroke, single-series mode —
+   * the declarative shell's scroll layer, composited under a
+   * `<Group transform>` instead of being re-stroked every frame (see
+   * engine/lineScrollLayer, draw/scrollLayer). Only the single-series line
+   * pipeline populates it; multi-series and candle mode keep drawing the
+   * combined path. */
+  lineScroll: ScrollLayerSlot<SkPicture>;
+  /** Dedicated Skia object cache for the line scroll layer's own
+   * sub-recording — same reasoning as `gridLayerCache` above. */
+  lineScrollCache: SkiaCache;
+
+  // --- Scroll-transform extrapolation. On a vsync the frame-pacing gate
+  // skips, the scroll layer's translate is extrapolated from the last two
+  // recorded frames instead of recomputed. Full rationale in
+  // engine/scrollExtrapolate.ts, which owns it.
+  /** Whether the last recorded frame published a scroll picture — i.e.
+   * whether there is anything for the extrapolated transform to move. Set
+   * from `result.scrollPicture !== null`, where the answer is already
+   * known. */
+  scrollActive: boolean;
+  /** dx at the last recorded frame. */
+  scrollDxLast: number;
+  /** Timestamp (ms) of the last recorded frame; -1 before the first. */
+  scrollDxLastT: number;
+  /** Observed dx change per ms across the last two recorded frames. */
+  scrollDxRate: number;
+  /**
+   * `lineCache.buildRev` as of the last recorded frame, i.e. WHICH prefix
+   * picture `scrollDxLast` is an offset of.
+   *
+   * `dx` is `layout.toX(tRef) - xRefAtBuild`, so it resets to ~0 the frame
+   * the prefix is rebuilt while the line on screen does not move at all.
+   * Differencing across that frame yields a rate that describes a jump that
+   * never happened — see `observeScrollRate`'s `layerChanged` guard, which
+   * this field feeds. `-1` before the first recorded frame (no slot has
+   * `buildRev` -1, so the first frame always reads as a change; harmless,
+   * since `scrollDxLastT < 0` already suppresses it).
+   */
+  scrollDxBuildRev: number;
   /** Cross-frame closed-candle body+wick path cache, candle mode (see
    * draw/candleCache). */
   candleCache: CandleCacheSlot;
+  /** Pooled `FrameInputs` for `engineStep` — the caller (useLivelineEngine's
+   * frame worklet) overwrites its fields each frame and hands it straight
+   * back in, so the twelve-argument call became a four-argument one without
+   * adding a per-frame allocation. See `FrameInputs` in engine/step.ts. */
+  frameInputs: FrameInputs;
+  /** Pooled `CandleCacheRef` — the (slot, dataSource, candlesRev) bundle
+   * `drawCandlesticks`/`updateCandleCache` take. Overwritten in place each
+   * candle frame instead of allocating a fresh literal. */
+  candleCacheRef: CandleCacheRef;
 
   // Hover state
   scrubAmount: number;
@@ -199,6 +296,32 @@ export interface EngineState {
     oldWidth: number;
   };
   prevCandleData: { candles: CandlePoint[]; width: number };
+  /** `cfg.candlesRev` the `prevCandleData.candles` copy was taken at, so the
+   * copy is skipped on every frame where the candle buffer hasn't changed
+   * (same mechanism, and same reason, as `lastDataStashRev` above — the only
+   * consumer is the candle-width-change branch, which fires when the *user*
+   * changes candle width). `.width` is still refreshed every frame: it must
+   * always describe the previous frame's width for that branch to read.
+   * -1 (never a real revision) forces the first copy. */
+  prevCandleDataRev: number;
+  /** Pooled frozen copy of the live candle for the reverse-morph stash.
+   * `s.displayCandle` (== `smoothLive`, and the last element of the visible
+   * array) is lerped in place every frame, so `lastCandles = visible.slice()`
+   * alone would leave the "frozen" stash still moving. Safe to pool: it is
+   * only written on `hasData` frames and only read on `!hasData` frames (see
+   * `useStash` in step.ts), which are disjoint. */
+  lastLiveStash: CandlePoint;
+  /** Scratch array for candle mode's per-frame *old*-candles visible build
+   * (the candle-width morph's outgoing set). Reused/refilled like
+   * `candleVisibleScratch`; never retained past the frame — `drawCandleFrame`
+   * reads `oldCandles` synchronously (and `.map()`s it into a fresh array
+   * when the OHLC collapse is active). */
+  candleOldVisibleScratch: CandlePoint[];
+  /** Pooled candle handed to `drawCandleFrame` as `closePriceCandle` — the
+   * raw live candle with its close replaced by the smoothed close. Read
+   * synchronously by `drawClosePrice` and never retained, so one reused
+   * object beats a fresh spread every candle frame. */
+  closePriceScratch: CandlePoint;
   pausedCandles: CandlePoint[] | null;
   pausedLive: CandlePoint | null;
   pausedLineData: LivelinePoint[] | null;
@@ -230,6 +353,76 @@ export interface EngineState {
    * both the quiescence skip and the pacing skip, so it always reflects
    * "when did state last actually advance." */
   lastFrameTimestamp: number | null;
+  /**
+   * `now_ms` as of the last frame that credited `timeDebt` — a SEPARATE
+   * clock from `lastFrameTimestamp`, and deliberately so.
+   *
+   * `lastFrameTimestamp` answers "when did state last advance", which is
+   * exactly what the pacing gate and `dt` want, and exactly what accrual
+   * must not use: the quiescence skip credits debt without advancing state,
+   * so measuring it against a fixed origin makes every consecutive skipped
+   * frame re-count the same interval (see `engine/timeAccrual.ts`). This
+   * field advances on every frame that credits, so credited intervals
+   * tile the timeline exactly once.
+   *
+   * `null` until the first credit. Recorded frames set it too — their
+   * accrual is done inside `engineStep` off `dt` — so the first quiescent
+   * frame after a record measures from that record, not from whenever
+   * quiescence last ended.
+   */
+  lastAccrualTimestamp: number | null;
+}
+
+/** The subset of `Map` that {@link pruneByIds} needs — lets one array hold
+ * per-series maps with differently-typed values (`Map<string, V>` is
+ * invariant in `V`, so `Map<string, unknown>[]` would not accept them). */
+export interface PrunableMap {
+  readonly size: number;
+  keys(): IterableIterator<string>;
+  delete(key: string): boolean;
+}
+
+/**
+ * Every per-series map on `EngineState` whose keys are series ids owned by
+ * the *current* multi-series set, and which therefore must be pruned
+ * together when a series is removed. Registration lives here, next to the
+ * field declarations above: adding a new per-series map means adding one
+ * line to this array, not hand-writing another delete loop at the call
+ * site (which is how `seriesAlpha` came to leak).
+ *
+ * Deliberately NOT included, each for its own reason:
+ * - `smoothValuesScratch` — `.clear()`-ed at the top of every multi frame
+ *   (`step.ts`), so it can never hold a dead id past that frame.
+ * - `lastMultiStashRevs` / `lastMultiStashData` — keyed by the *stashed*
+ *   (previous) series set rather than the current one, and pruned on their
+ *   own in the stash-build block in `step.ts`; pruning them against the
+ *   live ids here would throw away the reverse-morph data that block
+ *   exists to keep.
+ * - `pausedMultiData` — a nullable whole-map snapshot, rebuilt on pause and
+ *   set back to `null` on resume, so it has no cross-series-set lifetime.
+ *
+ * Allocates a small array per call; only ever called from the
+ * series-removal branch (guarded by a size check), never per frame.
+ */
+export function perSeriesMaps(s: EngineState): PrunableMap[] {
+  'worklet';
+  return [
+    s.displayValues,
+    s.seriesAlpha,
+    s.multiVisibleScratch,
+    s.multiSeriesEntryScratch,
+    s.lineCaches,
+  ];
+}
+
+/** Delete every entry whose key is not in `currentIds`, from each map. */
+export function pruneByIds(currentIds: Set<string>, maps: PrunableMap[]): void {
+  'worklet';
+  for (const map of maps) {
+    for (const key of map.keys()) {
+      if (!currentIds.has(key)) map.delete(key);
+    }
+  }
 }
 
 export function createEngineState(
@@ -239,6 +432,17 @@ export function createEngineState(
   candleWidth: number
 ): EngineState {
   'worklet';
+  // Built before the literal so `lineCacheRef` can point at the very same
+  // slot object rather than a copy — and so `multiLineCache` can pair the
+  // very same map and ref the literal stores.
+  const lineCache = createLineCacheSlot();
+  const candleCache = createCandleCacheSlot();
+  const lineCacheRef: LineCacheRef = {
+    slot: lineCache,
+    dataRev: 0,
+    dataSource: 0,
+  };
+  const lineCaches = new Map<string, LineCacheSlot>();
   return {
     displayValue: value,
     displayValues: new Map<string, number>(),
@@ -277,6 +481,7 @@ export function createEngineState(
       visibleLabelsScratch: [],
       drawnScratch: [],
       labelEntryPool: [],
+      formatTimeRef: null,
     },
     orderbookState: createOrderbookState(),
     particleState: createParticleState(),
@@ -290,11 +495,40 @@ export function createEngineState(
       pathW: -1,
       pathTail: false,
     },
-    lineCache: createLineCacheSlot(),
-    lineCaches: new Map<string, LineCacheSlot>(),
+    lineCache: lineCache,
+    lineCacheRef,
+    lineDrawArgs: createLineDrawArgs(),
+    candleDrawArgs: createCandleDrawArgs(),
+    lineCaches,
+    multiLineCache: { caches: lineCaches, ref: lineCacheRef },
+    retiredPictures: [],
     gridLayer: createGridLayerSlot<SkPicture>(),
     gridLayerCache: createSkiaCache(),
-    candleCache: createCandleCacheSlot(),
+    lineScroll: createScrollLayerSlot<SkPicture>(),
+    lineScrollCache: createSkiaCache(),
+    scrollActive: false,
+    scrollDxLast: 0,
+    scrollDxLastT: -1,
+    scrollDxRate: 0,
+    scrollDxBuildRev: -1,
+    candleCache: candleCache,
+    frameInputs: {
+      w: 0,
+      h: 0,
+      hoverPixelX: null,
+      dt: 0,
+      now_ms: 0,
+      // Every field is filled by the caller before the first `engineStep`;
+      // the placeholders here exist only so the struct is fully shaped at
+      // creation rather than growing properties later. There is no "empty"
+      // `LivelineFonts` to seed with — the real one is supplied by the frame
+      // worklet, which is the only thing that ever reads this.
+      fonts: null as unknown as LivelineFonts,
+      data: [],
+      candles: [],
+      multiData: {},
+    },
+    candleCacheRef: { slot: candleCache, dataSource: 0, candlesRev: 0 },
 
     scrubAmount: 0,
     lastHover: null,
@@ -343,6 +577,10 @@ export function createEngineState(
       oldWidth: candleWidth,
     },
     prevCandleData: { candles: [], width: candleWidth },
+    prevCandleDataRev: -1,
+    lastLiveStash: { time: 0, open: 0, high: 0, low: 0, close: 0 },
+    candleOldVisibleScratch: [],
+    closePriceScratch: { time: 0, open: 0, high: 0, low: 0, close: 0 },
     pausedCandles: null,
     pausedLive: null,
     pausedLineData: null,
@@ -360,5 +598,31 @@ export function createEngineState(
     lastRecordedH: -1,
 
     lastFrameTimestamp: null,
+    lastAccrualTimestamp: null,
   };
+}
+
+/**
+ * Dispose every picture retired on a PREVIOUS frame — the screen picture's
+ * bin plus the grid and scroll layer slots' own bins (see
+ * `EngineState.retiredPictures`). Called at the top of the frame callback,
+ * before anything records: entries are pushed mid-frame, after this ran, so
+ * every entry drained here has survived at least one full vsync and the tree
+ * has composited its replacement.
+ *
+ * `dispose()` releases only the JS wrapper's reference; a retired grid or
+ * scroll picture that an earlier screen recording embedded via
+ * `drawPicture` stays alive through that recording's own native ref.
+ */
+export function disposeRetired(s: EngineState): void {
+  'worklet';
+  const screen = s.retiredPictures;
+  for (let i = 0; i < screen.length; i++) screen[i]!.dispose();
+  screen.length = 0;
+  const grid = s.gridLayer.retired;
+  for (let i = 0; i < grid.length; i++) grid[i]!.dispose();
+  grid.length = 0;
+  const scroll = s.lineScroll.retired;
+  for (let i = 0; i < scroll.length; i++) scroll[i]!.dispose();
+  scroll.length = 0;
 }

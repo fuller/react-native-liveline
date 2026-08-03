@@ -1,4 +1,8 @@
-import { drawCandlesticks } from '../candlestick';
+import {
+  drawCandlesticks,
+  createCandleDrawArgs,
+  type CandleDrawArgs,
+} from '../candlestick';
 import type { Ctx2D, Style2D } from '../canvas2d';
 import type { ChartLayout, CandlePoint, Padding } from '../../types';
 
@@ -134,6 +138,13 @@ function makeCandles(count: number, t0 = 10): CandlePoint[] {
   return out;
 }
 
+/** Build a `CandleDrawArgs` from the factory defaults plus the fields a test
+ * actually varies. Production pools one instance on `EngineState`; a test
+ * allocating one per call is fine and keeps each case self-describing. */
+function args(over: Partial<CandleDrawArgs>): CandleDrawArgs {
+  return Object.assign(createCandleDrawArgs(), over);
+}
+
 describe('drawCandlesticks batching', () => {
   it('batches a mixed bull/bear set into a handful of fill/stroke calls, not one per candle', () => {
     const ctx = new FakeCtx();
@@ -142,13 +153,13 @@ describe('drawCandlesticks batching', () => {
     drawCandlesticks(
       ctx,
       layout,
-      candles,
-      4,
-      -1, // liveTime — no candle matches, so there's no "live" candle this frame
-      0,
-      0, // pauseProgress
-      0,
-      0 // scrubX=0, scrubDim=0 — no scrub, batching applies
+      args({
+        candles,
+        candleWidthSecs: 4,
+        // no candle matches, so there's no "live" candle this frame
+        liveTime: -1,
+        // scrubX=0, scrubDim=0 — no scrub, batching applies
+      })
     );
 
     const fills = ctx.calls.filter((c) => c.op === 'fill');
@@ -167,7 +178,17 @@ describe('drawCandlesticks batching', () => {
     const liveTime = candles[candles.length - 1]!.time;
     // pauseProgress=1 suppresses the live-candle glow (tested separately
     // below) so the fill count here is exactly batched-groups + live-body.
-    drawCandlesticks(ctx, layout, candles, 4, liveTime, 0, 1, 0, 0, 1, 0.5);
+    drawCandlesticks(
+      ctx,
+      layout,
+      args({
+        candles,
+        candleWidthSecs: 4,
+        liveTime,
+        pauseProgress: 1,
+        liveBullBlend: 0.5,
+      })
+    );
 
     const fills = ctx.calls.filter((c) => c.op === 'fill');
     // 9 non-live candles (5 bull, 4 bear) → 2 batched body fills, plus the
@@ -185,30 +206,26 @@ describe('drawCandlesticks batching', () => {
     drawCandlesticks(
       active,
       layout,
-      candles,
-      4,
-      liveTime,
-      0,
-      0 /* pauseProgress */,
-      0,
-      0,
-      1,
-      0.5
+      args({
+        candles,
+        candleWidthSecs: 4,
+        liveTime,
+        pauseProgress: 0,
+        liveBullBlend: 0.5,
+      })
     );
 
     const paused = new FakeCtx();
     drawCandlesticks(
       paused,
       layout,
-      candles,
-      4,
-      liveTime,
-      0,
-      1 /* pauseProgress */,
-      0,
-      0,
-      1,
-      0.5
+      args({
+        candles,
+        candleWidthSecs: 4,
+        liveTime,
+        pauseProgress: 1,
+        liveBullBlend: 0.5,
+      })
     );
 
     const activeFills = active.calls.filter((c) => c.op === 'fill').length;
@@ -221,7 +238,11 @@ describe('drawCandlesticks batching', () => {
     const layout = makeLayout();
     // Window is [0,100]; put every candle far outside it.
     const candles = makeCandles(5, 10000);
-    drawCandlesticks(ctx, layout, candles, 4, -1, 0, 0, 0, 0);
+    drawCandlesticks(
+      ctx,
+      layout,
+      args({ candles, candleWidthSecs: 4, liveTime: -1 })
+    );
     expect(ctx.calls.length).toBe(0);
   });
 
@@ -230,7 +251,17 @@ describe('drawCandlesticks batching', () => {
     const layout = makeLayout();
     const candles = makeCandles(6);
     // scrubX > 0 and scrubDim > 0.01 activates the per-candle fallback path.
-    drawCandlesticks(ctx, layout, candles, 4, -1, 0, 0, 50, 0.5);
+    drawCandlesticks(
+      ctx,
+      layout,
+      args({
+        candles,
+        candleWidthSecs: 4,
+        liveTime: -1,
+        scrubX: 50,
+        scrubDim: 0.5,
+      })
+    );
 
     const fills = ctx.calls.filter((c) => c.op === 'fill');
     // One fill per (visible) non-live candle — not batched.
@@ -241,7 +272,17 @@ describe('drawCandlesticks batching', () => {
     const ctx = new FakeCtx();
     const layout = makeLayout();
     const candles = makeCandles(6);
-    drawCandlesticks(ctx, layout, candles, 4, -1, 0, 0, 50, 0.8);
+    drawCandlesticks(
+      ctx,
+      layout,
+      args({
+        candles,
+        candleWidthSecs: 4,
+        liveTime: -1,
+        scrubX: 50,
+        scrubDim: 0.8,
+      })
+    );
 
     const fillAlphas = ctx.calls
       .filter((c) => c.op === 'fill')

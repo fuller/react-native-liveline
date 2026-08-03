@@ -12,7 +12,7 @@ import { Skia, type SkPicture } from '@shopify/react-native-skia';
 import type { Ctx2D } from './canvas2d';
 import { drawGrid, type GridState } from './grid';
 import type { GridLayerSlot } from './gridLayer';
-import { drawLine } from './line';
+import { drawLine, type LineDrawArgs } from './line';
 import { lineOverlayPresence, LINE_OVERLAY_MIN_PRESENCE } from './lineOverlay';
 import {
   createLineCacheSlot,
@@ -29,6 +29,7 @@ import { drawOrderbook, type OrderbookState } from './orderbook';
 import { drawParticles, spawnOnSwing, type ParticleState } from './particles';
 import {
   drawCandlesticks,
+  type CandleDrawArgs,
   drawClosePrice,
   drawCandleCrosshair,
   drawLineModeCrosshair,
@@ -169,6 +170,9 @@ export interface DrawOptions {
   lineCache?: LineCacheRef;
   /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
   gridLayer?: GridLayerSlot<SkPicture>;
+  /** Pooled scratch struct this frame's `drawLine` call is filled into —
+   * owned by `EngineState`, never allocated here. See `LineDrawArgs`. */
+  lineArgs: LineDrawArgs;
 }
 
 /**
@@ -250,23 +254,20 @@ export function drawFrame(
 
   // 3. Line + fill (with scrub dimming + reveal morphing)
   const scrubX = opts.scrubAmount > 0.05 ? opts.hoverX : null;
-  const pts = drawLine(
-    ctx,
-    layout,
-    palette,
-    opts.visible,
-    opts.smoothValue,
-    opts.now,
-    opts.showFill,
-    scrubX,
-    opts.scrubAmount,
-    reveal,
-    opts.now_ms,
-    1,
-    false,
-    1,
-    opts.lineCache
-  );
+  const lineArgs = opts.lineArgs;
+  lineArgs.visible = opts.visible;
+  lineArgs.smoothValue = opts.smoothValue;
+  lineArgs.now = opts.now;
+  lineArgs.showFill = opts.showFill;
+  lineArgs.scrubX = scrubX;
+  lineArgs.scrubAmount = opts.scrubAmount;
+  lineArgs.chartReveal = reveal;
+  lineArgs.now_ms = opts.now_ms;
+  lineArgs.colorBlend = 1;
+  lineArgs.skipDashLine = false;
+  lineArgs.fillScale = 1;
+  lineArgs.pathCache = opts.lineCache;
+  const pts = drawLine(ctx, layout, palette, lineArgs);
 
   // 4. Time axis — same timing as grid
   {
@@ -438,12 +439,26 @@ export interface MultiSeriesDrawOptions {
   now_ms: number;
   /** Primary palette (from first series) for grid/axis/crosshair colors */
   primaryPalette: LivelinePalette;
-  /** Per-series line path caches, keyed by series id (see draw/lineCache) */
-  lineCaches?: Map<string, LineCacheSlot>;
   /** Which backing arrays series data came from: 0 live / 1 paused / 2 stash */
   multiDataSource?: number;
   /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
   gridLayer?: GridLayerSlot<SkPicture>;
+  /** Pooled scratch struct the per-series `drawLine` calls are filled into —
+   * owned by `EngineState`, refilled once per series, never allocated here.
+   * See `LineDrawArgs`. */
+  lineArgs: LineDrawArgs;
+  /** Per-series line path cache (see draw/lineCache). `caches` and `ref` are
+   * required together — a ref with no caches map (or vice versa) can't do
+   * anything, so the pairing is one optional property instead of two, to
+   * rule out silently losing caching by passing only one. Omit entirely to
+   * disable the per-series cache. */
+  lineCache?: {
+    /** Keyed by series id */
+    caches: Map<string, LineCacheSlot>;
+    /** Pooled `LineCacheRef`, `slot` repointed each iteration instead of
+     * allocating a ref per series per frame. */
+    ref: LineCacheRef;
+  };
 }
 
 /**
@@ -511,37 +526,37 @@ export function drawMultiFrame(
     // interior revision invalidates just that series' cache — the key's
     // len/firstT/lastT/lastV heuristic can't see interior changes on its own.
     let cacheRef: LineCacheRef | undefined;
-    if (opts.lineCaches !== undefined) {
-      let slot = opts.lineCaches.get(s.id);
+    if (opts.lineCache !== undefined) {
+      let slot = opts.lineCache.caches.get(s.id);
       if (slot === undefined) {
         slot = createLineCacheSlot();
-        opts.lineCaches.set(s.id, slot);
+        opts.lineCache.caches.set(s.id, slot);
       }
-      cacheRef = {
-        slot,
-        dataRev: s.dataRev,
-        dataSource: opts.multiDataSource ?? 0,
-      };
+      // Pooled ref (see MultiSeriesDrawOptions.lineCache.ref) repointed at
+      // this series' slot, rather than a fresh literal per series per frame.
+      // Safe because `drawLine` reads it synchronously and retains nothing.
+      cacheRef = opts.lineCache.ref;
+      cacheRef.slot = slot;
+      cacheRef.dataRev = s.dataRev;
+      cacheRef.dataSource = opts.multiDataSource ?? 0;
+      cacheRef.splitPrefixStroke = false;
     }
     ctx.save();
     if (combinedAlpha < 1) ctx.globalAlpha = combinedAlpha;
-    const pts = drawLine(
-      ctx,
-      layout,
-      s.palette,
-      s.visible,
-      s.smoothValue,
-      opts.now,
-      false, // no fill
-      scrubX,
-      opts.scrubAmount,
-      reveal,
-      opts.now_ms,
-      1,
-      false,
-      1,
-      cacheRef
-    );
+    const lineArgs = opts.lineArgs;
+    lineArgs.visible = s.visible;
+    lineArgs.smoothValue = s.smoothValue;
+    lineArgs.now = opts.now;
+    lineArgs.showFill = false; // no fill
+    lineArgs.scrubX = scrubX;
+    lineArgs.scrubAmount = opts.scrubAmount;
+    lineArgs.chartReveal = reveal;
+    lineArgs.now_ms = opts.now_ms;
+    lineArgs.colorBlend = 1;
+    lineArgs.skipDashLine = false;
+    lineArgs.fillScale = 1;
+    lineArgs.pathCache = cacheRef;
+    const pts = drawLine(ctx, layout, s.palette, lineArgs);
     ctx.restore();
     if (pts && pts.length > 0) {
       allPts.push({
@@ -707,6 +722,13 @@ export interface CandleDrawOptions {
    * line-mode morph in progress — see the gating right before the
    * drawCandlesticks call in the `else` branch. */
   candleCache?: CandleCacheRef;
+  /** Pooled scratch struct this frame's `drawLine` call is filled into —
+   * owned by `EngineState`, never allocated here. See `LineDrawArgs`. */
+  lineArgs: LineDrawArgs;
+  /** Pooled scratch struct the `drawCandlesticks` calls are filled into —
+   * refilled between the two halves of the width-morph cross-fade. See
+   * `CandleDrawArgs`. */
+  candleArgs: CandleDrawArgs;
 }
 
 /**
@@ -757,22 +779,21 @@ export function drawCandleFrame(
     const scrubX = opts.scrubAmount > 0.05 ? opts.hoverX : null;
     ctx.save();
     ctx.globalAlpha = lp;
-    linePts = drawLine(
-      ctx,
-      layout,
-      palette,
-      opts.lineVisible,
-      opts.lineSmoothValue,
-      opts.now,
-      opts.lineModeProg > 0.01,
-      scrubX,
-      opts.scrubAmount,
-      opts.chartReveal,
-      opts.now_ms,
-      colorBlend,
-      !fullLineMode,
-      opts.lineModeProg // fillScale — fill fades smoothly with line mode transition
-    );
+    const lineArgs = opts.lineArgs;
+    lineArgs.visible = opts.lineVisible;
+    lineArgs.smoothValue = opts.lineSmoothValue;
+    lineArgs.now = opts.now;
+    lineArgs.showFill = opts.lineModeProg > 0.01;
+    lineArgs.scrubX = scrubX;
+    lineArgs.scrubAmount = opts.scrubAmount;
+    lineArgs.chartReveal = opts.chartReveal;
+    lineArgs.now_ms = opts.now_ms;
+    lineArgs.colorBlend = colorBlend;
+    lineArgs.skipDashLine = !fullLineMode;
+    // fill fades smoothly with the line mode transition
+    lineArgs.fillScale = opts.lineModeProg;
+    lineArgs.pathCache = undefined;
+    linePts = drawLine(ctx, layout, palette, lineArgs);
     ctx.restore();
   }
 
@@ -824,59 +845,55 @@ export function drawCandleFrame(
     // OHLC expansion uses smoothstep on reveal — this keeps shape and alpha
     // in sync (at 50% visible, candles are ~50% expanded rather than flat).
     const ohlcScale = reveal * reveal * (3 - 2 * reveal);
-    const collapseC = (c: CandlePoint): CandlePoint =>
-      ohlcScale >= 0.99
-        ? c
-        : {
-            time: c.time,
-            open: c.close + (c.open - c.close) * ohlcScale,
-            high: c.close + (c.high - c.close) * ohlcScale,
-            low: c.close + (c.low - c.close) * ohlcScale,
-            close: c.close,
-          };
-    const revealCandles =
-      ohlcScale < 0.99 ? opts.candles.map(collapseC) : opts.candles;
-    const revealOld =
-      ohlcScale < 0.99 && opts.oldCandles.length > 0
-        ? opts.oldCandles.map(collapseC)
-        : opts.oldCandles;
+    // collapseC is only ever invoked during the brief reveal-collapse window
+    // (ohlcScale < 0.99); gate its allocation behind that same check instead
+    // of building a fresh closure every candle frame regardless of whether
+    // it's used.
+    let revealCandles = opts.candles;
+    let revealOld = opts.oldCandles;
+    if (ohlcScale < 0.99) {
+      const collapseC = (c: CandlePoint): CandlePoint => ({
+        time: c.time,
+        open: c.close + (c.open - c.close) * ohlcScale,
+        high: c.close + (c.high - c.close) * ohlcScale,
+        low: c.close + (c.low - c.close) * ohlcScale,
+        close: c.close,
+      });
+      revealCandles = opts.candles.map(collapseC);
+      if (opts.oldCandles.length > 0) {
+        revealOld = opts.oldCandles.map(collapseC);
+      }
+    }
 
     ctx.save();
     ctx.clipRect(pad.left - 1, pad.top, chartW + 2, chartH);
     const accentCol = lp > LINE_OVERLAY_MIN_PRESENCE ? palette.line : undefined;
+    // Fields shared by every drawCandlesticks call below; the per-call
+    // differences are written immediately before each call.
+    const ca = opts.candleArgs;
+    ca.now_ms = opts.now_ms;
+    ca.pauseProgress = opts.pauseProgress;
+    ca.scrubX = opts.hoverX ?? 0;
+    ca.scrubDim = opts.scrubAmount;
+    ca.accentColor = accentCol;
+    ca.accentBlend = lp;
+    ca.cache = undefined;
+    ca.makePath = undefined;
     if (opts.morphT >= 0 && revealOld.length > 0) {
       ctx.globalAlpha = (1 - opts.morphT) * candleAlpha;
-      drawCandlesticks(
-        ctx,
-        layout,
-        revealOld,
-        opts.oldWidth,
-        -1,
-        opts.now_ms,
-        opts.pauseProgress,
-        opts.hoverX ?? 0,
-        opts.scrubAmount,
-        1,
-        -1,
-        accentCol,
-        lp
-      );
+      ca.candles = revealOld;
+      ca.candleWidthSecs = opts.oldWidth;
+      ca.liveTime = -1;
+      ca.liveAlpha = 1;
+      ca.liveBullBlend = -1;
+      drawCandlesticks(ctx, layout, ca);
       ctx.globalAlpha = opts.morphT * candleAlpha;
-      drawCandlesticks(
-        ctx,
-        layout,
-        revealCandles,
-        opts.displayCandleWidth,
-        opts.liveCandle?.time ?? -1,
-        opts.now_ms,
-        opts.pauseProgress,
-        opts.hoverX ?? 0,
-        opts.scrubAmount,
-        opts.liveBirthAlpha,
-        opts.liveBullBlend,
-        accentCol,
-        lp
-      );
+      ca.candles = revealCandles;
+      ca.candleWidthSecs = opts.displayCandleWidth;
+      ca.liveTime = opts.liveCandle?.time ?? -1;
+      ca.liveAlpha = opts.liveBirthAlpha;
+      ca.liveBullBlend = opts.liveBullBlend;
+      drawCandlesticks(ctx, layout, ca);
       ctx.globalAlpha = 1;
     } else {
       if (candleAlpha < 1) ctx.globalAlpha = candleAlpha;
@@ -895,23 +912,14 @@ export function drawCandleFrame(
         opts.candleCache && revealCandles === opts.candles && lineModeSettled
           ? opts.candleCache
           : undefined;
-      drawCandlesticks(
-        ctx,
-        layout,
-        revealCandles,
-        opts.displayCandleWidth,
-        opts.liveCandle?.time ?? -1,
-        opts.now_ms,
-        opts.pauseProgress,
-        opts.hoverX ?? 0,
-        opts.scrubAmount,
-        opts.liveBirthAlpha,
-        opts.liveBullBlend,
-        accentCol,
-        lp,
-        candleCache,
-        candleCache ? makeCandlePath : undefined
-      );
+      ca.candles = revealCandles;
+      ca.candleWidthSecs = opts.displayCandleWidth;
+      ca.liveTime = opts.liveCandle?.time ?? -1;
+      ca.liveAlpha = opts.liveBirthAlpha;
+      ca.liveBullBlend = opts.liveBullBlend;
+      ca.cache = candleCache;
+      ca.makePath = candleCache ? makeCandlePath : undefined;
+      drawCandlesticks(ctx, layout, ca);
     }
     ctx.restore();
   }

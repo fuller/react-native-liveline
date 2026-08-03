@@ -15,6 +15,10 @@ import type { ChartLayout, LivelinePalette } from '../types';
 
 export interface GridLayerSlot<Picture> {
   picture: Picture | null;
+  /** Pictures this slot replaced, awaiting `dispose()` — drained by
+   * `disposeRetired` (engine/state.ts) at the top of the next frame. The
+   * slot can't reach `EngineState`, so it carries its own bin. */
+  retired: Picture[];
   /** Consecutive frames the key has matched. Compared against
    * QUIESCENT_FRAME_THRESHOLD by the caller — grid label fades are
    * documented (engine/quiescence.ts) to converge well under that many
@@ -40,6 +44,7 @@ export function createGridLayerSlot<Picture>(): GridLayerSlot<Picture> {
   'worklet';
   return {
     picture: null,
+    retired: [],
     settledFrames: 0,
     kMinVal: 0,
     kMaxVal: 0,

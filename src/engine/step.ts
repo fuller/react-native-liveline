@@ -4,7 +4,6 @@ import type {
   Momentum,
   HoverPoint,
   CandlePoint,
-  LivelineFonts,
 } from '../types';
 import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
@@ -12,6 +11,7 @@ import { detectMomentum } from '../math/momentum';
 import { interpolateAtTime } from '../math/interpolate';
 import { easeInOutCos } from '../math/ease';
 import { filterVisiblePointsInto } from '../math/visible';
+import type { SkPicture } from '@shopify/react-native-skia';
 import type { Ctx2D } from '../draw/canvas2d';
 import {
   drawFrame,
@@ -23,15 +23,21 @@ import {
 import { shouldBuildLineOverlay } from '../draw/lineOverlay';
 import { drawLoading } from '../draw/loading';
 import { drawEmpty } from '../draw/empty';
-import type { EngineConfigStep } from './types';
+import type { EngineConfigStep, FrameInputs } from './types';
 import type { EngineState } from './state';
+import { perSeriesMaps, pruneByIds } from './state';
 import { drawBadge } from './badge';
 import { updateGridLayer } from './gridLayer';
+import { updateLineScrollLayer } from './lineScrollLayer';
+import { lineCacheHits, lineScrollDx } from '../draw/lineCache';
+import { canCompositeLineScroll } from '../draw/lineScrollLayer';
+import { scrollLayerUsable } from '../draw/scrollLayer';
 import {
   computeAdaptiveSpeed,
   updateWindowTransition,
   updateRange,
   updateHoverState,
+  makeLayout,
 } from './helpers';
 import {
   computeCandleRange,
@@ -67,6 +73,20 @@ import {
 export interface StepOutput {
   /** Hover point to deliver through onHover this frame (undefined = none) */
   emitHover?: HoverPoint;
+  /**
+   * The scroll layer's picture for this frame, or null when nothing may be
+   * composited there and the screen picture already holds the whole frame
+   * (every pipeline except single-series line, and any single-series frame
+   * that fails the alpha gate or the cache check — see
+   * draw/lineScrollLayer.ts). The caller publishes an empty picture for
+   * null; it must never leave a stale picture composited.
+   */
+  scrollPicture: SkPicture | null;
+  /**
+   * `translateX` for the scroll layer, in screen pixels — meaningless (and
+   * always 0) when `scrollPicture` is null.
+   */
+  scrollDx: number;
   /** Live value display text (line mode + showValue), null = leave unchanged */
   valueText: string | null;
   /** Live value display color ('' = default color) */
@@ -94,6 +114,21 @@ const EMPTY_MULTI_POINTS: LivelinePoint[] = [];
  * from the other's call sites; both are read-only. */
 const EMPTY_LINE_POINTS: LivelinePoint[] = [];
 
+/** Stable empty arrays for the *other* mode's slot in the `points` /
+ * `effectiveCandles` pair below — exactly one of the two is real on any
+ * given frame and the unused one is never read past its `.length` check,
+ * so both may share a module-level empty. Read-only, like the two above. */
+const EMPTY_POINTS_SLOT: LivelinePoint[] = [];
+const EMPTY_CANDLES_SLOT: CandlePoint[] = [];
+
+/** Stable empty array for multi-series hover entries on frames with no
+ * active hover — which is nearly all of them. A fresh array is allocated
+ * only inside the active-hover branch, where it is retained in
+ * `s.lastHoverEntries` for the scrub fade-out and so genuinely cannot be
+ * pooled. Read-only (`drawMultiFrame` only reads it). */
+const EMPTY_HOVER_ENTRIES: { color: string; label: string; value: number }[] =
+  [];
+
 /**
  * Look up a multi-series entry's data points. `series` is either a live
  * `cfg.multiSeries` entry (no `.data` — its points live in `multiData`,
@@ -118,32 +153,48 @@ function multiSeriesData(
  *
  * Candle mode is not yet ported; it renders the loading/empty fallback.
  */
+/**
+ * Publish a blank live-value readout before an early return.
+ *
+ * `StepOutput.valueText` is `null` by default and the caller treats `null` as
+ * "leave the shared value unchanged" — which is right for the modes that do
+ * not own the readout, but wrong for an early return that draws no chart at
+ * all. Without this, a chart that mounts with no data, loses every point out
+ * of the window, or switches to a multi-series config whose data has not
+ * arrived, keeps displaying whatever number the *previous* mode last wrote,
+ * forever.
+ *
+ * `''` (not `null`) is the point: it is a real value that overwrites the stale
+ * one. Only written when the consumer actually asked for the readout, so
+ * charts without `showValue` publish nothing and cost nothing.
+ */
+function publishBlankValue(out: StepOutput, cfg: EngineConfigStep): void {
+  'worklet';
+  if (!cfg.showValue) return;
+  out.valueText = '';
+  out.valueColor = '';
+}
+
 export function engineStep(
   ctx: Ctx2D,
   cfg: EngineConfigStep,
   s: EngineState,
-  w: number,
-  h: number,
-  hoverPixelXRaw: number | null,
-  dt: number,
-  now_ms: number,
-  fonts: LivelineFonts,
-  /** Line-mode data points — synced via its own delta-updated shared value. */
-  data: LivelinePoint[],
-  /** Candles — synced via its own delta-updated shared value; empty array
-   * (never undefined) when there is no candle data, matching the `?? []`
-   * fallback this replaces at every read site below. */
-  candles: CandlePoint[],
-  /** Multi-series data points, keyed by series id — synced via its own
-   * delta-updated shared value (one buffer per series), same rationale as
-   * `data`/`candles` above but keyed since series can be added/removed
-   * independently. `cfg.multiSeries` entries carry id/value/palette/label
-   * only; look up a series' points here (or via `multiSeriesData` below,
-   * which also handles the reverse-morph stash case). */
-  multiData: Record<string, LivelinePoint[]>
+  /** This frame's varying inputs — see `FrameInputs`. Pooled on `EngineState`
+   * as `s.frameInputs`; the caller fills it in place and passes it, so the
+   * struct costs no allocation per frame. */
+  frame: FrameInputs
 ): StepOutput {
   'worklet';
-  const out: StepOutput = { valueText: null, valueColor: null };
+  // Destructured to the names the body below already uses. Local bindings
+  // only — nothing is copied and nothing is allocated.
+  const { w, h, dt, now_ms, fonts, data, candles, multiData } = frame;
+  const hoverPixelXRaw = frame.hoverPixelX;
+  const out: StepOutput = {
+    valueText: null,
+    valueColor: null,
+    scrollPicture: null,
+    scrollDx: 0,
+  };
 
   const noMotion = cfg.noMotion;
   const hoverPixelX = cfg.scrub ? hoverPixelXRaw : null;
@@ -190,8 +241,10 @@ export function engineStep(
     }
   }
 
-  const points = isCandle ? ([] as LivelinePoint[]) : (s.pausedData ?? data);
-  const effectiveCandles = isCandle ? (s.pausedCandles ?? candles) : [];
+  const points = isCandle ? EMPTY_POINTS_SLOT : (s.pausedData ?? data);
+  const effectiveCandles = isCandle
+    ? (s.pausedCandles ?? candles)
+    : EMPTY_CANDLES_SLOT;
   const hasMultiData =
     cfg.isMultiSeries && cfg.multiSeries
       ? cfg.multiSeries.some(
@@ -364,6 +417,30 @@ export function engineStep(
     }
   }
 
+  // Per-series bookkeeping is pruned *inside* the multi pipeline, which
+  // stops running the instant the chart leaves multi-series mode (mode
+  // switch, `isMultiSeries` going false, or the series list emptying out).
+  // Everything keyed by series id then survives indefinitely — including
+  // `lineCaches`, which retains an SkPath per series — so a chart that
+  // toggles multi → single → multi with a different series set accumulates
+  // them. Sibling of the within-multi-mode prune below (PLAN_MAINT #3);
+  // deliberately placed above the loading/empty early return so the
+  // "multiSeries went empty" case is covered too. `displayValues` is
+  // written for every series on every non-stash multi frame, so a non-zero
+  // size is an exact "this chart has multi state to drop" test, and it
+  // becomes 0 on the first frame after the switch — no per-frame work, and
+  // the one `Set` allocation happens only on that transition frame.
+  // Mirrors the multi pipeline's own `else if` condition below, `isCandle`
+  // included — a chart that switches straight from multi to candle mode
+  // while `isMultiSeries` is still set has left the pipeline just as surely.
+  const inMultiPipeline =
+    !isCandle &&
+    ((cfg.isMultiSeries && cfg.multiSeries && cfg.multiSeries.length > 0) ||
+      useMultiStash);
+  if (!inMultiPipeline && s.displayValues.size > 0) {
+    pruneByIds(new Set<string>(), perSeriesMaps(s));
+  }
+
   if (!hasData && !useStash && !useMultiStash) {
     // No chart pipeline — draw loading or empty as the sole visual.
     // Grey loading line for candle mode and multi-series (no single accent color)
@@ -397,6 +474,7 @@ export function engineStep(
       );
     }
     drawEdgeFade(ctx, pad.left, h);
+    publishBlankValue(out, cfg);
     return out;
   }
 
@@ -481,7 +559,28 @@ export function engineStep(
     // JS-thread delta applier via `.modify()`); stashing a bare reference
     // would let a later tick silently rewrite `cwt.oldCandles` (read on a
     // future candle-width-change frame) out from under this snapshot.
-    s.prevCandleData = { candles: candles.slice(), width: candleWidthSecs };
+    //
+    // Revision-gated for the same reason as `s.lastData` above: the copy's
+    // only consumer is the `candleWidthSecs !== cwt.toWidth` branch directly
+    // above — i.e. frames where the *user* changed candle width — while this
+    // ran unconditionally, copying the whole buffer every frame. A 500-candle
+    // chart at 120Hz was allocating 60k objects a second and discarding all
+    // of them. `cfg.candlesRev` moves exactly when the buffer does.
+    //
+    // `.width` is deliberately still refreshed every frame (a scalar, no
+    // allocation): the branch above reads it as `cwt.oldWidth`, and its
+    // correctness depends on it holding the *previous* frame's width, not
+    // the width the point copy happens to have been taken at. Mutated in
+    // place rather than replaced so the object identity is stable; the
+    // `.candles` slot is *reassigned* (never spliced) on a new revision, so
+    // a `cwt.oldCandles` reference grabbed earlier still points at the
+    // snapshot it was given.
+    const prevCandleData = s.prevCandleData;
+    if (s.prevCandleDataRev !== cfg.candlesRev) {
+      prevCandleData.candles = candles.slice();
+      s.prevCandleDataRev = cfg.candlesRev;
+    }
+    prevCandleData.width = candleWidthSecs;
 
     // lineModeProg is updated before the early return (see above).
     const lineModeProg = s.lineModeProg;
@@ -693,7 +792,10 @@ export function engineStep(
     ) {
       visible.push(smoothLive);
     }
-    let oldVisible: CandlePoint[] = [];
+    // Reused scratch array (see EngineState.candleOldVisibleScratch) — same
+    // rationale as `visible` above; nothing retains it past this frame.
+    const oldVisible: CandlePoint[] = s.candleOldVisibleScratch;
+    oldVisible.length = 0;
     if (morphT >= 0 && cwt.oldCandles.length > 0) {
       for (const c of cwt.oldCandles) {
         if (c.time + cwt.oldWidth >= leftEdge && c.time <= rightEdge) {
@@ -709,9 +811,32 @@ export function engineStep(
     // corrupt this stash out from under the reverse morph. Mirrors the
     // `s.lastData = points.slice()` copy above and its comment, for the
     // same reason.
+    //
+    // The `.slice()` alone is not enough, though: `visible`'s last element
+    // IS `smoothLive` === `s.displayCandle`, whose OHLC is lerped in place
+    // every frame above — so a copied array full of live references would
+    // still keep moving during the reverse morph, and `s.lastLive` pointed
+    // at the same moving object. Freeze the live candle's *values* too, into
+    // a pooled slot (see EngineState.lastLiveStash). Pooling is safe because
+    // this block only runs while `hasData`, and the stash is only read while
+    // `!hasData` (`useStash`) — disjoint sets of frames.
     if (hasData) {
       s.lastCandles = visible.slice();
-      s.lastLive = smoothLive ?? null;
+      if (smoothLive) {
+        const frozen = s.lastLiveStash;
+        frozen.time = smoothLive.time;
+        frozen.open = smoothLive.open;
+        frozen.high = smoothLive.high;
+        frozen.low = smoothLive.low;
+        frozen.close = smoothLive.close;
+        const li = s.lastCandles.length - 1;
+        if (li >= 0 && s.lastCandles[li] === smoothLive) {
+          s.lastCandles[li] = frozen;
+        }
+        s.lastLive = frozen;
+      } else {
+        s.lastLive = null;
+      }
     }
     const effectiveVisible = useStash ? s.lastCandles : visible;
     const effectiveLive = useStash ? (s.lastLive ?? undefined) : smoothLive;
@@ -754,9 +879,8 @@ export function engineStep(
     s.rangeInited = rangeResult.rangeInited;
     s.displayMin = rangeResult.displayMin;
     s.displayMax = rangeResult.displayMax;
-    const { minVal, maxVal, valRange } = rangeResult;
 
-    const layout: ChartLayout = {
+    const layout: ChartLayout = makeLayout(
       w,
       h,
       pad,
@@ -764,13 +888,8 @@ export function engineStep(
       chartH,
       leftEdge,
       rightEdge,
-      minVal,
-      maxVal,
-      valRange,
-      toX: (t: number) =>
-        pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
-      toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
-    };
+      rangeResult
+    );
 
     // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
     // while the reveal morph is animating: ctx.drawPicture ignores
@@ -975,6 +1094,30 @@ export function engineStep(
     }
 
     // --- Draw ---
+    // Pooled instead of `{ ...rawLive, close: s.closeLineSmooth }` — that
+    // spread allocated a candle every frame in candle mode. Safe: the only
+    // consumer is `drawClosePrice`, reached synchronously from
+    // `drawCandleFrame` below, which reads the fields and never retains the
+    // object (see EngineState.closePriceScratch).
+    let closePriceCandle: CandlePoint | undefined = rawLive;
+    if (s.closeLineSmoothInited && rawLive) {
+      const cp = s.closePriceScratch;
+      cp.time = rawLive.time;
+      cp.open = rawLive.open;
+      cp.high = rawLive.high;
+      cp.low = rawLive.low;
+      cp.close = s.closeLineSmooth;
+      closePriceCandle = cp;
+    }
+    // Pooled ref (EngineState.candleCacheRef) refilled in place, rather than
+    // a fresh literal every candle frame.
+    const candleCacheRef = s.candleCacheRef;
+    candleCacheRef.slot = s.candleCache;
+    candleCacheRef.dataSource = dataSourceOf(
+      useStash,
+      s.pausedCandles !== null
+    );
+    candleCacheRef.candlesRev = cfg.candlesRev;
     drawCandleFrame(ctx, layout, cfg.palette, {
       candles: drawCandles,
       displayCandleWidth,
@@ -982,10 +1125,7 @@ export function engineStep(
       oldWidth: cwt.oldWidth,
       morphT,
       liveCandle: drawLive,
-      closePriceCandle:
-        s.closeLineSmoothInited && rawLive
-          ? { ...rawLive, close: s.closeLineSmooth }
-          : rawLive,
+      closePriceCandle,
       liveTime: effectiveLive?.time ?? -1,
       liveBirthAlpha: s.liveBirthAlpha,
       liveBullBlend: s.liveBull,
@@ -1018,11 +1158,9 @@ export function engineStep(
       // allowing smooth fade-out during empty→live (loadingAlpha is 0).
       showEmptyOverlay: !(cfg.loading ?? false) && loadingAlpha < 0.01,
       gridLayer: s.gridLayer,
-      candleCache: {
-        slot: s.candleCache,
-        dataSource: dataSourceOf(useStash, s.pausedCandles !== null),
-        candlesRev: cfg.candlesRev,
-      },
+      candleCache: candleCacheRef,
+      lineArgs: s.lineDrawArgs,
+      candleArgs: s.candleDrawArgs,
     });
 
     // Badge in candle mode — only when in line mode (lineModeProg > 0.5)
@@ -1042,6 +1180,35 @@ export function engineStep(
         chartReveal,
         badgeFade * (1 - pauseProgress)
       );
+    }
+
+    // --- Live value display ---
+    // `out.valueText` used to be written only by the single-series line
+    // pipeline, and `null` means "leave unchanged" to the caller — so a
+    // chart switched from line to candle mode froze its readout on the last
+    // line-mode value forever, and a chart mounted in candle mode showed a
+    // blank one. Publish candle mode's own live value: `lineSmoothValue` is
+    // the same number the badge above prints, so the two can never disagree.
+    if (cfg.showValue) {
+      const displayVal = cfg.valueMomentumColor
+        ? Math.abs(lineSmoothValue)
+        : lineSmoothValue;
+      out.valueText = cfg.formatValue(displayVal);
+      if (cfg.valueMomentumColor) {
+        // Candle mode's direction signal is the live candle's own
+        // bull/bear — the exact thing the chart is already colouring the
+        // candle by — rather than line mode's `detectMomentum` scan, which
+        // would read an overlay array that is deliberately empty on most
+        // candle frames (see `wantLineVisible` above). '' = default colour.
+        const lc = drawLive;
+        out.valueColor = !lc
+          ? ''
+          : lc.close > lc.open
+            ? '#22c55e'
+            : lc.close < lc.open
+              ? '#ef4444'
+              : '';
+      }
     }
 
     return out;
@@ -1095,23 +1262,12 @@ export function engineStep(
     if (!useMultiStash && s.displayValues.size > effectiveMultiSeries.length) {
       const currentIds = new Set<string>();
       for (const series of effectiveMultiSeries) currentIds.add(series.id);
-      for (const key of s.displayValues.keys()) {
-        if (!currentIds.has(key)) s.displayValues.delete(key);
-      }
-      for (const key of s.lineCaches.keys()) {
-        if (!currentIds.has(key)) s.lineCaches.delete(key);
-      }
-      // Same pruning for the per-series visible-array and MultiSeriesEntry
-      // pools (see EngineState.multiVisibleScratch/multiSeriesEntryScratch)
-      // — both are keyed and repopulated exactly like lineCaches above, so
-      // they need the same cleanup-on-removal treatment to avoid leaking a
-      // growing set of dead series ids forever.
-      for (const key of s.multiVisibleScratch.keys()) {
-        if (!currentIds.has(key)) s.multiVisibleScratch.delete(key);
-      }
-      for (const key of s.multiSeriesEntryScratch.keys()) {
-        if (!currentIds.has(key)) s.multiSeriesEntryScratch.delete(key);
-      }
+      // Every per-series map that is keyed by the current series set is
+      // registered on `perSeriesMaps` in engine/state.ts, next to the field
+      // declarations — including which maps are deliberately excluded and
+      // why. Adding one here is a one-line change there, not another
+      // hand-written delete loop at this call site.
+      pruneByIds(currentIds, perSeriesMaps(s));
     }
 
     // Use first series data for window transition seeding
@@ -1154,8 +1310,14 @@ export function engineStep(
     const hiddenIds = cfg.hiddenSeriesIds;
     const seriesAlphas = s.seriesAlpha;
     for (const series of effectiveMultiSeries) {
-      let alpha = seriesAlphas.get(series.id) ?? 1;
       const target = hiddenIds && hiddenIds.indexOf(series.id) >= 0 ? 0 : 1;
+      // Seed a brand-new id at its *target*, not at 1: a series added while
+      // already in `hiddenSeriesIds` would otherwise start fully opaque and
+      // fade out, flashing in for ~a dozen frames — and, worse, counting
+      // toward the Y-range scan below (which excludes alpha <= 0.01) and
+      // visibly widening the axis while it faded. An id already in the map
+      // keeps its in-flight alpha, so toggling still animates.
+      let alpha = seriesAlphas.get(series.id) ?? target;
       alpha = noMotion
         ? target
         : lerp(alpha, target, SERIES_TOGGLE_SPEED, pausedDt);
@@ -1170,10 +1332,7 @@ export function engineStep(
       multiSeriesData(firstSeries, multiData);
     const windowResult = updateWindowTransition(
       cfg,
-      transition,
-      s.displayWindow,
-      s.displayMin,
-      s.displayMax,
+      s,
       noMotion,
       now_ms,
       now,
@@ -1324,6 +1483,7 @@ export function engineStep(
         );
       }
       drawEdgeFade(ctx, pad.left, h);
+      publishBlankValue(out, cfg);
       return out;
     }
 
@@ -1334,15 +1494,10 @@ export function engineStep(
     };
     const adaptiveSpeed = cfg.lerpSpeed + ADAPTIVE_SPEED_BOOST * 0.5;
     const rangeResult = updateRange(
+      s,
       computedRange,
-      s.rangeInited,
-      s.targetMin,
-      s.targetMax,
-      s.displayMin,
-      s.displayMax,
       isWindowTransitioning,
       windowTransProgress,
-      transition,
       adaptiveSpeed,
       chartH,
       pausedDt
@@ -1352,9 +1507,8 @@ export function engineStep(
     s.targetMax = rangeResult.targetMax;
     s.displayMin = rangeResult.displayMin;
     s.displayMax = rangeResult.displayMax;
-    const { minVal, maxVal, valRange } = rangeResult;
 
-    const layout: ChartLayout = {
+    const layout: ChartLayout = makeLayout(
       w,
       h,
       pad,
@@ -1362,17 +1516,15 @@ export function engineStep(
       chartH,
       leftEdge,
       rightEdge,
-      minVal,
-      maxVal,
-      valRange,
-      toX: (t: number) =>
-        pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
-      toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
-    };
+      rangeResult
+    );
 
     // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
     // while the reveal morph is animating (ctx.drawPicture ignores
     // globalAlpha; see the candle-mode branch above for the full reason).
+    // pausedDt (not dt) — the grid layer owns `gridState`'s label crossfades,
+    // and the candle branch documents why they must freeze with pause; this
+    // call site and the single-series one below were the two that didn't.
     if (cfg.showGrid && chartReveal >= 1) {
       updateGridLayer(
         s.gridLayer,
@@ -1380,7 +1532,7 @@ export function engineStep(
         layout,
         cfg.palette,
         cfg.formatValue,
-        dt,
+        pausedDt,
         s.gridLayerCache,
         fonts
       );
@@ -1391,7 +1543,12 @@ export function engineStep(
     let drawHoverX: number | null = null;
     let drawHoverTime: number | null = null;
     let isActiveHover = false;
-    let hoverEntries: { color: string; label: string; value: number }[] = [];
+    // Shared read-only empty until a hover actually happens — see
+    // EMPTY_HOVER_ENTRIES. The array below genuinely can't be pooled: it is
+    // handed to `s.lastHoverEntries` and read back on the scrub fade-out
+    // frames, so a single reused buffer would be cleared out from under it.
+    let hoverEntries: { color: string; label: string; value: number }[] =
+      EMPTY_HOVER_ENTRIES;
 
     if (hoverPx !== null && hoverPx >= pad.left && hoverPx <= w - pad.right) {
       const maxHoverX = layout.toX(now);
@@ -1401,6 +1558,7 @@ export function engineStep(
       drawHoverX = clampedX;
       drawHoverTime = t;
       isActiveHover = true;
+      hoverEntries = [];
 
       for (const entry of seriesEntries) {
         // Skip hidden series from crosshair tooltip
@@ -1482,9 +1640,12 @@ export function engineStep(
       pauseProgress,
       now_ms,
       primaryPalette: cfg.palette,
-      lineCaches: s.lineCaches,
       multiDataSource: dataSourceOf(useMultiStash, s.pausedMultiData !== null),
       gridLayer: s.gridLayer,
+      lineArgs: s.lineDrawArgs,
+      // Pooled pairing (see EngineState.multiLineCache) — a literal here
+      // would allocate once per multi-series frame.
+      lineCache: s.multiLineCache,
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text
@@ -1505,6 +1666,16 @@ export function engineStep(
           cfg.emptyText
         );
       }
+    }
+
+    // --- Live value display ---
+    // Multi-series has no single "the" value to show, but leaving
+    // `out.valueText` as `null` means "leave unchanged" to the caller — so a
+    // chart switched from single-series to multi kept displaying whatever
+    // the line pipeline last wrote, forever. Publish an explicit blank.
+    if (cfg.showValue) {
+      out.valueText = '';
+      out.valueColor = '';
     }
 
     // No badge in multi-series mode
@@ -1558,10 +1729,7 @@ export function engineStep(
     const now = useStash ? s.frozenNow : Date.now() / 1000 - s.timeDebt;
     const windowResult = updateWindowTransition(
       cfg,
-      transition,
-      s.displayWindow,
-      s.displayMin,
-      s.displayMax,
+      s,
       noMotion,
       now_ms,
       now,
@@ -1589,6 +1757,33 @@ export function engineStep(
     filterVisiblePointsInto(effectivePoints, leftEdge, filterRight, visible);
 
     if (visible.length < 2) {
+      // Data exists (`hasData` is true, so `chartReveal` is heading to 1 and
+      // the loading/empty early return at the top of the function is not
+      // reached) but none of it lands inside the current window — a stalled
+      // feed, or coming back from background, leaves every point older than
+      // `leftEdge`. Returning here without drawing anything left the recorded
+      // picture completely empty: no grid, no empty state, a fully
+      // transparent chart. Draw the loading/empty fallback + edge fade, which
+      // is exactly what the multi-series pipeline already does for the
+      // identical `seriesEntries.length === 0` case above.
+      if (loadingAlpha > 0.01) {
+        drawLoading(ctx, w, h, pad, cfg.palette, now_ms, loadingAlpha);
+      }
+      if (1 - loadingAlpha > 0.01) {
+        drawEmpty(
+          ctx,
+          w,
+          h,
+          pad,
+          cfg.palette,
+          1 - loadingAlpha,
+          now_ms,
+          false,
+          cfg.emptyText
+        );
+      }
+      drawEdgeFade(ctx, pad.left, h);
+      publishBlankValue(out, cfg);
       return out;
     }
 
@@ -1601,15 +1796,10 @@ export function engineStep(
     );
     const isWindowTransitioning = transition.startMs > 0;
     const rangeResult = updateRange(
+      s,
       computedRange,
-      s.rangeInited,
-      s.targetMin,
-      s.targetMax,
-      s.displayMin,
-      s.displayMax,
       isWindowTransitioning,
       windowTransProgress,
-      transition,
       adaptiveSpeed,
       chartH,
       pausedDt
@@ -1619,9 +1809,9 @@ export function engineStep(
     s.targetMax = rangeResult.targetMax;
     s.displayMin = rangeResult.displayMin;
     s.displayMax = rangeResult.displayMax;
-    const { minVal, maxVal, valRange } = rangeResult;
+    const { valRange } = rangeResult;
 
-    const layout: ChartLayout = {
+    const layout: ChartLayout = makeLayout(
       w,
       h,
       pad,
@@ -1629,17 +1819,16 @@ export function engineStep(
       chartH,
       leftEdge,
       rightEdge,
-      minVal,
-      maxVal,
-      valRange,
-      toX: (t: number) =>
-        pad.left + ((t - leftEdge) / (rightEdge - leftEdge)) * chartW,
-      toY: (v: number) => pad.top + (1 - (v - minVal) / valRange) * chartH,
-    };
+      rangeResult
+    );
 
     // Cross-frame grid picture cache — see engine/gridLayer.ts. Bypassed
     // while the reveal morph is animating (ctx.drawPicture ignores
     // globalAlpha; see the candle-mode branch above for the full reason).
+    // pausedDt (not dt) — this pipeline already hands `drawFrame` pausedDt,
+    // and `drawFrame`'s own inline `drawGrid` (the reveal < 1 path) drives
+    // the same `gridState` label fades from it, so raw dt here meant the
+    // fades froze or didn't depending purely on which path drew the grid.
     if (cfg.showGrid && chartReveal >= 1) {
       updateGridLayer(
         s.gridLayer,
@@ -1647,7 +1836,7 @@ export function engineStep(
         layout,
         cfg.palette,
         cfg.formatValue,
-        dt,
+        pausedDt,
         s.gridLayerCache,
         fonts
       );
@@ -1659,17 +1848,12 @@ export function engineStep(
     // Hover + scrub
     const hoverResult = updateHoverState(
       hoverPixelX,
-      pad,
-      w,
       layout,
       now,
       visible,
       s.scrubAmount,
       s.lastHover,
-      noMotion,
-      leftEdge,
-      rightEdge,
-      chartW
+      noMotion
     );
     s.scrubAmount = hoverResult.scrubAmount;
     s.lastHover = hoverResult.lastHover;
@@ -1704,6 +1888,60 @@ export function engineStep(
         : 0;
     const swingMagnitude =
       valRange > 0 ? Math.min(recentDelta / valRange, 1) : 0;
+
+    // --- Declarative scroll layer: the line's prefix stroke ---------------
+    //
+    // On frames where the prefix provably hasn't changed (a `lineCacheHits`
+    // hit) and the whole line pipeline is at full opacity and untransformed
+    // (`canCompositeLineScroll`), the prefix is composited from an SkPicture
+    // under a `<Group transform>` and `drawLine` strokes only the tail. Any
+    // other frame draws the line exactly as before, whole, and publishes an
+    // empty scroll layer — the same both-branches shape the grid picture
+    // uses above, and for the same reason: `ctx.drawPicture` ignores
+    // `globalAlpha`, so a layer that can't be composited at alpha 1 must not
+    // be composited at all.
+    //
+    // Deliberately runs after `updateHoverState` (it reads this frame's
+    // settled `s.scrubAmount`) and before `drawFrame` (which reads
+    // `splitPrefixStroke`). `s.shakeState.amplitude` is read pre-decay,
+    // which is the value `drawFrame`'s own translate will use this frame.
+    const dataSource = dataSourceOf(useStash, s.pausedData !== null);
+    const canComposite = canCompositeLineScroll(
+      chartReveal,
+      s.scrubAmount,
+      cfg.degenOptions ? s.shakeState.amplitude : 0
+    );
+    // Pooled ref (EngineState.lineCacheRef), refilled in place — the same
+    // object is handed to `drawFrame` below as `lineCache`, so the predicate
+    // here and the cache `drawLine` consults are provably the same inputs,
+    // and neither costs an allocation.
+    const lineCacheRef = s.lineCacheRef;
+    lineCacheRef.slot = s.lineCache;
+    lineCacheRef.dataRev = cfg.dataRev;
+    lineCacheRef.dataSource = dataSource;
+    lineCacheRef.splitPrefixStroke = false;
+    let splitPrefixStroke = false;
+    if (canComposite && lineCacheHits(lineCacheRef, layout, visible)) {
+      updateLineScrollLayer(
+        s.lineScroll,
+        s.lineCache,
+        layout,
+        cfg.palette,
+        s.lineScrollCache,
+        fonts
+      );
+      // `canComposite` is already true inside this branch, so the alpha
+      // argument is 1; `scrollLayerUsable` keeps its alpha-1 contract for a
+      // future consumer that genuinely is alpha-driven.
+      splitPrefixStroke = scrollLayerUsable(s.lineScroll, 1);
+    }
+    lineCacheRef.splitPrefixStroke = splitPrefixStroke;
+    if (splitPrefixStroke) {
+      out.scrollPicture = s.lineScroll.picture;
+      // Same dx the cached prefix path is offset by — the picture IS that
+      // path, rendered (see draw/lineCache.ts's `lineScrollDx`).
+      out.scrollDx = lineScrollDx(s.lineCache, layout);
+    }
 
     // Draw canvas content (everything except badge)
     drawFrame(ctx, layout, cfg.palette, {
@@ -1751,12 +1989,9 @@ export function engineStep(
       chartReveal,
       pauseProgress,
       now_ms,
-      lineCache: {
-        slot: s.lineCache,
-        dataRev: cfg.dataRev,
-        dataSource: dataSourceOf(useStash, s.pausedData !== null),
-      },
+      lineCache: lineCacheRef,
       gridLayer: s.gridLayer,
+      lineArgs: s.lineDrawArgs,
     });
 
     // During morph (chart ↔ empty), overlay the gradient gap + text on

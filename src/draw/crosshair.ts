@@ -79,8 +79,10 @@ export function drawCrosshair(
 
   ctx.textAlign = 'left';
 
-  // Text outline for readability against the chart
-  if (tooltipOutline) {
+  // Text outline for readability against the chart. Matches drawMultiCrosshair
+  // below and the documented default (types.ts / README: tooltipOutline
+  // defaults to true) — an omitted flag must draw the outline, not skip it.
+  if (tooltipOutline !== false) {
     ctx.strokeStyle = palette.tooltipBg;
     ctx.lineWidth = 3;
     ctx.lineJoin = 'round';

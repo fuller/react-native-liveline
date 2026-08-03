@@ -34,16 +34,21 @@ npm install @shopify/react-native-skia react-native-reanimated react-native-work
 | `@shopify/react-native-skia` | `>=2.0.0` |
 | `react-native-reanimated` | `>=4.0.0` |
 | `react-native-worklets` | `>=0.3.0` |
-| `react-native-gesture-handler` | `>=3.0.0` |
+| `react-native-gesture-handler` | `>=2.30.0` |
 
 Reanimated 4 split its worklets runtime out into the separate
 `react-native-worklets` package (Reanimated itself declares this as its own
 peer dependency as of 4.0.0), so it's required alongside Reanimated here too.
-This library hasn't been tested against Reanimated 3.x. It's also not tested
-against gesture-handler 2.x anymore — this library still uses the classic
-`Gesture.Pan()` builder API (unchanged since v2), which gesture-handler 3.x
-keeps working but marks deprecated in favor of a new hook-based API; a
-migration to the new API is deferred to a future release.
+This library hasn't been tested against Reanimated 3.x.
+
+**gesture-handler 2.30 and 3.x are both supported.** The scrub gesture uses
+the classic `Gesture.Pan()` builder API, which exists unchanged in both majors
+— 3.x keeps it working but marks it deprecated in favour of a new hook-based
+API, and migrating is deferred to a future release. The `>=2.30.0` floor
+matters for Expo: SDK 55 pins `~2.30.0`, so a narrower range would put every
+SDK 55 app into a peer conflict and an `expo-doctor` failure. Compatibility is
+verified by installing 2.30.0 and running the typecheck against it, not by
+inspection.
 
 ### Reanimated Babel plugin
 
@@ -133,7 +138,7 @@ The component fills its parent container — set a height on the parent. Pass
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
 | `theme` | `'light' \| 'dark'` | `'dark'` | Color scheme |
-| `color` | `string` | `'#3b82f6'` | Accent color — all palette colors derived from this |
+| `color` | `string` | `'#3b82f6'` | Accent color — all palette colors derived from this. Accepts `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, or `rgba()`. Named CSS colors (e.g. `"red"`) are not supported and fall back to grey. |
 | `grid` | `boolean` | `true` | Y-axis grid lines + labels |
 | `badge` | `boolean` | `true` | Value pill tracking chart tip |
 | `badgeVariant` | `'default' \| 'minimal'` | `'default'` | Badge style: accent-colored or white with grey text |
@@ -244,6 +249,52 @@ data" empty state is shown.
 | `onHover` | `(point: HoverPoint \| null) => void` | — | Hover callback with `{ time, value, x, y }` |
 | `style` | `StyleProp<ViewStyle>` | — | Container style |
 
+**Accessibility**
+
+| Prop | Type | Default | Description |
+|------|------|---------|-------------|
+| `accessibilityLabel` | `string` | `'Live chart'` | Label read by VoiceOver/TalkBack for the chart |
+| `testID` | `string` | — | Test id on the chart container; controls derive ids from it (see below) |
+
+### Accessibility
+
+The chart is drawn with Skia, so without help a screen reader finds nothing but
+an unlabelled blank region. `Liveline` announces itself as an image (React
+Native has no chart role) with `accessibilityLabel`, and exposes the live
+number through `accessibilityValue` — formatted with your `formatValue`, with
+the momentum direction appended:
+
+```
+"BTC/USD, image. 64,201.55, rising"
+```
+
+This costs nothing when no screen reader is running. `Liveline` checks
+`AccessibilityInfo.isScreenReaderEnabled()` and subscribes to
+`screenReaderChanged`; while no reader is active there is no sampling timer, no
+state, and no accessibility value at all. When a reader *is* active the value
+is sampled once a second — a screen reader cannot follow 60 updates a second,
+and restarts its utterance on every change, so a per-frame feed would read as
+an endless stutter. Readings that format identically are skipped, so a still
+chart stays quiet.
+
+Note that `formatValue` is called on the JS thread (about once a second) while
+a screen reader is running, in addition to its usual per-frame call on the UI
+thread. Keep it free of UI-thread-only dependencies.
+
+The window pills, line/candle toggle and series chips carry their own labels
+and selected/checked state. The icon-only mode toggle reads as "Line chart" and
+"Candlestick chart".
+
+**Test ids.** Give the chart a `testID` and the built-in controls derive theirs
+from it, so Detox and Maestro can drive them:
+
+| Element | Test id |
+|---------|---------|
+| Chart container | `${testID}` |
+| Window pill | `${testID}-window-${secs}` |
+| Mode toggle | `${testID}-mode-line`, `${testID}-mode-candle` |
+| Series chip | `${testID}-series-${id}` |
+
 ### Charts in lists
 
 Each `Liveline` runs its own 60fps UI-thread frame loop, so a long list of
@@ -281,10 +332,52 @@ function TickerList({ rows }: { rows: Ticker[] }) {
 }
 ```
 
+#### Hoist object and function props
+
+`Liveline` is wrapped in `React.memo`, and its props are compared shallowly. A
+new object or function identity on every parent render defeats that — and it
+costs more than a wasted render. The engine mirrors its config into a shared
+value on every commit, and the frame loop's idle detection keys off that
+config's object identity, so a chart that receives fresh props each render can
+never go idle even when nothing about it has changed.
+
+This matters most in exactly the list above, where one row's tick re-renders the
+whole list.
+
+```tsx
+// ✗ new identity every render — memo always misses, chart never idles
+<Liveline
+  data={item.data}
+  padding={{ top: 8, right: 60, bottom: 24, left: 8 }}
+  windows={[{ secs: 30, label: '30s' }, { secs: 60, label: '1m' }]}
+  formatValue={(v) => `$${v.toFixed(2)}`}
+/>
+
+// ✓ hoisted to module scope (or useMemo / useCallback if they depend on props)
+const PADDING = { top: 8, right: 60, bottom: 24, left: 8 };
+const WINDOWS = [{ secs: 30, label: '30s' }, { secs: 60, label: '1m' }];
+const formatUsd = (v: number) => {
+  'worklet';
+  return `$${v.toFixed(2)}`;
+};
+
+<Liveline data={item.data} padding={PADDING} windows={WINDOWS} formatValue={formatUsd} />
+```
+
+`data` and `value` are expected to change — that is the live feed, and the
+engine diffs `data` rather than re-sending it. It is the *configuration* props
+that should be stable.
+
+Note that `formatValue` / `formatTime` run on the UI thread and need the
+`'worklet'` directive, which also makes hoisting them the natural choice.
+
 ### `LivelineTransition`
 
 Cross-fades between chart components (e.g. line ↔ candlestick). Children must
-have unique `key` props matching possible `active` values.
+have unique `key` props matching possible `active` values. If `active` doesn't
+match any child's key, nothing renders (there is no visible chart until
+`active` changes to a valid key) — in development this logs a warning naming
+the bad value and the keys that are available.
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
@@ -396,9 +489,9 @@ have unique `key` props matching possible `active` values.
 This port keeps the same SDK shape as [liveline](https://github.com/benjitaylor/liveline)
 but a few props differ because of the native/worklet environment:
 
-- **`formatValue` / `formatTime` must be worklets.** They run every frame on
-  the UI thread, not the JS thread. Add the `'worklet'` directive as the
-  first line of the function:
+- **`formatValue` / `formatTime` must be worklets.** They run on the UI
+  thread, not the JS thread. Add the `'worklet'` directive as the first line
+  of the function:
 
   ```tsx
   <Liveline
@@ -412,6 +505,14 @@ but a few props differ because of the native/worklet environment:
   ```
 
   The defaults (`v.toFixed(2)` and `HH:MM:SS`) are already worklets.
+
+  **They must also be pure functions of their input.** Label text is cached
+  per axis tick / grid line and re-computed only when the formatter's
+  *identity* changes, not every frame — so a formatter that reads anything
+  besides its argument (relative time like `"5s ago"`, a mutable
+  locale/timezone captured by closure) will render stale text. If the
+  formatting rule changes, pass a new function instance to invalidate the
+  cache.
 
 - **`style` is a React Native `ViewStyle`**, not `CSSProperties`. There is no
   `className` or `cursor` prop — those were web-only (CSS class + cursor

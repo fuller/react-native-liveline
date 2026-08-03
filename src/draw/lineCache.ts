@@ -4,7 +4,14 @@ import {
   emitSplineSegments,
   drawSplineTail,
 } from '../math/spline';
-import { ensured, type CachePath } from './pathCache';
+import {
+  ensured,
+  createLayoutKey,
+  writeLayoutKey,
+  layoutKeyMatches,
+  type CachePath,
+  type LayoutKey,
+} from './pathCache';
 
 export type { CachePath } from './pathCache';
 
@@ -42,6 +49,23 @@ export interface LineCacheRef {
   /** Which backing array the points came from: 0 = live buffer,
    * 1 = paused snapshot, 2 = reverse-morph stash. */
   dataSource: number;
+  /**
+   * Declarative scroll layer: when true, the caller is compositing the
+   * prefix stroke itself (from a picture recorded by
+   * engine/lineScrollLayer.ts) and `drawLine` must stroke the **tail only**,
+   * so the prefix isn't drawn twice. The fill is unaffected — it is still
+   * drawn whole, from the combined path.
+   *
+   * Advisory, not a command: `drawLine` honors it only on frames where the
+   * path cache is actually in use (`cacheReady`), since the immediate-mode
+   * fallback has no separable prefix. The caller therefore only sets it when
+   * it has independently confirmed a `lineCacheHits` hit for this frame —
+   * see engine/step.ts, which is also where the alpha gate lives.
+   *
+   * Absent (undefined) for the multi-series and candle pipelines, which draw
+   * the combined path exactly as before.
+   */
+  splitPrefixStroke?: boolean;
 }
 
 export interface LineCacheSlot {
@@ -51,6 +75,10 @@ export interface LineCacheSlot {
   scratch: CachePath | null;
   /** Assembled fill path (valid only when wantFill was true). */
   fillScratch: CachePath | null;
+  /** Tail-only stroke path in CURRENT screen coords: moveTo(cutX + dx, cutY)
+   * then the same two tail cubics `scratch` ends with. Valid only after
+   * `assembleLineTailStroke` (never written by `assembleLineTail`). */
+  tailScratch: CachePath | null;
 
   // Prefix metadata
   tRef: number; // decimated[0].time at build
@@ -59,25 +87,38 @@ export interface LineCacheSlot {
   cutY: number;
   endTangent: number; // tangent the prefix actually ended with (post-clamp)
 
+  /**
+   * Monotonic counter bumped every time `prefix` is rebuilt — i.e. in the one
+   * place `slot.prefix` is written, the miss branch of `updateLinePaths`.
+   *
+   * This is the whole invalidation key for anything downstream that caches a
+   * *rendering* of `prefix` (the scroll layer's SkPicture). "Has the prefix
+   * changed since I recorded it?" is exactly one question, and copying the 13
+   * `kFoo` dimensions into a second key to re-answer it is a mirror that goes
+   * stale the moment a 14th dimension is added to `lineCacheHits`. One counter
+   * cannot.
+   */
+  buildRev: number;
+
   // Invalidation key — flat numbers only, compared field-by-field so a
   // per-frame check allocates nothing. Validity is `prefix !== null` (no
-  // separate boolean — the two are always written together). `layout.w`
-  // isn't keyed: it only reaches the drawn geometry through `chartW`
-  // (already keyed) and pad.left (absorbed by `dx`, see below), so it can
-  // never catch an invalidation those don't already catch.
+  // separate boolean — the two are always written together).
+  //
+  // The data-identity half lives here; the layout half is the shared
+  // `LayoutKey` below (min/max, x scale, h, pads, chartW), which the candle
+  // cache embeds too so the two can't drift apart on spelling again. It is a
+  // nested OBJECT but not a nested allocation: `createLineCacheSlot` builds it
+  // once and `writeLayoutKey` overwrites it in place, so the per-frame
+  // `layoutKeyMatches` call is still just number compares.
   kDataRev: number;
-  kDataSource: number;
+  kDataSource: number; // not layout — stays here, see pathCache.ts LayoutKey
   kLen: number; // visible.length
   kFirstT: number; // visible[0].time
   kLastT: number; // visible[len-1].time
   kLastV: number; // visible[len-1].value
-  kMin: number; // layout.minVal (snaps exactly when settled)
-  kMax: number;
-  kWindow: number; // rightEdge - leftEdge (x scale)
-  kH: number;
-  kPadTop: number;
-  kPadBottom: number;
-  kChartW: number;
+  /** Layout half of the key — see `LayoutKey` in pathCache.ts, including why
+   * `layout.w` is deliberately absent. `minVal` snaps exactly when settled. */
+  layoutKey: LayoutKey;
 }
 
 /** Below this many decimated points the legacy rebuild is cheap anyway. */
@@ -89,24 +130,20 @@ export function createLineCacheSlot(): LineCacheSlot {
     prefix: null,
     scratch: null,
     fillScratch: null,
+    tailScratch: null,
     tRef: 0,
     xRefAtBuild: 0,
     cutX: 0,
     cutY: 0,
     endTangent: 0,
+    buildRev: 0,
     kDataRev: 0,
     kDataSource: 0,
     kLen: 0,
     kFirstT: 0,
     kLastT: 0,
     kLastV: 0,
-    kMin: 0,
-    kMax: 0,
-    kWindow: 0,
-    kH: 0,
-    kPadTop: 0,
-    kPadBottom: 0,
-    kChartW: 0,
+    layoutKey: createLayoutKey(),
   };
 }
 
@@ -122,35 +159,65 @@ export function createLineCacheSlot(): LineCacheSlot {
  * the expensive per-frame work is needed at all, and `updateLinePaths` below
  * calls the exact same function on its (already-built) inputs, so the two
  * checks can never drift apart.
+ *
+ * The data-identity half of the key is derived here from `ref` (the slot plus
+ * this frame's revision/source) and from `visible` itself, rather than being
+ * passed as six loose arguments — four of which were adjacent numbers a
+ * caller could silently transpose. Deriving them in the one place that
+ * compares them also means a caller cannot compute them differently from the
+ * way `updateLinePaths` writes them.
+ *
+ * Precondition: `visible` is non-empty (every caller already gates on it).
  */
 export function lineCacheHits(
-  slot: LineCacheSlot,
+  ref: LineCacheRef,
   layout: ChartLayout,
-  dataRev: number,
-  dataSource: number,
-  visLen: number,
-  visFirstT: number,
-  visLastT: number,
-  visLastV: number
+  visible: LivelinePoint[]
 ): boolean {
   'worklet';
-  const window = layout.rightEdge - layout.leftEdge;
+  const slot = ref.slot;
+  // Ordered so nothing is dereferenced before the cheap disqualifiers run:
+  // `visible` is only indexed once the slot is known valid and the length
+  // already matches, which rules out the empty array (no valid slot can
+  // have kLen 0 — see MIN_CACHE_POINTS).
+  if (slot.prefix === null) return false;
+  const n = visible.length;
+  if (
+    slot.kLen !== n ||
+    slot.kDataRev !== ref.dataRev ||
+    slot.kDataSource !== ref.dataSource
+  ) {
+    return false;
+  }
+  const last = visible[n - 1]!;
   return (
-    slot.prefix !== null &&
-    slot.kDataRev === dataRev &&
-    slot.kDataSource === dataSource &&
-    slot.kLen === visLen &&
-    slot.kFirstT === visFirstT &&
-    slot.kLastT === visLastT &&
-    slot.kLastV === visLastV &&
-    slot.kMin === layout.minVal &&
-    slot.kMax === layout.maxVal &&
-    slot.kWindow === window &&
-    slot.kH === layout.h &&
-    slot.kPadTop === layout.pad.top &&
-    slot.kPadBottom === layout.pad.bottom &&
-    slot.kChartW === layout.chartW
+    slot.kFirstT === visible[0]!.time &&
+    slot.kLastT === last.time &&
+    slot.kLastV === last.value &&
+    layoutKeyMatches(slot.layoutKey, layout)
   );
+}
+
+/**
+ * Horizontal scroll of the cached prefix since it was built, in screen px.
+ *
+ * The ONE place this subtraction is written, so the combined path, the
+ * split-out tail and any caller that translates the prefix itself (the
+ * declarative scroll layer) can never disagree about where the prefix is.
+ * Always recomputed against the build-time reference — never accumulated —
+ * so there is no drift; see the note on `assembleLineTail` below.
+ *
+ * Returns 0 for a slot with no prefix (tRef/xRefAtBuild are both still 0
+ * only by coincidence there, so callers should gate on `slot.prefix`).
+ *
+ * The scroll layer (draw/scrollLayer.ts) uses this same function against this
+ * same slot rather than mirroring `tRef`/`xRefAtBuild` into a slot of its own:
+ * its picture is a recording *of* `slot.prefix`, so the picture and the
+ * translated path are the same geometry and must move by the same number.
+ */
+export function lineScrollDx(slot: LineCacheSlot, layout: ChartLayout): number {
+  'worklet';
+  return layout.toX(slot.tRef) - slot.xRefAtBuild;
 }
 
 /**
@@ -173,6 +240,12 @@ export function lineCacheHits(
  * path: it isn't part of the invalidation key, so — matching the pre-split
  * behavior exactly — it's still recomputed fresh by the caller every frame
  * rather than trusted from a prior build.
+ *
+ * `splitStroke` (the declarative scroll layer is stroking `tailScratch`
+ * instead of `scratch` this frame) makes the combined path *unread as a
+ * stroke* — but NOT unused: the fill polygon is built by extending `scratch`,
+ * so it is only genuinely dead work when there is no fill. Hence the guard is
+ * `splitStroke && !wantFill`, and with fill on the assembly is unchanged.
  */
 export function assembleLineTail(
   slot: LineCacheSlot,
@@ -183,10 +256,12 @@ export function assembleLineTail(
   lastY: number,
   tipX: number,
   tipY: number,
-  firstY: number
+  firstY: number,
+  splitStroke: boolean = false
 ): void {
   'worklet';
-  const dx = layout.toX(slot.tRef) - slot.xRefAtBuild;
+  if (splitStroke && !wantFill) return;
+  const dx = lineScrollDx(slot, layout);
 
   // Assemble the stroke path: translated prefix + live tail.
   slot.scratch = ensured(slot.scratch, makePath);
@@ -223,6 +298,104 @@ export function assembleLineTail(
 }
 
 /**
+ * ── Split stroke API (declarative scroll layer) ────────────────────────────
+ *
+ * The declarative render shell wants the line's stroke as two *separately
+ * drawable* pieces: the prefix, recorded once into a picture and moved by a
+ * `<Group transform>`, and the tail, drawn live every frame. This section
+ * adds exactly that, additively — `assembleLineTail` above and its combined
+ * `slot.scratch` / `slot.fillScratch` are untouched and still the only thing
+ * `drawLine` uses.
+ *
+ * Shape of the API, and why:
+ *
+ * - **The prefix is exposed as `slot.prefix` itself** (via `linePrefixPath`
+ *   for a documented, null-checked accessor) rather than as a fresh
+ *   untranslated copy. No copy is needed: `assembleLineTail` translates the
+ *   *scratch* — `scratch.addPath(slot.prefix)` then `scratch.offset(dx, 0)`
+ *   — so the offset lands on the copy inside `scratch`, never on `prefix`.
+ *   `slot.prefix` is written in exactly one place (the miss branch of
+ *   `updateLinePaths`) and is only ever read afterwards, so it stays in
+ *   build-time coordinates for its whole life. A second copy would cost an
+ *   extra native path per slot and one more thing to keep in sync, and would
+ *   buy nothing. The caller supplies the transform: `translateX` =
+ *   `lineScrollDx(slot, layout)`.
+ *
+ * - **The tail gets its own slot-owned scratch** (`slot.tailScratch`) filled
+ *   by `assembleLineTailStroke`, in current screen coordinates, because
+ *   unlike the prefix it has no cached representation to reuse — it is
+ *   rebuilt from this frame's two moving points regardless.
+ *
+ * - **The tail is re-emitted rather than sliced out of `slot.scratch`.**
+ *   Building the combined path as prefix + `addPath(tailScratch, …, true)`
+ *   would insert a zero-length connector verb and stop the combined path
+ *   from being verb-for-verb what it is today; two extra `cubicTo`s per
+ *   frame is the cheaper price. The tail starts at `slot.cutX + dx` with
+ *   `slot.endTangent`, the same arguments `assembleLineTail` passes, so the
+ *   join with the translated prefix is the identical C1-continuous one.
+ *
+ * - **The fill is NOT split**, deliberately. It is one closed
+ *   semi-transparent polygon; abutting two halves leaves a hairline seam
+ *   (antialiased coverage on a shared edge sums to ~0.75), overlapping them
+ *   double-darkens a 1px column, and a non-AA clip split only tiles exactly
+ *   when both sides round a fractional `dx` identically. Whoever consumes
+ *   this API keeps drawing the whole fill live from `slot.fillScratch`.
+ */
+
+/**
+ * The prefix stroke — the spline through decimated points `0..N-2` — in
+ * BUILD-TIME screen coordinates. Null until a prefix has been built.
+ *
+ * Never mutated by translation (see the section comment above), so it is
+ * safe to record into a long-lived picture: the picture stays valid until
+ * the next `lineCacheHits` miss rebuilds the prefix, and the caller moves it
+ * with `lineScrollDx(slot, layout)` on the x axis.
+ */
+export function linePrefixPath(slot: LineCacheSlot): CachePath | null {
+  'worklet';
+  return slot.prefix;
+}
+
+/**
+ * Assembles `slot.tailScratch`: the tail stroke alone, in CURRENT screen
+ * coordinates — `moveTo(slot.cutX + dx, slot.cutY)` followed by the same two
+ * cubics `assembleLineTail` appends to the combined path. Drawing the
+ * translated prefix and this back to back is geometrically identical to
+ * drawing `slot.scratch`; only the leading `moveTo` differs, and it lands
+ * exactly on the translated prefix's last on-curve point.
+ *
+ * Independent of `assembleLineTail` — callers that want both call both.
+ * Caller guarantees `slot.prefix` is non-null (same contract as
+ * `assembleLineTail`).
+ */
+export function assembleLineTailStroke(
+  slot: LineCacheSlot,
+  makePath: () => CachePath,
+  layout: ChartLayout,
+  lastX: number,
+  lastY: number,
+  tipX: number,
+  tipY: number
+): void {
+  'worklet';
+  const dx = lineScrollDx(slot, layout);
+  slot.tailScratch = ensured(slot.tailScratch, makePath);
+  const tail = slot.tailScratch;
+  tail.rewind();
+  tail.moveTo(slot.cutX + dx, slot.cutY);
+  drawSplineTail(
+    tail,
+    slot.cutX + dx,
+    slot.cutY,
+    slot.endTangent,
+    lastX,
+    lastY,
+    tipX,
+    tipY
+  );
+}
+
+/**
  * Key-compare (via `lineCacheHits`) → on miss rebuild the prefix → assemble
  * `slot.scratch` (and `slot.fillScratch` when `wantFill`) for this frame.
  *
@@ -246,36 +419,32 @@ export function assembleLineTail(
  * `assembleLineTail` without ever building `decimated`/`pts`.
  */
 export function updateLinePaths(
-  slot: LineCacheSlot,
+  ref: LineCacheRef,
   makePath: () => CachePath,
   layout: ChartLayout,
   decimated: LivelinePoint[],
   pts: [number, number][],
   wantFill: boolean,
-  dataRev: number,
-  dataSource: number,
-  visLen: number,
-  visFirstT: number,
-  visLastT: number,
-  visLastV: number
+  /** The frame's visible points — the data-identity half of the cache key is
+   * derived from this, see `lineCacheHits`. Non-empty by construction here:
+   * `decimated` is a subset of it and already passed the MIN_CACHE_POINTS
+   * check above. */
+  visible: LivelinePoint[]
 ): boolean {
   'worklet';
   const N = decimated.length;
   if (N < MIN_CACHE_POINTS) return false;
 
-  const hit = lineCacheHits(
-    slot,
-    layout,
-    dataRev,
-    dataSource,
-    visLen,
-    visFirstT,
-    visLastT,
-    visLastV
-  );
+  const slot = ref.slot;
+  // Forwarded to `assembleLineTail` — see its doc comment, and
+  // `LineCacheRef.splitPrefixStroke` for why it is advisory.
+  const splitStroke = ref.splitPrefixStroke === true;
+  const hit = lineCacheHits(ref, layout, visible);
 
   if (!hit) {
     slot.prefix = ensured(slot.prefix, makePath);
+    // The ONE place `prefix` is written, so the ONE place `buildRev` moves.
+    slot.buildRev++;
     const prefix = slot.prefix;
     prefix.rewind();
     prefix.moveTo(pts[0]![0], pts[0]![1]);
@@ -287,19 +456,14 @@ export function updateLinePaths(
     slot.cutY = pts[prefixCount - 1]![1];
     slot.tRef = decimated[0]!.time;
     slot.xRefAtBuild = pts[0]![0];
-    slot.kDataRev = dataRev;
-    slot.kDataSource = dataSource;
-    slot.kLen = visLen;
-    slot.kFirstT = visFirstT;
-    slot.kLastT = visLastT;
-    slot.kLastV = visLastV;
-    slot.kMin = layout.minVal;
-    slot.kMax = layout.maxVal;
-    slot.kWindow = layout.rightEdge - layout.leftEdge;
-    slot.kH = layout.h;
-    slot.kPadTop = layout.pad.top;
-    slot.kPadBottom = layout.pad.bottom;
-    slot.kChartW = layout.chartW;
+    const visLast = visible[visible.length - 1]!;
+    slot.kDataRev = ref.dataRev;
+    slot.kDataSource = ref.dataSource;
+    slot.kLen = visible.length;
+    slot.kFirstT = visible[0]!.time;
+    slot.kLastT = visLast.time;
+    slot.kLastV = visLast.value;
+    writeLayoutKey(slot.layoutKey, layout);
   }
 
   assembleLineTail(
@@ -311,7 +475,8 @@ export function updateLinePaths(
     pts[N - 1]![1],
     pts[N]![0],
     pts[N]![1],
-    pts[0]![1]
+    pts[0]![1],
+    splitStroke
   );
 
   return true;

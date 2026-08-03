@@ -31,6 +31,15 @@ export interface TimeAxisState {
    * Also holds references into `labelEntryPool`, never its own objects —
    * `.length = 0` at the top of each use. */
   drawnScratch: TimeLabelEntry[];
+  /** The `formatTime` this state's cached label text was produced with,
+   * compared by reference. `null` before the first frame. Label text is only
+   * recomputed when this changes (or for a key never seen before) — see the
+   * comment at the create-labels loop in `drawTimeAxis` for why that is safe
+   * and what it saves. A formatter closing over mutable state it reads but
+   * does not appear in its own identity will go stale here; every formatter
+   * in this codebase, and the documented contract for the `formatTime` prop,
+   * is a pure function of its argument. */
+  formatTimeRef: ((t: number) => string) | null;
   /** Growable pool of reusable `{x,alpha,text,w}` objects, indexed by
    * position in this frame's visible-label scan (NOT by label key — a
    * given index may back a different label on every frame, which is fine
@@ -44,6 +53,31 @@ export interface TimeAxisState {
 }
 
 const FADE = 0.08;
+/** Width of the fade-out band at each end of the axis, in px. */
+const FADE_ZONE = 50;
+
+// NOTE: worklet declaration order — these two are hoisted to module scope
+// (rather than being reallocated as closures on every frame) and are therefore
+// declared BEFORE `drawTimeAxis`, which calls them. See the same NOTE at
+// draw/canvas2d.ts.
+
+/** Label opacity as a function of screen x: 1 in the body of the axis, ramping
+ * to 0 across `FADE_ZONE` px at either end. `chartLeft`/`chartRight` are
+ * parameters rather than captured so this can live at module scope. */
+function edgeAlpha(x: number, chartLeft: number, chartRight: number): number {
+  'worklet';
+  const fromEdge = Math.min(x - chartLeft, chartRight - x);
+  if (fromEdge >= FADE_ZONE) return 1;
+  if (fromEdge <= 0) return 0;
+  return fromEdge / FADE_ZONE;
+}
+
+/** Left-to-right label ordering — the overlap resolution below walks the
+ * labels in screen order. */
+function byX(a: TimeLabelEntry, b: TimeLabelEntry): number {
+  'worklet';
+  return a.x - b.x;
+}
 
 export function drawTimeAxis(
   ctx: Ctx2D,
@@ -60,16 +94,6 @@ export function drawTimeAxis(
   const chartLeft = pad.left;
   const chartRight = layout.w - pad.right;
   const chartW = chartRight - chartLeft;
-  const fadeZone = 50;
-
-  const edgeAlpha = (x: number): number => {
-    const fromLeft = x - chartLeft;
-    const fromRight = chartRight - x;
-    const fromEdge = Math.min(fromLeft, fromRight);
-    if (fromEdge >= fadeZone) return 1;
-    if (fromEdge <= 0) return 0;
-    return fromEdge / fadeZone;
-  };
 
   ctx.font = ctx.fonts.label;
 
@@ -105,28 +129,55 @@ export function drawTimeAxis(
     targets.add(Math.round(t * 100));
   }
 
-  // Create or update labels. Text is updated in-place — no crossfade needed
-  // because format changes coincide with scroll transitions where the eye
-  // tracks movement, not text content. By the time labels settle, the text
-  // is already correct so nothing visibly changes on stationary labels.
+  // Create labels for newly-visible keys.
+  //
+  // `formatTime(key / 100)` is a pure function of `key`, so a label's text
+  // cannot change while its key and the formatter both stay the same. This
+  // loop used to call the formatter for EVERY target on EVERY frame and then
+  // overwrite each existing label's text with a byte-identical string. At the
+  // ~6-10 labels a chart typically shows, that is 360-600 formatter calls per
+  // second, and the default formatter (`defaultFormatTime` in Liveline.tsx)
+  // allocates a Date, three padStart results and a template string on each
+  // call — several thousand short-lived allocations per second, on the UI
+  // thread, to recompute text that was already correct.
+  //
+  // The formatter now runs only for a key being seen for the first time.
+  // Text is still updated in place when the *formatter itself* changes,
+  // caught by reference identity — the same conservative trade gridLayer.ts
+  // makes for `kFormatValue`. That re-text deliberately does NOT touch
+  // alphas: a label already on screen must not restart its fade-in just
+  // because the consumer swapped formatters.
+  if (state.formatTimeRef !== formatTime) {
+    state.formatTimeRef = formatTime;
+    for (const [key, label] of state.labels) {
+      label.text = formatTime(key / 100);
+    }
+  }
   for (const key of targets) {
-    const text = formatTime(key / 100);
-    const existing = state.labels.get(key);
-    if (!existing) {
-      state.labels.set(key, { alpha: 0, text });
-    } else {
-      existing.text = text;
+    if (state.labels.get(key) === undefined) {
+      state.labels.set(key, { alpha: 0, text: formatTime(key / 100) });
     }
   }
 
-  // Update alphas
+  // Update alphas.
+  //
+  // The `!isTarget` term on the delete is load-bearing, not defensive.
+  // `targets` deliberately spans one interval beyond each edge (see the
+  // generation loop above), so the buffer keys sit outside the visible
+  // x-range, where `edgeAlpha` returns 0. Without `!isTarget` those keys
+  // churn: created at alpha 0, decayed, deleted, then re-created and
+  // re-formatted on the very next frame, forever — which also defeats the
+  // text memoization above, since each re-creation is a genuinely unseen key.
+  // Keeping a still-targeted label parked at alpha 0 costs one Map entry
+  // (`targets` is capped at 30) and is invisible: the draw pass below filters
+  // at `alpha < 0.02`.
   for (const [key, label] of state.labels) {
     const x = toX(key / 100);
     const isTarget = targets.has(key);
-    const target = isTarget ? edgeAlpha(x) : 0;
+    const target = isTarget ? edgeAlpha(x, chartLeft, chartRight) : 0;
     let next = lerp(label.alpha, target, FADE, dt);
     if (Math.abs(next - target) < 0.02) next = target;
-    if (next < 0.01 && target === 0) {
+    if (next < 0.01 && target === 0 && !isTarget) {
       state.labels.delete(key);
     } else {
       label.alpha = next;
@@ -173,7 +224,7 @@ export function drawTimeAxis(
     poolIdx++;
     labels.push(entry);
   }
-  labels.sort((a, b) => a.x - b.x);
+  labels.sort(byX);
 
   // Resolve overlaps: when two labels collide, keep the higher-alpha one.
   // This gives a clean one-time crossover (no flickering) because one alpha
@@ -197,20 +248,28 @@ export function drawTimeAxis(
     drawn.push(label);
   }
 
+  // No save()/restore() per label. Each pair cost a 14-field StyleSnapshot
+  // allocation plus a canvas.save()/restore() JSI round-trip that recorded a
+  // real save/restore layer into the picture — ~500 objects and ~1,000 JSI
+  // calls a second at 6-10 labels/frame — to protect exactly four properties.
+  // globalAlpha is the only one that actually needs restoring afterwards;
+  // strokeStyle/lineWidth are loop-invariant (hoisted here, and identical to
+  // what the axis line above already set), and fillStyle is reassigned
+  // unconditionally by every iteration and by every subsequent draw call in
+  // the frame. Nothing in the body touches the transform or clip, which is
+  // the only other state canvas.save() was protecting.
+  ctx.strokeStyle = palette.gridLine;
+  ctx.lineWidth = 1;
+  ctx.fillStyle = palette.timeLabel;
   for (const label of drawn) {
-    ctx.save();
     ctx.globalAlpha = baseAlpha * label.alpha;
 
-    ctx.strokeStyle = palette.gridLine;
-    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(label.x, lineY);
     ctx.lineTo(label.x, lineY + tickLen);
     ctx.stroke();
 
-    ctx.fillStyle = palette.timeLabel;
     ctx.fillText(label.text, label.x, lineY + tickLen + 14);
-
-    ctx.restore();
   }
+  ctx.globalAlpha = baseAlpha;
 }

@@ -1,5 +1,12 @@
 import type { ChartLayout, CandlePoint } from '../types';
-import { ensured, type CachePath } from './pathCache';
+import {
+  ensured,
+  createLayoutKey,
+  writeLayoutKey,
+  layoutKeyMatches,
+  type CachePath,
+  type LayoutKey,
+} from './pathCache';
 
 export type { CachePath } from './pathCache';
 
@@ -81,20 +88,22 @@ export interface CandleCacheSlot {
   // Invalidation key — flat numbers only, compared field-by-field so a
   // per-frame check allocates nothing. Validity is `bullBodies !== null` (no
   // separate boolean — all four paths are always (re)built together).
+  //
+  // The candle-identity half lives here; the layout half is the shared
+  // `LayoutKey` below, the same object type LineCacheSlot embeds — one
+  // spelling of min/max/x-scale/h/pads/chartW for both caches. Nested object,
+  // but allocated once per slot in `createCandleCacheSlot` and overwritten in
+  // place by `writeLayoutKey`, so the per-frame compare still allocates
+  // nothing.
   kCandlesRev: number;
-  kDataSource: number;
+  kDataSource: number; // not layout — stays here, see pathCache.ts LayoutKey
   kCandleWidthSecs: number;
   kClosedCount: number; // count of non-live candles in the frame's candle list
   kFirstClosedTime: number;
   kLastClosedTime: number;
-  kMinVal: number;
-  kMaxVal: number;
-  kWindow: number; // rightEdge - leftEdge (x scale)
-  kH: number;
-  kPadTop: number;
-  kPadBottom: number;
-  kChartW: number;
   kRadius: number; // candleDims' radius — depends on bodyW (zoom level)
+  /** Layout half of the key — see `LayoutKey` in pathCache.ts. */
+  layoutKey: LayoutKey;
 }
 
 /** Below this many closed candles the legacy rebuild is cheap anyway. */
@@ -119,14 +128,8 @@ export function createCandleCacheSlot(): CandleCacheSlot {
     kClosedCount: 0,
     kFirstClosedTime: 0,
     kLastClosedTime: 0,
-    kMinVal: 0,
-    kMaxVal: 0,
-    kWindow: 0,
-    kH: 0,
-    kPadTop: 0,
-    kPadBottom: 0,
-    kChartW: 0,
     kRadius: 0,
+    layoutKey: createLayoutKey(),
   };
 }
 
@@ -187,18 +190,23 @@ function roundedRectOnPath(
  * upstream conditions gate that.
  */
 export function updateCandleCache(
-  slot: CandleCacheSlot,
+  /** Slot + this frame's data-identity inputs (revision, backing array).
+   * Taken as the whole ref the caller already holds rather than as three
+   * loose arguments, so the slot can never be paired with another frame's
+   * revision by a mis-ordered call. */
+  ref: CandleCacheRef,
   makePath: () => CachePath,
   layout: ChartLayout,
   candles: CandlePoint[],
   candleWidthSecs: number,
   liveTime: number,
   bodyW: number,
-  radius: number,
-  dataSource: number,
-  candlesRev: number
+  radius: number
 ): boolean {
   'worklet';
+  const slot = ref.slot;
+  const dataSource = ref.dataSource;
+  const candlesRev = ref.candlesRev;
   // Scan closed-candle identity (no allocation): count + first/last time.
   let closedCount = 0;
   let firstClosedTime = 0;
@@ -212,7 +220,6 @@ export function updateCandleCache(
   }
   if (closedCount < MIN_CACHE_CANDLES) return false;
 
-  const window = layout.rightEdge - layout.leftEdge;
   const hit =
     slot.bullBodies !== null &&
     slot.kCandlesRev === candlesRev &&
@@ -221,14 +228,8 @@ export function updateCandleCache(
     slot.kClosedCount === closedCount &&
     slot.kFirstClosedTime === firstClosedTime &&
     slot.kLastClosedTime === lastClosedTime &&
-    slot.kMinVal === layout.minVal &&
-    slot.kMaxVal === layout.maxVal &&
-    slot.kWindow === window &&
-    slot.kH === layout.h &&
-    slot.kPadTop === layout.pad.top &&
-    slot.kPadBottom === layout.pad.bottom &&
-    slot.kChartW === layout.chartW &&
-    slot.kRadius === radius;
+    slot.kRadius === radius &&
+    layoutKeyMatches(slot.layoutKey, layout);
 
   if (hit) return true;
 
@@ -303,14 +304,8 @@ export function updateCandleCache(
   slot.kClosedCount = closedCount;
   slot.kFirstClosedTime = firstClosedTime;
   slot.kLastClosedTime = lastClosedTime;
-  slot.kMinVal = layout.minVal;
-  slot.kMaxVal = layout.maxVal;
-  slot.kWindow = window;
-  slot.kH = layout.h;
-  slot.kPadTop = layout.pad.top;
-  slot.kPadBottom = layout.pad.bottom;
-  slot.kChartW = layout.chartW;
   slot.kRadius = radius;
+  writeLayoutKey(slot.layoutKey, layout);
 
   return true;
 }

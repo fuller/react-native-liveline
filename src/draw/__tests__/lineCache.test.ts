@@ -3,6 +3,9 @@ import {
   updateLinePaths,
   lineCacheHits,
   assembleLineTail,
+  assembleLineTailStroke,
+  linePrefixPath,
+  lineScrollDx,
   MIN_CACHE_POINTS,
   type CachePath,
 } from '../lineCache';
@@ -158,19 +161,27 @@ function update(
 ): boolean {
   const pts = buildPts(data, layout, smoothValue, now);
   return updateLinePaths(
-    hz.slot,
+    { slot: hz.slot, dataRev, dataSource },
     hz.makePath,
     layout,
     data,
     pts,
     wantFill,
-    dataRev,
-    dataSource,
-    data.length,
-    data[0]!.time,
-    data[data.length - 1]!.time,
-    data[data.length - 1]!.value
+    data
   );
+}
+
+/** `lineCacheHits` against a harness slot. The data-identity half of the key
+ * is derived from `data` itself now, so a test varies a key field by varying
+ * the points it passes. */
+function hits(
+  hz: Harness,
+  layout: ChartLayout,
+  data: LivelinePoint[],
+  dataRev = 0,
+  dataSource = 0
+): boolean {
+  return lineCacheHits({ slot: hz.slot, dataRev, dataSource }, layout, data);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -379,9 +390,7 @@ describe('lineCacheHits', () => {
   it('is false on a fresh slot (no prefix built yet)', () => {
     const hz = makeHarness();
     const layout = makeLayout(NOW, 90, 110);
-    expect(
-      lineCacheHits(hz.slot, layout, 0, 0, N, NOW - 30, NOW - 1, 100)
-    ).toBe(false);
+    expect(hits(hz, layout, makeData(N, NOW - 30))).toBe(false);
   });
 
   it('is true right after a build, with the same key inputs', () => {
@@ -391,18 +400,7 @@ describe('lineCacheHits', () => {
     const layout = makeLayout(NOW, 90, 110);
     expect(update(hz, layout, data, smooth, NOW)).toBe(true);
 
-    expect(
-      lineCacheHits(
-        hz.slot,
-        layout,
-        0,
-        0,
-        data.length,
-        data[0]!.time,
-        data[data.length - 1]!.time,
-        data[data.length - 1]!.value
-      )
-    ).toBe(true);
+    expect(hits(hz, layout, data)).toBe(true);
   });
 
   it('stays true at a later `now` with an unchanged layout/data (pure time advance)', () => {
@@ -412,18 +410,7 @@ describe('lineCacheHits', () => {
     update(hz, makeLayout(NOW, 90, 110), data, smooth, NOW);
 
     const laterLayout = makeLayout(NOW + 4.2, 90, 110);
-    expect(
-      lineCacheHits(
-        hz.slot,
-        laterLayout,
-        0,
-        0,
-        data.length,
-        data[0]!.time,
-        data[data.length - 1]!.time,
-        data[data.length - 1]!.value
-      )
-    ).toBe(true);
+    expect(hits(hz, laterLayout, data)).toBe(true);
   });
 
   it('is false when any key input changes (dataRev, dataSource, range, window, size, len)', () => {
@@ -433,64 +420,37 @@ describe('lineCacheHits', () => {
     const layout = makeLayout(NOW, 90, 110);
     update(hz, layout, data, smooth, NOW);
 
-    const firstT = data[0]!.time;
     const lastT = data[data.length - 1]!.time;
     const lastV = data[data.length - 1]!.value;
 
-    expect(
-      lineCacheHits(hz.slot, layout, 1, 0, data.length, firstT, lastT, lastV)
-    ).toBe(false); // dataRev
-    expect(
-      lineCacheHits(hz.slot, layout, 0, 1, data.length, firstT, lastT, lastV)
-    ).toBe(false); // dataSource
-    expect(
-      lineCacheHits(
-        hz.slot,
-        makeLayout(NOW, 89, 110),
-        0,
-        0,
-        data.length,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // range min
-    expect(
-      lineCacheHits(
-        hz.slot,
-        makeLayout(NOW, 90, 110, 120),
-        0,
-        0,
-        data.length,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // window
-    expect(
-      lineCacheHits(
-        hz.slot,
-        makeLayout(NOW, 90, 110, 60, 500),
-        0,
-        0,
-        data.length,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // canvas size
-    expect(
-      lineCacheHits(
-        hz.slot,
-        layout,
-        0,
-        0,
-        data.length + 1,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // len
+    expect(hits(hz, layout, data, 1, 0)).toBe(false); // dataRev
+    expect(hits(hz, layout, data, 0, 1)).toBe(false); // dataSource
+    expect(hits(hz, makeLayout(NOW, 89, 110), data)).toBe(false); // range min
+    expect(hits(hz, makeLayout(NOW, 90, 110, 120), data)).toBe(false); // window
+    expect(hits(hz, makeLayout(NOW, 90, 110, 60, 500), data)).toBe(false); // size
+
+    // len, isolated: one extra INTERIOR point, so firstT/lastT/lastV are all
+    // unchanged and only kLen can be doing the invalidating.
+    const oneLonger = [
+      ...data.slice(0, -1),
+      { time: lastT - 0.5, value: lastV },
+      data[data.length - 1]!,
+    ];
+    expect(hits(hz, layout, oneLonger)).toBe(false); // len
+
+    // The three point-derived fields, one at a time.
+    const firstMoved = [
+      { time: data[0]!.time - 1, value: data[0]!.value },
+      ...data.slice(1),
+    ];
+    expect(hits(hz, layout, firstMoved)).toBe(false); // firstT
+    const lastMoved = [...data.slice(0, -1), { time: lastT + 1, value: lastV }];
+    expect(hits(hz, layout, lastMoved)).toBe(false); // lastT
+    const lastRevalued = [
+      ...data.slice(0, -1),
+      { time: lastT, value: lastV + 1 },
+    ];
+    expect(hits(hz, layout, lastRevalued)).toBe(false); // lastV
   });
 
   it('is allocation-free and read-only (no new paths, slot untouched)', () => {
@@ -502,16 +462,7 @@ describe('lineCacheHits', () => {
     const madeAfterBuild = hz.made.length;
     const prefixVerbsBefore = (hz.slot.prefix as FakePath).verbs.length;
 
-    lineCacheHits(
-      hz.slot,
-      layout,
-      0,
-      0,
-      data.length,
-      data[0]!.time,
-      data[data.length - 1]!.time,
-      data[data.length - 1]!.value
-    );
+    hits(hz, layout, data);
 
     expect(hz.made.length).toBe(madeAfterBuild);
     expect((hz.slot.prefix as FakePath).verbs.length).toBe(prefixVerbsBefore);
@@ -546,18 +497,7 @@ describe('assembleLineTail (fast path)', () => {
     // branch does, without ever constructing decimated/pts.
     const fast = makeHarness();
     update(fast, buildLayout, data, smooth, NOW, true);
-    expect(
-      lineCacheHits(
-        fast.slot,
-        laterLayout,
-        0,
-        0,
-        data.length,
-        data[0]!.time,
-        data[data.length - 1]!.time,
-        data[data.length - 1]!.value
-      )
-    ).toBe(true);
+    expect(hits(fast, laterLayout, data)).toBe(true);
 
     const pts = buildPts(data, laterLayout, smooth, later);
     const madeBeforeAssemble = fast.made.length;
@@ -662,6 +602,289 @@ describe('assembleLineTail (fast path)', () => {
   });
 });
 
+// The split-stroke API the declarative scroll layer consumes: the prefix
+// stroke (build-time coords, moved by a <Group transform>) drawn separately
+// from the tail stroke (current screen coords, drawn live). These tests pin
+// the two invariants the shell depends on — the prefix is never translated
+// in place, and prefix+tail is the same geometry as the combined path — plus
+// the promise that the fill is left exactly as it is today.
+describe('split stroke (prefix / tail)', () => {
+  const NOW = 1000;
+  const N = 20;
+
+  /** Deep snapshot of a fake path's verbs, immune to later mutation. */
+  function snapshot(p: FakePath): Verb[] {
+    return p.verbs.map((v) => ({ op: v.op, c: v.c.slice() }));
+  }
+
+  function builtHarness(): {
+    hz: Harness;
+    data: LivelinePoint[];
+    smooth: number;
+  } {
+    const hz = makeHarness();
+    const data = makeData(N, NOW - 30);
+    const smooth = data[data.length - 1]!.value;
+    update(hz, makeLayout(NOW, 90, 110), data, smooth, NOW, true);
+    return { hz, data, smooth };
+  }
+
+  it('exposes slot.prefix as-is, untranslated and unmutated over many frames', () => {
+    const { hz, data, smooth } = builtHarness();
+    const prefix = hz.slot.prefix as FakePath;
+    expect(linePrefixPath(hz.slot)).toBe(prefix);
+    const atBuild = snapshot(prefix);
+
+    // 200 frames of pure scrolling: a cache hit every frame, both the
+    // combined assembly and the split tail assembly running.
+    for (let f = 1; f <= 200; f++) {
+      const t = NOW + f * 0.0167;
+      const layout = makeLayout(t, 90, 110);
+      expect(hits(hz, layout, data)).toBe(true);
+      const pts = buildPts(data, layout, smooth, t);
+      assembleLineTail(
+        hz.slot,
+        hz.makePath,
+        layout,
+        true,
+        pts[pts.length - 2]![0],
+        pts[pts.length - 2]![1],
+        pts[pts.length - 1]![0],
+        pts[pts.length - 1]![1],
+        pts[0]![1]
+      );
+      assembleLineTailStroke(
+        hz.slot,
+        hz.makePath,
+        layout,
+        pts[pts.length - 2]![0],
+        pts[pts.length - 2]![1],
+        pts[pts.length - 1]![0],
+        pts[pts.length - 1]![1]
+      );
+    }
+
+    // Byte-identical to the build: offset() lands on the scratch copy, never
+    // on the prefix, so a picture recorded from it stays valid.
+    expect(snapshot(prefix)).toEqual(atBuild);
+    expect(prefix.rewinds).toBe(1);
+    // dx moved (leftwards, as time advances) — the frames really did scroll.
+    expect(
+      lineScrollDx(hz.slot, makeLayout(NOW + 200 * 0.0167, 90, 110))
+    ).toBeLessThan(-1);
+  });
+
+  it('allocates the tail scratch once and reuses it', () => {
+    const { hz, data, smooth } = builtHarness();
+    let made = 0;
+    for (let f = 1; f <= 5; f++) {
+      const t = NOW + f;
+      const layout = makeLayout(t, 90, 110);
+      const pts = buildPts(data, layout, smooth, t);
+      const before = hz.made.length;
+      assembleLineTailStroke(
+        hz.slot,
+        hz.makePath,
+        layout,
+        pts[pts.length - 2]![0],
+        pts[pts.length - 2]![1],
+        pts[pts.length - 1]![0],
+        pts[pts.length - 1]![1]
+      );
+      made += hz.made.length - before;
+    }
+    expect(made).toBe(1); // only the first frame allocated tailScratch
+    expect((hz.slot.tailScratch as FakePath).rewinds).toBe(5);
+  });
+
+  it('starts the tail exactly at cutX + dx with the cached cutY', () => {
+    const { hz, data, smooth } = builtHarness();
+    const later = NOW + 4.2;
+    const layout = makeLayout(later, 90, 110);
+    const pts = buildPts(data, layout, smooth, later);
+    assembleLineTailStroke(
+      hz.slot,
+      hz.makePath,
+      layout,
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      pts[pts.length - 1]![0],
+      pts[pts.length - 1]![1]
+    );
+
+    const dx = layout.toX(hz.slot.tRef) - hz.slot.xRefAtBuild;
+    expect(lineScrollDx(hz.slot, layout)).toBe(dx);
+    expect(dx).not.toBe(0);
+
+    const tail = (hz.slot.tailScratch as FakePath).verbs;
+    expect(tail[0]!.op).toBe('M');
+    expect(tail[0]!.c[0]!).toBe(hz.slot.cutX + dx);
+    expect(tail[0]!.c[1]!).toBe(hz.slot.cutY);
+    expect(tail.length).toBe(3); // moveTo + two tail cubics
+    expect(tail[1]!.op).toBe('C');
+    expect(tail[2]!.op).toBe('C');
+
+    // The start point is exactly the translated prefix's last on-curve
+    // point, so the two pieces meet with no gap.
+    const prefixVerbs = (hz.slot.prefix as FakePath).verbs;
+    const lastPrefix = prefixVerbs[prefixVerbs.length - 1]!;
+    expect(lastPrefix.c[4]! + dx).toBe(tail[0]!.c[0]!);
+    expect(lastPrefix.c[5]!).toBe(tail[0]!.c[1]!);
+  });
+
+  it('translated prefix + tail is the same geometry as the combined path', () => {
+    const { hz, data, smooth } = builtHarness();
+    const later = NOW + 4.2;
+    const layout = makeLayout(later, 90, 110);
+    const pts = buildPts(data, layout, smooth, later);
+    const args: [number, number, number, number] = [
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      pts[pts.length - 1]![0],
+      pts[pts.length - 1]![1],
+    ];
+    assembleLineTail(hz.slot, hz.makePath, layout, true, ...args, pts[0]![1]);
+    assembleLineTailStroke(hz.slot, hz.makePath, layout, ...args);
+
+    const dx = lineScrollDx(hz.slot, layout);
+
+    // What the scroll layer draws: prefix recorded at build time, moved by
+    // translateX = dx, then the live tail.
+    const drawn = new FakePath();
+    drawn.addPath(hz.slot.prefix!);
+    drawn.offset(dx, 0);
+    const tailVerbs = (hz.slot.tailScratch as FakePath).verbs;
+    // Skip the tail's leading moveTo — it re-states the point the prefix
+    // already ends on (asserted exactly equal in the test above).
+    for (let i = 1; i < tailVerbs.length; i++) {
+      drawn.verbs.push({ op: tailVerbs[i]!.op, c: tailVerbs[i]!.c.slice() });
+    }
+
+    const combined = (hz.slot.scratch as FakePath).verbs;
+    expect(drawn.verbs.length).toBe(combined.length);
+    for (let i = 0; i < combined.length; i++) {
+      expect(drawn.verbs[i]!.op).toBe(combined[i]!.op);
+      for (let k = 0; k < combined[i]!.c.length; k++) {
+        expect(drawn.verbs[i]!.c[k]!).toBe(combined[i]!.c[k]!);
+      }
+    }
+  });
+
+  it('leaves the fill path byte-identical to the unsplit construction', () => {
+    const { hz, data, smooth } = builtHarness();
+    const later = NOW + 4.2;
+    const layout = makeLayout(later, 90, 110);
+    const pts = buildPts(data, layout, smooth, later);
+    const tipX = pts[pts.length - 1]![0];
+    const firstY = pts[0]![1];
+
+    assembleLineTail(
+      hz.slot,
+      hz.makePath,
+      layout,
+      true,
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      tipX,
+      pts[pts.length - 1]![1],
+      firstY
+    );
+    // …and the split call, which must not disturb the fill at all.
+    assembleLineTailStroke(
+      hz.slot,
+      hz.makePath,
+      layout,
+      pts[pts.length - 2]![0],
+      pts[pts.length - 2]![1],
+      tipX,
+      pts[pts.length - 1]![1]
+    );
+
+    // Literal re-implementation of the fill block as it stands today.
+    const expected = new FakePath();
+    const baseY = layout.h - layout.pad.bottom;
+    const firstX = layout.toX(hz.slot.tRef);
+    expected.moveTo(firstX, baseY);
+    expected.lineTo(firstX, firstY);
+    expected.addPath(hz.slot.scratch!, undefined, true);
+    expected.lineTo(tipX, baseY);
+    expected.close();
+
+    expect((hz.slot.fillScratch as FakePath).verbs).toEqual(expected.verbs);
+  });
+});
+
 // decimateMinMax's own correctness (including the bucketSecs absolute-grid
 // path) is covered in math/__tests__/math.test.ts, next to its other tests —
 // this file only tests what's specific to the cache built on top of it.
+
+// ── buildRev ───────────────────────────────────────────────────────────────
+//
+// `slot.buildRev` is the sole invalidation signal the scroll layer keys on
+// (`writeLineScrollKey` pushes it as dimension 0) and the input to
+// `observeScrollRate`'s `layerChanged` guard. Deleting the `buildRev++` in
+// `updateLinePaths`' miss branch used to break BOTH of those and fail no test:
+// lineScrollLayer.test.ts bumps the field by hand, so nothing asserted that a
+// real rebuild moves it. These close that gap.
+
+describe('buildRev tracks actual prefix rebuilds', () => {
+  const NOW = 1000;
+  const N = 20;
+
+  it('increments on a rebuild and stays put on a cache hit', () => {
+    const hz = makeHarness();
+    const layout = makeLayout(NOW, 0, 100);
+    const data = makeData(N, NOW);
+
+    const start = hz.slot.buildRev;
+    update(hz, layout, data, data[N - 1]!.value, NOW);
+    const afterBuild = hz.slot.buildRev;
+    expect(afterBuild).toBeGreaterThan(start);
+
+    // Same inputs — a hit. The prefix is reused, so the revision must not move,
+    // or the scroll layer would re-record a picture it already has.
+    update(hz, layout, data, data[N - 1]!.value, NOW);
+    expect(hz.slot.buildRev).toBe(afterBuild);
+  });
+
+  it('increments again when new data forces another rebuild', () => {
+    const hz = makeHarness();
+    const layout = makeLayout(NOW, 0, 100);
+    const data = makeData(N, NOW);
+
+    update(hz, layout, data, data[N - 1]!.value, NOW);
+    const afterFirst = hz.slot.buildRev;
+
+    // A new point: different length and last-time, so the key misses.
+    const grown = [...data, { time: NOW + 1, value: data[N - 1]!.value + 1 }];
+    update(
+      hz,
+      layout,
+      grown,
+      grown[grown.length - 1]!.value,
+      NOW + 1,
+      false,
+      1
+    );
+
+    expect(hz.slot.buildRev).toBeGreaterThan(afterFirst);
+  });
+
+  it('moves strictly forward — never reused for a different prefix', () => {
+    // The scroll layer treats equal buildRev as "same picture". If the counter
+    // could ever repeat a value for different geometry, a stale picture would
+    // composite with no visual symptom until it scrolled.
+    const hz = makeHarness();
+    const layout = makeLayout(NOW, 0, 100);
+    const seen = new Set<number>();
+
+    for (let i = 0; i < 12; i++) {
+      const data = makeData(N + i, NOW + i);
+      update(hz, layout, data, data[data.length - 1]!.value, NOW + i, false, i);
+      seen.add(hz.slot.buildRev);
+    }
+
+    // Every rebuild produced a distinct revision.
+    expect(seen.size).toBe(12);
+  });
+});
