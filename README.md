@@ -489,9 +489,9 @@ the bad value and the keys that are available.
 This port keeps the same SDK shape as [liveline](https://github.com/benjitaylor/liveline)
 but a few props differ because of the native/worklet environment:
 
-- **`formatValue` / `formatTime` must be worklets.** They run every frame on
-  the UI thread, not the JS thread. Add the `'worklet'` directive as the
-  first line of the function:
+- **`formatValue` / `formatTime` must be worklets.** They run on the UI
+  thread, not the JS thread. Add the `'worklet'` directive as the first line
+  of the function:
 
   ```tsx
   <Liveline
@@ -505,6 +505,14 @@ but a few props differ because of the native/worklet environment:
   ```
 
   The defaults (`v.toFixed(2)` and `HH:MM:SS`) are already worklets.
+
+  **They must also be pure functions of their input.** Label text is cached
+  per axis tick / grid line and re-computed only when the formatter's
+  *identity* changes, not every frame — so a formatter that reads anything
+  besides its argument (relative time like `"5s ago"`, a mutable
+  locale/timezone captured by closure) will render stale text. If the
+  formatting rule changes, pass a new function instance to invalidate the
+  cache.
 
 - **`style` is a React Native `ViewStyle`**, not `CSSProperties`. There is no
   `className` or `cursor` prop — those were web-only (CSS class + cursor

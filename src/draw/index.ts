@@ -439,8 +439,6 @@ export interface MultiSeriesDrawOptions {
   now_ms: number;
   /** Primary palette (from first series) for grid/axis/crosshair colors */
   primaryPalette: LivelinePalette;
-  /** Per-series line path caches, keyed by series id (see draw/lineCache) */
-  lineCaches?: Map<string, LineCacheSlot>;
   /** Which backing arrays series data came from: 0 live / 1 paused / 2 stash */
   multiDataSource?: number;
   /** Cross-frame grid picture cache (see draw/gridLayer, engine/gridLayer) */
@@ -449,10 +447,18 @@ export interface MultiSeriesDrawOptions {
    * owned by `EngineState`, refilled once per series, never allocated here.
    * See `LineDrawArgs`. */
   lineArgs: LineDrawArgs;
-  /** Pooled `LineCacheRef` for the per-series cache lookup, same deal — its
-   * `slot` is repointed each iteration instead of allocating a ref per
-   * series per frame. Omit to disable the per-series cache entirely. */
-  lineCacheRef?: LineCacheRef;
+  /** Per-series line path cache (see draw/lineCache). `caches` and `ref` are
+   * required together — a ref with no caches map (or vice versa) can't do
+   * anything, so the pairing is one optional property instead of two, to
+   * rule out silently losing caching by passing only one. Omit entirely to
+   * disable the per-series cache. */
+  lineCache?: {
+    /** Keyed by series id */
+    caches: Map<string, LineCacheSlot>;
+    /** Pooled `LineCacheRef`, `slot` repointed each iteration instead of
+     * allocating a ref per series per frame. */
+    ref: LineCacheRef;
+  };
 }
 
 /**
@@ -520,16 +526,16 @@ export function drawMultiFrame(
     // interior revision invalidates just that series' cache — the key's
     // len/firstT/lastT/lastV heuristic can't see interior changes on its own.
     let cacheRef: LineCacheRef | undefined;
-    if (opts.lineCaches !== undefined && opts.lineCacheRef !== undefined) {
-      let slot = opts.lineCaches.get(s.id);
+    if (opts.lineCache !== undefined) {
+      let slot = opts.lineCache.caches.get(s.id);
       if (slot === undefined) {
         slot = createLineCacheSlot();
-        opts.lineCaches.set(s.id, slot);
+        opts.lineCache.caches.set(s.id, slot);
       }
-      // Pooled ref (see MultiSeriesDrawOptions.lineCacheRef) repointed at
+      // Pooled ref (see MultiSeriesDrawOptions.lineCache.ref) repointed at
       // this series' slot, rather than a fresh literal per series per frame.
       // Safe because `drawLine` reads it synchronously and retains nothing.
-      cacheRef = opts.lineCacheRef;
+      cacheRef = opts.lineCache.ref;
       cacheRef.slot = slot;
       cacheRef.dataRev = s.dataRev;
       cacheRef.dataSource = opts.multiDataSource ?? 0;

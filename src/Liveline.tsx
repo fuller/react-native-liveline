@@ -74,6 +74,26 @@ interface BtnLayout {
 }
 
 /**
+ * Per-button on-screen frames, keyed by the button's own selector value
+ * (window seconds, mode name, …), for a `PillBar`'s sliding indicator to
+ * track. Shared by `WindowBar` and `ModeBar` — only the key type differs.
+ */
+function useBtnLayouts<K extends string | number>() {
+  const [layouts, setLayouts] = useState<Record<K, BtnLayout>>(
+    {} as Record<K, BtnLayout>
+  );
+  const onBtnLayout = useCallback((key: K, e: LayoutChangeEvent) => {
+    const { x, width } = e.nativeEvent.layout;
+    setLayouts((prev) => {
+      const cur = prev[key];
+      if (cur && cur.x === x && cur.width === width) return prev;
+      return { ...prev, [key]: { x, width } };
+    });
+  }, []);
+  return [layouts, onBtnLayout] as const;
+}
+
+/**
  * `useMemo` keyed by an explicit signature instead of a dependency array.
  *
  * A live chart re-renders on every tick, and consumers build most array props
@@ -87,6 +107,41 @@ function useStableValue<T>(signature: string, build: () => T): T {
     ref.current = { signature, value: build() };
   }
   return ref.current.value;
+}
+
+/**
+ * Signature string for `useStableValue`, computed from an array's contents.
+ * Skips recomputing (and the per-render `.map`/`.join` allocation) unless
+ * the array's reference — or, as a mutate-in-place guard, its length —
+ * actually changed. Uses ' ' as both the field and entry delimiter so no
+ * label/id value can forge a collision with an adjacent field.
+ */
+function useArraySignature<T>(
+  arr: readonly T[] | undefined,
+  fields: (item: T) => Array<string | number>
+): string {
+  const cache = useRef<{
+    arr: readonly T[];
+    length: number;
+    sig: string;
+  } | null>(null);
+  if (!arr) return '';
+  if (
+    cache.current &&
+    cache.current.arr === arr &&
+    cache.current.length === arr.length
+  ) {
+    return cache.current.sig;
+  }
+  // \x00 / \x01 delimiters, NOT spaces: labels are consumer strings and can
+  // contain any printable character, so only control bytes make entry and
+  // field boundaries unforgeable — `[{label: 'a b'}]` must never collide
+  // with `[{label: 'a'}, {label: 'b'}]`.
+  const sig = `${arr.length}|${arr
+    .map((item) => fields(item).join('\x00'))
+    .join('\x01')}`;
+  cache.current = { arr, length: arr.length, sig };
+  return sig;
 }
 
 /**
@@ -133,15 +188,36 @@ function useActiveWindow(
 
 /** Which series the user has toggled off, plus the engine-facing id list. */
 function useHiddenSeries(
-  seriesCount: number,
+  seriesIds: string[],
   onSeriesToggle: ((id: string, visible: boolean) => void) | undefined
 ) {
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
   const notify = useStableHandler(onSeriesToggle);
   // Read through a ref so the toggle handler stays referentially stable as
   // series come and go — it crosses the `memo` boundary into the chip bar.
-  const countRef = useRef(seriesCount);
-  countRef.current = seriesCount;
+  const idsRef = useRef(seriesIds);
+  idsRef.current = seriesIds;
+
+  // Drop hidden ids for series that left the `series` prop. Without this a
+  // removed-then-re-added series comes back hidden, and stale ids would
+  // otherwise inflate `next.size` below, letting the last-visible guard be
+  // defeated by ids that no longer count as series at all.
+  // \x00 delimiter for the same reason as useArraySignature: ids are
+  // consumer strings, so any printable delimiter can be forged into a
+  // collision that would suppress the prune.
+  const idsSignature = seriesIds.join('\x00');
+  useEffect(() => {
+    const live = new Set(idsRef.current);
+    setHiddenSeries((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [idsSignature]);
 
   const toggleSeries = useCallback(
     (id: string) => {
@@ -151,8 +227,12 @@ function useHiddenSeries(
           next.delete(id);
           notify(id, true);
         } else {
-          // Count visible series — don't hide last one
-          const visibleCount = countRef.current - next.size;
+          // Count only live ids — don't hide the last visible series
+          const liveHiddenCount = idsRef.current.reduce(
+            (n, sid) => n + (next.has(sid) ? 1 : 0),
+            0
+          );
+          const visibleCount = idsRef.current.length - liveHiddenCount;
           if (visibleCount <= 1) return prev;
           next.add(id);
           notify(id, false);
@@ -408,15 +488,7 @@ const WindowBar = memo(function WindowBarComponent({
   onSelect: (secs: number) => void;
   testID: string | undefined;
 }) {
-  const [layouts, setLayouts] = useState<Record<number, BtnLayout>>({});
-  const onBtnLayout = useCallback((secs: number, e: LayoutChangeEvent) => {
-    const { x, width } = e.nativeEvent.layout;
-    setLayouts((prev) => {
-      const cur = prev[secs];
-      if (cur && cur.x === x && cur.width === width) return prev;
-      return { ...prev, [secs]: { x, width } };
-    });
-  }, []);
+  const [layouts, onBtnLayout] = useBtnLayouts<number>();
 
   return (
     <PillBar
@@ -464,15 +536,7 @@ const ModeBar = memo(function ModeBarComponent({
   onSelect: (mode: 'line' | 'candle') => void;
   testID: string | undefined;
 }) {
-  const [layouts, setLayouts] = useState<Record<string, BtnLayout>>({});
-  const onBtnLayout = useCallback((key: string, e: LayoutChangeEvent) => {
-    const { x, width } = e.nativeEvent.layout;
-    setLayouts((prev) => {
-      const cur = prev[key];
-      if (cur && cur.x === x && cur.width === width) return prev;
-      return { ...prev, [key]: { x, width } };
-    });
-  }, []);
+  const [layouts, onBtnLayout] = useBtnLayouts<string>();
 
   return (
     <PillBar
@@ -803,8 +867,12 @@ export const Liveline = memo(function LivelineComponent({
   const { activeWindowSecs, effectiveWindowSecs, selectWindow } =
     useActiveWindow(windows, windowSecs, onWindowChange);
 
+  const seriesIds = useMemo(
+    () => seriesProp?.map((s) => s.id) ?? [],
+    [seriesProp]
+  );
   const { hiddenSeries, hiddenSeriesIds, toggleSeries } = useHiddenSeries(
-    seriesProp?.length ?? 0,
+    seriesIds,
     onSeriesToggle
   );
 
@@ -878,17 +946,15 @@ export const Liveline = memo(function LivelineComponent({
   // Everything below exists to keep <LivelineControls/> memo-stable across a
   // tick: consumers rebuild `windows`/`series` inline and pass inline arrow
   // callbacks, so those identities churn even when their contents do not.
-  const windowsSignature = windows
-    ? `${windows.length}|${windows.map((w) => `${w.secs} ${w.label}`).join('')}`
-    : '';
+  const windowsSignature = useArraySignature(windows, (w) => [w.secs, w.label]);
   const stableWindows = useStableValue(windowsSignature, () => windows);
 
   const chipSource = lastSeriesPropRef.current;
-  const chipSignature = chipSource
-    ? `${chipSource.length}|${chipSource
-        .map((s) => `${s.id} ${s.label ?? ''} ${s.color ?? ''}`)
-        .join('')}`
-    : '';
+  const chipSignature = useArraySignature(chipSource, (s) => [
+    s.id,
+    s.label ?? '',
+    s.color ?? '',
+  ]);
   const seriesChips = useStableValue(chipSignature, () =>
     (chipSource ?? []).map((s, si) => ({
       id: s.id,

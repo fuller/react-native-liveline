@@ -1640,11 +1640,12 @@ export function engineStep(
       pauseProgress,
       now_ms,
       primaryPalette: cfg.palette,
-      lineCaches: s.lineCaches,
       multiDataSource: dataSourceOf(useMultiStash, s.pausedMultiData !== null),
       gridLayer: s.gridLayer,
       lineArgs: s.lineDrawArgs,
-      lineCacheRef: s.lineCacheRef,
+      // Pooled pairing (see EngineState.multiLineCache) — a literal here
+      // would allocate once per multi-series frame.
+      lineCache: s.multiLineCache,
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text

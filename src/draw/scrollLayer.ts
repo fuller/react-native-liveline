@@ -99,6 +99,11 @@ export interface ScrollLayerSlot<Picture> {
    * first build; that null is also the slot's validity flag, matching
    * `LineCacheSlot.prefix` and `GridLayerSlot.picture`. */
   picture: Picture | null;
+  /** Pictures this slot replaced, awaiting `dispose()` — drained by
+   * `disposeRetired` (engine/state.ts) one frame after replacement, once the
+   * tree has composited the successor. The slot can't reach `EngineState`,
+   * so it carries its own bin (mirrors `GridLayerSlot.retired`). */
+  retired: Picture[];
 
   /** Committed numeric key (the inputs the current `picture` was built from). */
   kNum: number[];
@@ -119,6 +124,7 @@ export function createScrollLayerSlot<Picture>(): ScrollLayerSlot<Picture> {
   'worklet';
   return {
     picture: null,
+    retired: [],
     kNum: [],
     kNumLen: 0,
     kRef: [],
@@ -233,6 +239,10 @@ export function scrollLayerBuilt<Picture>(
   picture: Picture
 ): void {
   'worklet';
+  // Retire (don't drop) the outgoing picture — it may still be composited
+  // by the declarative tree until this frame's publish lands, so it is
+  // disposed one frame later by disposeRetired (engine/state.ts), not here.
+  if (slot.picture !== null) slot.retired.push(slot.picture);
   slot.picture = picture;
   scrollLayerCommitKey(slot);
 }

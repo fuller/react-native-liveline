@@ -91,7 +91,7 @@ export function createOrderbookState(): OrderbookState {
 // stale or in-flight reference to a pool slot. Each iteration also uses a
 // distinct slot (indexed by loop position, not label identity), so there is
 // no intra-frame slot collision either.
-function mixColorInto(
+export function mixColorInto(
   out: SkColor,
   from: readonly [number, number, number],
   to: readonly [number, number, number],

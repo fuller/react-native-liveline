@@ -149,6 +149,24 @@ export interface EngineState {
   /** Per-series line path caches, multi-series mode — keyed by series id,
    * pruned alongside displayValues when series are removed */
   lineCaches: Map<string, LineCacheSlot>;
+  /** Pooled `{ caches, ref }` pairing handed to `drawMultiFrame` (see
+   * MultiSeriesDrawOptions.lineCache, which requires the two together).
+   * Both members are the stable `lineCaches`/`lineCacheRef` objects above,
+   * so this is built once here rather than as a fresh literal every
+   * multi-series frame at the call site. */
+  multiLineCache: { caches: Map<string, LineCacheSlot>; ref: LineCacheRef };
+  /** Screen pictures replaced by a newer recording, awaiting `dispose()`.
+   * The screen picture is swapped every recorded frame (~60/sec), and the
+   * grid and scroll layers swap theirs on every rebuild — each swap drops a
+   * native SkPicture whose JS wrapper is tiny, so waiting on the UI
+   * runtime's GC lets tens of native pictures per second pile up on a live
+   * feed. Instead every swap site retires the outgoing picture (this array
+   * for the screen picture; `GridLayerSlot.retired` / `ScrollLayerSlot.retired`
+   * for the layer caches, which never see `EngineState`), and
+   * `disposeRetired` drains all three at the top of the next frame
+   * callback — by which point the declarative tree has composited the
+   * replacement, so nothing retired can still be on screen. */
+  retiredPictures: SkPicture[];
   /** Cross-frame grid (gridlines + Y-axis labels) SkPicture cache (see
    * engine/gridLayer). Single shared instance across modes since only one
    * mode draws per frame. */
@@ -415,9 +433,16 @@ export function createEngineState(
 ): EngineState {
   'worklet';
   // Built before the literal so `lineCacheRef` can point at the very same
-  // slot object rather than a copy.
+  // slot object rather than a copy — and so `multiLineCache` can pair the
+  // very same map and ref the literal stores.
   const lineCache = createLineCacheSlot();
   const candleCache = createCandleCacheSlot();
+  const lineCacheRef: LineCacheRef = {
+    slot: lineCache,
+    dataRev: 0,
+    dataSource: 0,
+  };
+  const lineCaches = new Map<string, LineCacheSlot>();
   return {
     displayValue: value,
     displayValues: new Map<string, number>(),
@@ -471,10 +496,12 @@ export function createEngineState(
       pathTail: false,
     },
     lineCache: lineCache,
-    lineCacheRef: { slot: lineCache, dataRev: 0, dataSource: 0 },
+    lineCacheRef,
     lineDrawArgs: createLineDrawArgs(),
     candleDrawArgs: createCandleDrawArgs(),
-    lineCaches: new Map<string, LineCacheSlot>(),
+    lineCaches,
+    multiLineCache: { caches: lineCaches, ref: lineCacheRef },
+    retiredPictures: [],
     gridLayer: createGridLayerSlot<SkPicture>(),
     gridLayerCache: createSkiaCache(),
     lineScroll: createScrollLayerSlot<SkPicture>(),
@@ -573,4 +600,29 @@ export function createEngineState(
     lastFrameTimestamp: null,
     lastAccrualTimestamp: null,
   };
+}
+
+/**
+ * Dispose every picture retired on a PREVIOUS frame — the screen picture's
+ * bin plus the grid and scroll layer slots' own bins (see
+ * `EngineState.retiredPictures`). Called at the top of the frame callback,
+ * before anything records: entries are pushed mid-frame, after this ran, so
+ * every entry drained here has survived at least one full vsync and the tree
+ * has composited its replacement.
+ *
+ * `dispose()` releases only the JS wrapper's reference; a retired grid or
+ * scroll picture that an earlier screen recording embedded via
+ * `drawPicture` stays alive through that recording's own native ref.
+ */
+export function disposeRetired(s: EngineState): void {
+  'worklet';
+  const screen = s.retiredPictures;
+  for (let i = 0; i < screen.length; i++) screen[i]!.dispose();
+  screen.length = 0;
+  const grid = s.gridLayer.retired;
+  for (let i = 0; i < grid.length; i++) grid[i]!.dispose();
+  grid.length = 0;
+  const scroll = s.lineScroll.retired;
+  for (let i = 0; i < scroll.length; i++) scroll[i]!.dispose();
+  scroll.length = 0;
 }

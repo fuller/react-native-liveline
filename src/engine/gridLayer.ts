@@ -49,6 +49,10 @@ export function updateGridLayer(
   );
   const subCtx = createCanvas2D(canvas, fonts, gridCache);
   drawGrid(subCtx, layout, palette, formatValue, gridState, dt);
+  // Retire (don't drop) the outgoing picture: its JS wrapper is tiny but
+  // the native picture is not, and this re-records every frame while the
+  // key churns. Disposed next frame by disposeRetired (engine/state.ts).
+  if (slot.picture !== null) slot.retired.push(slot.picture);
   slot.picture = recorder.finishRecordingAsPicture();
   writeGridLayerKey(slot, layout, palette, formatValue);
   slot.settledFrames = hit ? slot.settledFrames + 1 : 0;

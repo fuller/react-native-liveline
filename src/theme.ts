@@ -1,12 +1,28 @@
 import type { ThemeMode, LivelinePalette, LivelineSeries } from './types';
 
-// Last value warned about by `parseColorRgb` below. That function is called
-// from the frame path (`draw/dot.ts` parses `palette.line` and
-// `palette.badgeOuterBg` while scrub-dimming), so an unconditional dev warning
-// would fire up to 60 times a second for as long as a bad colour is set —
-// noisier than the silent fallback it replaced. One string compare per call,
-// no allocation, and a bad colour still reports exactly once.
-let lastWarnedColor = '';
+/**
+ * Dev-only warning for an unparseable colour, deduped by last value.
+ *
+ * `parseColorRgb` is called from the frame path (`draw/dot.ts` parses
+ * `palette.line` and `palette.badgeOuterBg` while scrub-dimming), so an
+ * unconditional warning would fire up to 60 times a second for as long as a
+ * bad colour is set. The dedupe flag lives on `globalThis`, NOT in a
+ * module-level `let`: this runs as a worklet on the UI runtime, where the
+ * plugin captures module bindings per-runtime — a captured `let` is at best
+ * a stale per-runtime copy and at worst not writable at all. The global is
+ * per-runtime too (so a bad colour can warn once on each runtime that parses
+ * it), which is the acceptable cost of not mutating captured state.
+ */
+function warnUnrecognizedColor(color: string): void {
+  'worklet';
+  const g = globalThis as { __livelineWarnedColor?: string };
+  if (g.__livelineWarnedColor === color) return;
+  g.__livelineWarnedColor = color;
+  console.warn(
+    `[react-native-liveline] parseColorRgb: unrecognized color "${color}" — ` +
+      'expected #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), or rgba(). Falling back to grey.'
+  );
+}
 
 /**
  * Parse any CSS color string to [r, g, b].
@@ -41,12 +57,8 @@ export function parseColorRgb(color: string): [number, number, number] {
     const rgb = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
     if (rgb) return [+rgb[1]!, +rgb[2]!, +rgb[3]!];
   }
-  if (__DEV__ && color !== lastWarnedColor) {
-    lastWarnedColor = color;
-    console.warn(
-      `[react-native-liveline] parseColorRgb: unrecognized color "${color}" — ` +
-        'expected #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), or rgba(). Falling back to grey.'
-    );
+  if (__DEV__) {
+    warnUnrecognizedColor(color);
   }
   return [128, 128, 128];
 }

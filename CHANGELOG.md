@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Native `SkPicture`s are now disposed, not left to GC.** The screen picture
+  is replaced every recorded frame (~60/sec) and the grid/scroll layer
+  pictures on every rebuild; each replacement dropped a native picture whose
+  tiny JS wrapper gave the garbage collector no reason to hurry. Every swap
+  site now retires the outgoing picture and `dispose()`s it one frame later,
+  once the tree has composited its replacement — bounding native memory on
+  exactly the long-running live charts the library targets.
+- **Suspended-time credit is race-free.** The wall-clock interval accrued
+  while the frame loop was suspended was added from the JS thread while the
+  UI thread drained the same shared value — a fast background/foreground flap
+  could double-credit an interval and leave a paused chart further in the
+  past than it ever was. Both writes now run serialized on the UI runtime.
+- **Removed series no longer haunt the toggle state.** A series removed from
+  `series` and later re-added came back hidden, and its dead id still counted
+  against the "don't hide the last visible series" guard, which could
+  therefore be defeated into a blank chart. Hidden ids are now pruned when
+  the series list changes.
+- The unrecognized-color dev warning no longer mutates a module-level
+  binding from the UI runtime (worklet-captured bindings are per-runtime
+  copies); the dedupe flag lives on the runtime's own global instead.
+
+### Changed
+
+- **`formatValue` / `formatTime` must be pure functions of their input.**
+  Axis and grid label text is cached per tick and re-evaluated when the
+  formatter's identity changes, not every frame (a per-frame `Date` +
+  string-format per label was measurable UI-thread churn). Formatters that
+  read ambient state — relative time, a captured mutable locale — now render
+  stale text; pass a new function instance to invalidate. Documented in the
+  README.
+
 ### Added
 
 - **Accessibility.** The chart is a Skia surface, so a screen reader previously

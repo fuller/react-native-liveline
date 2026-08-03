@@ -8,6 +8,7 @@ import {
 } from '@shopify/react-native-skia';
 import {
   runOnJS,
+  runOnUI,
   useFrameCallback,
   useReducedMotion,
   useSharedValue,
@@ -31,7 +32,11 @@ import {
   type SkiaCache,
 } from './draw/canvas2d';
 import { engineStep } from './engine/step';
-import { createEngineState, type EngineState } from './engine/state';
+import {
+  createEngineState,
+  disposeRetired,
+  type EngineState,
+} from './engine/state';
 import type {
   EngineConfig,
   EngineConfigStep,
@@ -72,6 +77,13 @@ const EMPTY_CANDLES: CandlePoint[] = [];
 // Same idea as EMPTY_CANDLES, for a single multi-series entry with no
 // previously-seen data (a series appearing for the first time).
 const EMPTY_POINTS: LivelinePoint[] = [];
+
+/** Size of the preallocated scroll-transform ring (`scrollTransformBufs`
+ * below). Three rather than two gives two frames of separation before a
+ * buffer is reused, so a consumer still holding last frame's array can't
+ * observe it mutate. Ties the array length to both `%` rotations — resize
+ * here, nowhere else. */
+const SCROLL_TRANSFORM_BUF_COUNT = 3;
 
 /**
  * Strip `data`/`candles` off the caller's config for mirroring into `cfg`
@@ -402,9 +414,11 @@ export function useLivelineEngine(
   const size = useSharedValue({ w: 0, h: 0 });
   const hoverX = useSharedValue<number | null>(null);
   // Wall-clock milliseconds the frame loop spent suspended, waiting to be
-  // credited to `timeDebt` by the next frame that runs. Written from JS (the
-  // AppState listener / the `active` effect below, which are the only things
-  // that know a suspension happened) and drained on the UI thread.
+  // credited to `timeDebt` by the next frame that runs. The JS side (the
+  // AppState listener / the `active` effect below, the only things that know
+  // a suspension happened) computes the interval but accumulates it via
+  // `runOnUI`, so every read-modify-write — the `+=` and the frame
+  // callback's drain to 0 — happens serialized on the UI runtime.
   //
   // A plain number shared value rather than a reach into `state.value`:
   // EngineState holds Skia handles and is owned by the UI runtime, so the JS
@@ -450,11 +464,11 @@ export function useLivelineEngine(
   // the derivation instead of outside it, and self-assignment
   // (`x.value = x.value` after mutating) is not a notification contract
   // Reanimated documents or honors.
-  const scrollTransformBufs = useSharedValue<Transforms3d[]>([
-    [{ translateX: 0 }],
-    [{ translateX: 0 }],
-    [{ translateX: 0 }],
-  ]);
+  const scrollTransformBufs = useSharedValue<Transforms3d[]>(
+    Array.from({ length: SCROLL_TRANSFORM_BUF_COUNT }, () => [
+      { translateX: 0 },
+    ])
+  );
   const scrollBufIdx = useSharedValue(0);
   const valueText = useSharedValue('');
   const valueColor = useSharedValue('');
@@ -483,6 +497,13 @@ export function useLivelineEngine(
       );
       state.value = s;
     }
+
+    // Dispose pictures retired on previous frames (screen, grid layer,
+    // scroll layer — see EngineState.retiredPictures). First thing, before
+    // any recording: entries are pushed later in the callback, so everything
+    // drained here is at least one vsync old and its replacement has
+    // composited.
+    disposeRetired(s);
 
     const now_ms = info.timestamp ?? 0;
 
@@ -620,7 +641,7 @@ export function useLivelineEngine(
           // Rotate to the next preallocated buffer, mutate it, then assign:
           // a fresh identity for the mapper with no allocation. See
           // `scrollTransformBufs`.
-          const i = (scrollBufIdx.value + 1) % 3;
+          const i = (scrollBufIdx.value + 1) % SCROLL_TRANSFORM_BUF_COUNT;
           scrollBufIdx.value = i;
           const buf = scrollTransformBufs.value[i]!;
           (buf[0] as { translateX: number }).translateX = dxEx;
@@ -652,6 +673,11 @@ export function useLivelineEngine(
     frameInputs.candles = candlesBuf.value;
     frameInputs.multiData = multiDataBuf.value;
     const result = engineStep(ctx, c, s, frameInputs);
+    // Retire the outgoing screen picture — replaced every recorded frame,
+    // so leaving it to GC is ~60 native pictures/sec of pressure (see
+    // EngineState.retiredPictures). Still composited until this assignment
+    // lands, hence retire-now/dispose-next-frame rather than dispose here.
+    s.retiredPictures.push(screenPicture.value);
     screenPicture.value = recorder.finishRecordingAsPicture();
     // Publish this frame's scroll layer. `null` means the layer must not
     // composite at all (see StepOutput.scrollPicture) — the empty 1×1
@@ -697,7 +723,7 @@ export function useLivelineEngine(
     // Exact value always wins over whatever a skipped vsync extrapolated, so
     // extrapolation error can never accumulate past one frame. Same
     // rotate-mutate-assign as the paced-out branch above.
-    const bufIdx = (scrollBufIdx.value + 1) % 3;
+    const bufIdx = (scrollBufIdx.value + 1) % SCROLL_TRANSFORM_BUF_COUNT;
     scrollBufIdx.value = bufIdx;
     const buf = scrollTransformBufs.value[bufIdx]!;
     (buf[0] as { translateX: number }).translateX = dx;
@@ -758,7 +784,20 @@ export function useLivelineEngine(
           // `Math.max(0, ...)` guards a wall clock that stepped backwards
           // (NTP correction, user changing the device time zone/clock while
           // the app was away) — never credit negative debt.
-          pendingSuspendedMs.value += Math.max(0, Date.now() - at);
+          const creditMs = Math.max(0, Date.now() - at);
+          if (creditMs > 0) {
+            // Accumulate ON the UI runtime, where the frame callback's
+            // drain (`pendingSuspendedMs.value = 0`) also runs. A JS-side
+            // `+=` is a cross-thread read-modify-write: a fast
+            // background/foreground flap could read a value the UI thread
+            // had already drained but not yet propagated back, re-adding an
+            // interval that was already credited. On the UI runtime both
+            // writers are serialized and the race is gone.
+            runOnUI((ms: number) => {
+              'worklet';
+              pendingSuspendedMs.value += ms;
+            })(creditMs);
+          }
         }
       } else if (suspendedAtRef.current === null) {
         // Only the FIRST transition into suspension stamps the clock: with
