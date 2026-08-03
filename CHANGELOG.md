@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
 ### Fixed
 
 - **Native `SkPicture`s are now disposed, not left to GC.** The screen picture
