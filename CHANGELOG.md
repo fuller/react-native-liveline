@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Accessibility.** The chart is a Skia surface, so a screen reader previously
+  found an unlabelled blank region. `Liveline` now announces itself as an
+  `image` (React Native has no chart role) with a default label of
+  `'Live chart'`, overridable via the new **`accessibilityLabel`** prop, and
+  exposes the live number through `accessibilityValue` — run through the
+  consumer's `formatValue`, with the momentum direction appended
+  (`"64,201.55, rising"`).
+
+  This costs nothing when no screen reader is running. The value is gated on
+  `AccessibilityInfo.isScreenReaderEnabled()` plus its `screenReaderChanged`
+  listener; with no reader active there is no sampling timer, no state and no
+  accessibility value — one boolean test per render, and no UI→JS traffic. The
+  reading is taken from the props already on the JS thread rather than bridged
+  from the engine's UI-thread shared value, so the per-frame render path is
+  untouched and the chart still does not re-render on tick. When a reader *is*
+  active the value is sampled once a second, and readings that format
+  identically are skipped so a still chart stays quiet. `formatValue` is
+  therefore also called on the JS thread, roughly 1Hz, while a reader runs.
+
+  The built-in controls gained labels and selected/checked state — most
+  importantly the icon-only line/candle toggle, which had no text for a reader
+  to fall back on. The live-value overlay (`showValue`) is hidden from
+  assistive tech, since it is a `TextInput` driven at frame rate.
+
+- **`testID`** prop on the chart container. The built-in controls derive their
+  own ids from it (`-window-<secs>`, `-mode-line`, `-mode-candle`,
+  `-series-<id>`), so Detox and Maestro can target the chart and drive its
+  controls.
+
 ### Fixed
 
 - **`react-native-gesture-handler` peer range widened to `>=2.30.0`** (was

@@ -249,6 +249,52 @@ data" empty state is shown.
 | `onHover` | `(point: HoverPoint \| null) => void` | — | Hover callback with `{ time, value, x, y }` |
 | `style` | `StyleProp<ViewStyle>` | — | Container style |
 
+**Accessibility**
+
+| Prop | Type | Default | Description |
+|------|------|---------|-------------|
+| `accessibilityLabel` | `string` | `'Live chart'` | Label read by VoiceOver/TalkBack for the chart |
+| `testID` | `string` | — | Test id on the chart container; controls derive ids from it (see below) |
+
+### Accessibility
+
+The chart is drawn with Skia, so without help a screen reader finds nothing but
+an unlabelled blank region. `Liveline` announces itself as an image (React
+Native has no chart role) with `accessibilityLabel`, and exposes the live
+number through `accessibilityValue` — formatted with your `formatValue`, with
+the momentum direction appended:
+
+```
+"BTC/USD, image. 64,201.55, rising"
+```
+
+This costs nothing when no screen reader is running. `Liveline` checks
+`AccessibilityInfo.isScreenReaderEnabled()` and subscribes to
+`screenReaderChanged`; while no reader is active there is no sampling timer, no
+state, and no accessibility value at all. When a reader *is* active the value
+is sampled once a second — a screen reader cannot follow 60 updates a second,
+and restarts its utterance on every change, so a per-frame feed would read as
+an endless stutter. Readings that format identically are skipped, so a still
+chart stays quiet.
+
+Note that `formatValue` is called on the JS thread (about once a second) while
+a screen reader is running, in addition to its usual per-frame call on the UI
+thread. Keep it free of UI-thread-only dependencies.
+
+The window pills, line/candle toggle and series chips carry their own labels
+and selected/checked state. The icon-only mode toggle reads as "Line chart" and
+"Candlestick chart".
+
+**Test ids.** Give the chart a `testID` and the built-in controls derive theirs
+from it, so Detox and Maestro can drive them:
+
+| Element | Test id |
+|---------|---------|
+| Chart container | `${testID}` |
+| Window pill | `${testID}-window-${secs}` |
+| Mode toggle | `${testID}-mode-line`, `${testID}-mode-candle` |
+| Series chip | `${testID}-series-${id}` |
+
 ### Charts in lists
 
 Each `Liveline` runs its own 60fps UI-thread frame loop, so a long list of

@@ -166,6 +166,18 @@ export interface LivelineProps {
   onSeriesToggle?: (id: string, visible: boolean) => void; // Multi-series toggle callback
   seriesToggleCompact?: boolean; // Show only colored dots (no labels) in series toggle (default: false)
 
+  /**
+   * Label read by VoiceOver/TalkBack for the chart itself (default:
+   * `'Live chart'`). The chart is a Skia surface, so a screen reader has no
+   * other way to know what it is; the live value is exposed separately through
+   * `accessibilityValue`, which the component maintains itself.
+   *
+   * React Native has no chart role, so the container is announced as an image.
+   */
+  accessibilityLabel?: string;
+  /** Test identifier on the chart's container view, for Detox/Maestro. */
+  testID?: string;
+
   style?: StyleProp<ViewStyle>;
 }
 

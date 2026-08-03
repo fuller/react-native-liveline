@@ -41,6 +41,11 @@ import type {
 import { resolveTheme, resolveSeriesPalettes, SERIES_COLORS } from './theme';
 import { makeDefaultFonts } from './draw/fonts';
 import { useLivelineEngine } from './useLivelineEngine';
+import { resolveLiveValue } from './a11y/announce';
+import {
+  useAccessibleValue,
+  useScreenReaderEnabled,
+} from './a11y/useAccessibleValue';
 
 const AnimatedTextInput = Animated.createAnimatedComponent(TextInput);
 
@@ -341,6 +346,11 @@ function PillBar({
   return (
     <View
       pointerEvents={faded ? 'none' : 'auto'}
+      // A faded bar is invisible and untappable but still mounted, so it must
+      // also be invisible to a screen reader — otherwise the reader offers
+      // controls the sighted user cannot see and nobody can activate.
+      accessibilityElementsHidden={faded}
+      importantForAccessibility={faded ? 'no-hide-descendants' : 'auto'}
       style={[styles.bar, bar.chrome, faded && styles.barFaded]}
     >
       {indicator && !bar.isText && (
@@ -389,12 +399,14 @@ const WindowBar = memo(function WindowBarComponent({
   windows,
   activeSecs,
   onSelect,
+  testID,
 }: {
   bar: BarStyle;
   isDark: boolean;
   windows: WindowOption[];
   activeSecs: number;
   onSelect: (secs: number) => void;
+  testID: string | undefined;
 }) {
   const [layouts, setLayouts] = useState<Record<number, BtnLayout>>({});
   const onBtnLayout = useCallback((secs: number, e: LayoutChangeEvent) => {
@@ -420,6 +432,10 @@ const WindowBar = memo(function WindowBarComponent({
             key={w.secs}
             onLayout={(e) => onBtnLayout(w.secs, e)}
             onPress={() => onSelect(w.secs)}
+            accessibilityRole="button"
+            accessibilityLabel={`${w.label} time window`}
+            accessibilityState={{ selected: isActive }}
+            testID={testID ? `${testID}-window-${w.secs}` : undefined}
             style={bar.pill}
           >
             <Animated.Text
@@ -440,11 +456,13 @@ const ModeBar = memo(function ModeBarComponent({
   isDark,
   activeMode,
   onSelect,
+  testID,
 }: {
   bar: BarStyle;
   isDark: boolean;
   activeMode: 'line' | 'candle';
   onSelect: (mode: 'line' | 'candle') => void;
+  testID: string | undefined;
 }) {
   const [layouts, setLayouts] = useState<Record<string, BtnLayout>>({});
   const onBtnLayout = useCallback((key: string, e: LayoutChangeEvent) => {
@@ -463,9 +481,18 @@ const ModeBar = memo(function ModeBarComponent({
       indicator
       indicatorLayout={layouts[activeMode]}
     >
+      {/*
+        Icon-only buttons: there is no text child for a screen reader to fall
+        back on, so an explicit label is the only thing standing between a
+        reader user and an unnamed button.
+      */}
       <Pressable
         onLayout={(e) => onBtnLayout('line', e)}
         onPress={() => onSelect('line')}
+        accessibilityRole="button"
+        accessibilityLabel="Line chart"
+        accessibilityState={{ selected: activeMode === 'line' }}
+        testID={testID ? `${testID}-mode-line` : undefined}
         style={[styles.iconBtn, bar.iconBtn]}
       >
         <LineIcon
@@ -476,6 +503,10 @@ const ModeBar = memo(function ModeBarComponent({
       <Pressable
         onLayout={(e) => onBtnLayout('candle', e)}
         onPress={() => onSelect('candle')}
+        accessibilityRole="button"
+        accessibilityLabel="Candlestick chart"
+        accessibilityState={{ selected: activeMode === 'candle' }}
+        testID={testID ? `${testID}-mode-candle` : undefined}
         style={[styles.iconBtn, bar.iconBtn]}
       >
         <CandleIcon
@@ -509,6 +540,7 @@ const SeriesChipBar = memo(function SeriesChipBarComponent({
   compact,
   faded,
   onToggle,
+  testID,
 }: {
   bar: BarStyle;
   chip: ReturnType<typeof useChipStyle>;
@@ -519,6 +551,7 @@ const SeriesChipBar = memo(function SeriesChipBarComponent({
   /** Keep the chips mounted but invisible (chart left multi-series mode). */
   faded: boolean;
   onToggle: (id: string) => void;
+  testID: string | undefined;
 }) {
   return (
     <PillBar bar={bar} isDark={isDark} faded={faded}>
@@ -528,6 +561,12 @@ const SeriesChipBar = memo(function SeriesChipBarComponent({
           <Pressable
             key={s.id}
             onPress={() => onToggle(s.id)}
+            // A chip is a toggle, and in compact mode it is a bare coloured
+            // dot with no text at all — so it always carries its own label.
+            accessibilityRole="checkbox"
+            accessibilityLabel={s.label}
+            accessibilityState={{ checked: !isHidden }}
+            testID={testID ? `${testID}-series-${s.id}` : undefined}
             style={[chip.base, isHidden && chip.off]}
           >
             <View
@@ -574,6 +613,7 @@ const LivelineControls = memo(function LivelineControlsComponent({
   hiddenSeries,
   seriesToggleCompact,
   onSeriesToggle,
+  testID,
 }: {
   windowStyle: WindowStyle;
   isDark: boolean;
@@ -590,6 +630,8 @@ const LivelineControls = memo(function LivelineControlsComponent({
   hiddenSeries: Set<string>;
   seriesToggleCompact: boolean;
   onSeriesToggle: (id: string) => void;
+  /** Base id the per-control test ids are derived from (see `Liveline`). */
+  testID: string | undefined;
 }) {
   const bar = useBarStyle(windowStyle, isDark);
   const chip = useChipStyle(bar, isDark, seriesToggleCompact);
@@ -606,6 +648,7 @@ const LivelineControls = memo(function LivelineControlsComponent({
           windows={windows}
           activeSecs={activeWindowSecs}
           onSelect={onWindowSelect}
+          testID={testID}
         />
       )}
 
@@ -615,6 +658,7 @@ const LivelineControls = memo(function LivelineControlsComponent({
           isDark={isDark}
           activeMode={activeMode}
           onSelect={onModeSelect}
+          testID={testID}
         />
       )}
 
@@ -628,6 +672,7 @@ const LivelineControls = memo(function LivelineControlsComponent({
           compact={seriesToggleCompact}
           faded={seriesFaded}
           onToggle={onSeriesToggle}
+          testID={testID}
         />
       )}
     </View>
@@ -688,6 +733,8 @@ export const Liveline = memo(function LivelineComponent({
   seriesToggleCompact = false,
   lineWidth,
   fonts: fontsOverride,
+  accessibilityLabel,
+  testID,
   style,
 }: LivelineProps) {
   const lastSeriesPropRef = useRef(seriesProp);
@@ -852,12 +899,47 @@ export const Liveline = memo(function LivelineComponent({
 
   const selectMode = useStableHandler(onModeChange);
 
+  // --- Accessibility --------------------------------------------------------
+  // The chart is a Skia surface: without this a screen reader finds an
+  // unlabelled blank rectangle. The live number is a UI-thread shared value
+  // updated at frame rate, and accessibility props are JS-thread React props,
+  // so there is deliberately no per-frame bridge between them. Instead the
+  // reading is taken from the props already on this thread (`value` &co.) and
+  // sampled at a speakable ~1Hz — and only while a reader is actually running.
+  //
+  // With no reader (the overwhelmingly common case) `screenReader` is false,
+  // `resolveLiveValue` is never called, no timer exists, no state is committed
+  // and `chartA11yValue` is a stable `undefined`: the cost is one boolean test
+  // per render. Nothing here can make the chart re-render on tick.
+  const screenReader = useScreenReaderEnabled();
+  const chartA11yValue = useAccessibleValue(
+    screenReader,
+    screenReader
+      ? resolveLiveValue({
+          value,
+          mode,
+          lineMode,
+          lineValue,
+          liveCandle,
+          candles,
+        })
+      : null,
+    formatValue
+  );
+
   return (
     <>
       {/* Live value display — above the chart */}
       {showValue && (
         <AnimatedTextInput
           editable={false}
+          // Hidden from assistive tech on purpose. It is a TextInput driven
+          // from the UI thread at frame rate, so a reader would announce it as
+          // a text field whose contents change 60 times a second. The same
+          // number reaches the reader through the chart's accessibilityValue,
+          // at a cadence a person can actually follow.
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
           animatedProps={valueProps}
           style={[styles.valueDisplay, { paddingLeft: pad.left }, valueStyle]}
         />
@@ -885,6 +967,7 @@ export const Liveline = memo(function LivelineComponent({
         hiddenSeries={hiddenSeries}
         seriesToggleCompact={seriesToggleCompact}
         onSeriesToggle={toggleSeries}
+        testID={testID}
       />
 
       <GestureDetector gesture={engine.gesture}>
@@ -892,6 +975,15 @@ export const Liveline = memo(function LivelineComponent({
           onLayout={engine.onLayout}
           style={[styles.container, style]}
           collapsable={false}
+          // Accessibility lives out here, on the container — never inside the
+          // Skia subtree below, whose node structure must stay fixed.
+          // `image` is React Native's conventional role for a rendered
+          // graphic; there is no chart role.
+          accessible
+          accessibilityRole="image"
+          accessibilityLabel={accessibilityLabel ?? 'Live chart'}
+          accessibilityValue={chartA11yValue}
+          testID={testID}
         >
           {/*
             Fixed 4-node tree — never reconciled after mount. Every per-frame
