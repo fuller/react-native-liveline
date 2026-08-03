@@ -1,20 +1,53 @@
 import type { ThemeMode, LivelinePalette, LivelineSeries } from './types';
 
-/** Parse any CSS color string to [r, g, b]. Handles hex (#rgb, #rrggbb), rgb(), rgba(). */
+// Last value warned about by `parseColorRgb` below. That function is called
+// from the frame path (`draw/dot.ts` parses `palette.line` and
+// `palette.badgeOuterBg` while scrub-dimming), so an unconditional dev warning
+// would fire up to 60 times a second for as long as a bad colour is set —
+// noisier than the silent fallback it replaced. One string compare per call,
+// no allocation, and a bad colour still reports exactly once.
+let lastWarnedColor = '';
+
+/**
+ * Parse any CSS color string to [r, g, b].
+ *
+ * Supported formats: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`.
+ * Named CSS colors (e.g. `"red"`) are NOT supported and fall back to grey —
+ * pass a hex or rgb()/rgba() string instead.
+ *
+ * Unparseable input falls back to mid-grey `[128, 128, 128]` rather than
+ * throwing, so a bad color never crashes rendering; in development this logs
+ * a warning naming the offending value.
+ */
 export function parseColorRgb(color: string): [number, number, number] {
   'worklet';
-  const hex = color.match(/^#([0-9a-f]{3,8})$/i);
+  const hex = color.match(/^#([0-9a-f]+)$/i);
   if (hex) {
     let h = hex[1]!;
-    if (h.length === 3) h = h[0]! + h[0]! + h[1]! + h[1]! + h[2]! + h[2]!;
-    return [
-      parseInt(h.slice(0, 2), 16),
-      parseInt(h.slice(2, 4), 16),
-      parseInt(h.slice(4, 6), 16),
-    ];
+    if (h.length === 3 || h.length === 4) {
+      // Expand shorthand: #rgb -> #rrggbb, #rgba -> #rrggbbaa (alpha ignored).
+      h = h[0]! + h[0]! + h[1]! + h[1]! + h[2]! + h[2]!;
+    }
+    if (h.length === 6 || h.length === 8) {
+      return [
+        parseInt(h.slice(0, 2), 16),
+        parseInt(h.slice(2, 4), 16),
+        parseInt(h.slice(4, 6), 16),
+      ];
+    }
+    // Invalid digit count (not 3/4/6/8) — fall through to the grey fallback
+    // below rather than silently mangling a partial parse.
+  } else {
+    const rgb = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (rgb) return [+rgb[1]!, +rgb[2]!, +rgb[3]!];
   }
-  const rgb = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-  if (rgb) return [+rgb[1]!, +rgb[2]!, +rgb[3]!];
+  if (__DEV__ && color !== lastWarnedColor) {
+    lastWarnedColor = color;
+    console.warn(
+      `[react-native-liveline] parseColorRgb: unrecognized color "${color}" — ` +
+        'expected #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), or rgba(). Falling back to grey.'
+    );
+  }
   return [128, 128, 128];
 }
 
@@ -25,7 +58,11 @@ function rgba(r: number, g: number, b: number, a: number): string {
 
 /**
  * Derive a full palette from a single accent color + theme mode.
- * Momentum colors are always semantic green/red regardless of accent.
+ *
+ * Note: `dotUp`/`dotDown`/`dotFlat`/`glowUp`/`glowDown`/`glowFlat`/`badgeBg`/
+ * `badgeText` are computed here but not read by the current renderer (see
+ * comments below) — the dot and badge paint from `line`/`badgeOuterBg`/
+ * `tooltipText` instead. Momentum is not currently expressed as dot color.
  */
 export function resolveTheme(color: string, mode: ThemeMode): LivelinePalette {
   'worklet';
@@ -45,7 +82,12 @@ export function resolveTheme(color: string, mode: ThemeMode): LivelinePalette {
     gridLine: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.06)',
     gridLabel: isDark ? 'rgba(255, 255, 255, 0.4)' : 'rgba(0, 0, 0, 0.35)',
 
-    // Dot — always semantic
+    // Dot — NOT currently read by the renderer. `src/draw/dot.ts` paints the
+    // live dot unconditionally from `palette.line`; these fields are kept
+    // (rather than removed) only because `LivelinePalette` is a shared type
+    // consumed by src/draw/* and src/engine/*, and the surface required to
+    // safely drop them is out of this file's scope. Do not treat these as
+    // "the dot's momentum color" — that behavior does not exist today.
     dotUp: '#22c55e',
     dotDown: '#ef4444',
     dotFlat: color,
@@ -53,7 +95,10 @@ export function resolveTheme(color: string, mode: ThemeMode): LivelinePalette {
     glowDown: 'rgba(239, 68, 68, 0.18)',
     glowFlat: rgba(r, g, b, 0.12),
 
-    // Badge
+    // Badge — `badgeBg`/`badgeText` below are likewise unused by the
+    // renderer; `src/engine/badge.ts` sources its fill/text colors from
+    // `badgeOuterBg`, `line`, and `tooltipText` instead. Kept for the same
+    // reason as the dot fields above.
     badgeOuterBg: isDark
       ? 'rgba(40, 40, 40, 0.95)'
       : 'rgba(255, 255, 255, 0.95)',

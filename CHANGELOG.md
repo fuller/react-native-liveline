@@ -37,6 +37,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`parseColorRgb` (used to derive the palette from the `color` prop) no
+  longer produces `NaN` channels for 4-digit hex shorthand** (`#rgba`, the
+  CSS Color 4 shorthand-with-alpha form, e.g. `"#38fc"`). It also now handles
+  8-digit hex (`#rrggbbaa`) correctly, and rejects any hex length other than
+  3/4/6/8 instead of silently mangling it — both now fall back to the
+  existing grey default. In development, an unparseable `color` (including
+  named CSS colors like `"red"`, which were never supported) logs a warning
+  naming the offending value instead of failing silently into gradients and
+  paints. See the `color` prop docs in the README for the full list of
+  supported formats.
+- **`LivelineTransition` now warns in development when `active` matches no
+  child's `key`.** Previously a typo'd or conditionally-absent `active` value
+  produced a blank chart area with no signal until `active` later changed to
+  a key that does exist. The warning names both the bad value and the keys
+  that are actually available.
 - **`react-native-gesture-handler` peer range widened to `>=2.30.0`** (was
   `>=3.0.0`). The v3 floor existed only because the engine imported a
   v3-only type name for a union it never used — the hook always returns a

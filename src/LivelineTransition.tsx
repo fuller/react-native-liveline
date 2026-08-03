@@ -68,10 +68,26 @@ export function LivelineTransition({
   style,
 }: LivelineTransitionProps) {
   const childArray = Array.isArray(children) ? children : [children];
+  const childKeys = childArray.map((child) => String(child.key ?? ''));
 
   const [mounted, setMounted] = useState<Set<string>>(() => new Set([active]));
   const [visible, setVisible] = useState(active);
   const prevRef = useRef(active);
+
+  useEffect(() => {
+    if (__DEV__ && !childKeys.includes(active)) {
+      console.warn(
+        `[react-native-liveline] LivelineTransition: active="${active}" does not ` +
+          'match any child key, so nothing will render until "active" changes to ' +
+          `one of the available keys: ${
+            childKeys.length
+              ? childKeys.map((k) => `"${k}"`).join(', ')
+              : '(none — no children have a key prop)'
+          }.`
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, childKeys.join('|')]);
 
   useEffect(() => {
     if (active === prevRef.current) return () => {};

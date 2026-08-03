@@ -138,7 +138,7 @@ The component fills its parent container — set a height on the parent. Pass
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
 | `theme` | `'light' \| 'dark'` | `'dark'` | Color scheme |
-| `color` | `string` | `'#3b82f6'` | Accent color — all palette colors derived from this |
+| `color` | `string` | `'#3b82f6'` | Accent color — all palette colors derived from this. Accepts `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, or `rgba()`. Named CSS colors (e.g. `"red"`) are not supported and fall back to grey. |
 | `grid` | `boolean` | `true` | Y-axis grid lines + labels |
 | `badge` | `boolean` | `true` | Value pill tracking chart tip |
 | `badgeVariant` | `'default' \| 'minimal'` | `'default'` | Badge style: accent-colored or white with grey text |
@@ -374,7 +374,10 @@ Note that `formatValue` / `formatTime` run on the UI thread and need the
 ### `LivelineTransition`
 
 Cross-fades between chart components (e.g. line ↔ candlestick). Children must
-have unique `key` props matching possible `active` values.
+have unique `key` props matching possible `active` values. If `active` doesn't
+match any child's key, nothing renders (there is no visible chart until
+`active` changes to a valid key) — in development this logs a warning naming
+the bad value and the keys that are available.
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
