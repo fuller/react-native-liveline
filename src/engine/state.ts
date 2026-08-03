@@ -1,13 +1,25 @@
 import type { SkPath, SkPicture } from '@shopify/react-native-skia';
-import type { LivelinePoint, LivelinePalette, CandlePoint } from '../types';
+import type {
+  LivelinePoint,
+  LivelinePalette,
+  CandlePoint,
+  LivelineFonts,
+} from '../types';
 import type { ArrowState, ShakeState, MultiSeriesEntry } from '../draw';
 import type { GridState } from '../draw/grid';
 import type { TimeAxisState } from '../draw/timeAxis';
 import { createOrderbookState, type OrderbookState } from '../draw/orderbook';
-import { createLineCacheSlot, type LineCacheSlot } from '../draw/lineCache';
+import {
+  createLineCacheSlot,
+  type LineCacheSlot,
+  type LineCacheRef,
+} from '../draw/lineCache';
+import { createLineDrawArgs, type LineDrawArgs } from '../draw/line';
+import { createCandleDrawArgs, type CandleDrawArgs } from '../draw/candlestick';
 import {
   createCandleCacheSlot,
   type CandleCacheSlot,
+  type CandleCacheRef,
 } from '../draw/candleCache';
 import { createGridLayerSlot, type GridLayerSlot } from '../draw/gridLayer';
 import {
@@ -18,7 +30,7 @@ import { createParticleState, type ParticleState } from '../draw/particles';
 import { createShakeState } from '../draw';
 import { createSkiaCache, type SkiaCache } from '../draw/canvas2d';
 import type { WindowTransState } from './helpers';
-import type { EngineConfigStep } from './types';
+import type { EngineConfigStep, FrameInputs } from './types';
 
 export interface BadgeState {
   displayW: number; // current lerped text width (0 = uninited)
@@ -119,6 +131,21 @@ export interface EngineState {
   badge: BadgeState;
   /** Cross-frame line SkPath cache, single-series mode (see draw/lineCache) */
   lineCache: LineCacheSlot;
+  /** Pooled `LineCacheRef` — the (slot, dataRev, dataSource,
+   * splitPrefixStroke) bundle `lineCacheHits`/`drawLine` take. Overwritten in
+   * place each frame instead of allocating a fresh literal, and repointed at
+   * each series' own slot inside the multi-series loop (`drawMultiFrame`
+   * reads it synchronously per series and retains nothing). Starts pointing
+   * at `lineCache` above, which is the single-series pipeline's slot. */
+  lineCacheRef: LineCacheRef;
+  /** Pooled argument struct for `drawLine` — see `LineDrawArgs`. One
+   * instance, refilled before every call (including once per series in
+   * multi-series mode); only one pipeline draws per frame, and `drawLine`
+   * never retains it. Same pooling rationale as `multiSeriesEntryScratch`. */
+  lineDrawArgs: LineDrawArgs;
+  /** Pooled argument struct for `drawCandlesticks` — see `CandleDrawArgs`.
+   * Refilled between the two halves of the candle-width cross-fade. */
+  candleDrawArgs: CandleDrawArgs;
   /** Per-series line path caches, multi-series mode — keyed by series id,
    * pruned alongside displayValues when series are removed */
   lineCaches: Map<string, LineCacheSlot>;
@@ -172,6 +199,15 @@ export interface EngineState {
   /** Cross-frame closed-candle body+wick path cache, candle mode (see
    * draw/candleCache). */
   candleCache: CandleCacheSlot;
+  /** Pooled `FrameInputs` for `engineStep` — the caller (useLivelineEngine's
+   * frame worklet) overwrites its fields each frame and hands it straight
+   * back in, so the twelve-argument call became a four-argument one without
+   * adding a per-frame allocation. See `FrameInputs` in engine/step.ts. */
+  frameInputs: FrameInputs;
+  /** Pooled `CandleCacheRef` — the (slot, dataSource, candlesRev) bundle
+   * `drawCandlesticks`/`updateCandleCache` take. Overwritten in place each
+   * candle frame instead of allocating a fresh literal. */
+  candleCacheRef: CandleCacheRef;
 
   // Hover state
   scrubAmount: number;
@@ -378,6 +414,10 @@ export function createEngineState(
   candleWidth: number
 ): EngineState {
   'worklet';
+  // Built before the literal so `lineCacheRef` can point at the very same
+  // slot object rather than a copy.
+  const lineCache = createLineCacheSlot();
+  const candleCache = createCandleCacheSlot();
   return {
     displayValue: value,
     displayValues: new Map<string, number>(),
@@ -430,7 +470,10 @@ export function createEngineState(
       pathW: -1,
       pathTail: false,
     },
-    lineCache: createLineCacheSlot(),
+    lineCache: lineCache,
+    lineCacheRef: { slot: lineCache, dataRev: 0, dataSource: 0 },
+    lineDrawArgs: createLineDrawArgs(),
+    candleDrawArgs: createCandleDrawArgs(),
     lineCaches: new Map<string, LineCacheSlot>(),
     gridLayer: createGridLayerSlot<SkPicture>(),
     gridLayerCache: createSkiaCache(),
@@ -441,7 +484,24 @@ export function createEngineState(
     scrollDxLastT: -1,
     scrollDxRate: 0,
     scrollDxBuildRev: -1,
-    candleCache: createCandleCacheSlot(),
+    candleCache: candleCache,
+    frameInputs: {
+      w: 0,
+      h: 0,
+      hoverPixelX: null,
+      dt: 0,
+      now_ms: 0,
+      // Every field is filled by the caller before the first `engineStep`;
+      // the placeholders here exist only so the struct is fully shaped at
+      // creation rather than growing properties later. There is no "empty"
+      // `LivelineFonts` to seed with — the real one is supplied by the frame
+      // worklet, which is the only thing that ever reads this.
+      fonts: null as unknown as LivelineFonts,
+      data: [],
+      candles: [],
+      multiData: {},
+    },
+    candleCacheRef: { slot: candleCache, dataSource: 0, candlesRev: 0 },
 
     scrubAmount: 0,
     lastHover: null,

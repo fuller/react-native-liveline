@@ -173,16 +173,14 @@ function update(
 ): boolean {
   const { bodyW, radius } = candleDims(layout, candleWidthSecs);
   return updateCandleCache(
-    hz.slot,
+    { slot: hz.slot, dataSource, candlesRev },
     hz.makePath,
     layout,
     candles,
     candleWidthSecs,
     liveTime,
     bodyW,
-    radius,
-    dataSource,
-    candlesRev
+    radius
   );
 }
 
@@ -388,31 +386,27 @@ describe('updateCandleCache', () => {
     const hz = makeHarness();
     expect(
       updateCandleCache(
-        hz.slot,
+        { slot: hz.slot, dataSource: 0, candlesRev: 0 },
         hz.makePath,
         layout,
         candles,
         4,
         liveTime,
         bodyW,
-        1.5,
-        0,
-        0
+        1.5
       )
     ).toBe(true);
     expect((hz.slot.bullBodies as FakePath).rewinds).toBe(1);
 
     expect(
       updateCandleCache(
-        hz.slot,
+        { slot: hz.slot, dataSource: 0, candlesRev: 0 },
         hz.makePath,
         layout,
         candles,
         4,
         liveTime,
         bodyW,
-        0,
-        0,
         0
       )
     ).toBe(true);

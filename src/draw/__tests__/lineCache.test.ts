@@ -161,19 +161,27 @@ function update(
 ): boolean {
   const pts = buildPts(data, layout, smoothValue, now);
   return updateLinePaths(
-    hz.slot,
+    { slot: hz.slot, dataRev, dataSource },
     hz.makePath,
     layout,
     data,
     pts,
     wantFill,
-    dataRev,
-    dataSource,
-    data.length,
-    data[0]!.time,
-    data[data.length - 1]!.time,
-    data[data.length - 1]!.value
+    data
   );
+}
+
+/** `lineCacheHits` against a harness slot. The data-identity half of the key
+ * is derived from `data` itself now, so a test varies a key field by varying
+ * the points it passes. */
+function hits(
+  hz: Harness,
+  layout: ChartLayout,
+  data: LivelinePoint[],
+  dataRev = 0,
+  dataSource = 0
+): boolean {
+  return lineCacheHits({ slot: hz.slot, dataRev, dataSource }, layout, data);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -382,9 +390,7 @@ describe('lineCacheHits', () => {
   it('is false on a fresh slot (no prefix built yet)', () => {
     const hz = makeHarness();
     const layout = makeLayout(NOW, 90, 110);
-    expect(
-      lineCacheHits(hz.slot, layout, 0, 0, N, NOW - 30, NOW - 1, 100)
-    ).toBe(false);
+    expect(hits(hz, layout, makeData(N, NOW - 30))).toBe(false);
   });
 
   it('is true right after a build, with the same key inputs', () => {
@@ -394,18 +400,7 @@ describe('lineCacheHits', () => {
     const layout = makeLayout(NOW, 90, 110);
     expect(update(hz, layout, data, smooth, NOW)).toBe(true);
 
-    expect(
-      lineCacheHits(
-        hz.slot,
-        layout,
-        0,
-        0,
-        data.length,
-        data[0]!.time,
-        data[data.length - 1]!.time,
-        data[data.length - 1]!.value
-      )
-    ).toBe(true);
+    expect(hits(hz, layout, data)).toBe(true);
   });
 
   it('stays true at a later `now` with an unchanged layout/data (pure time advance)', () => {
@@ -415,18 +410,7 @@ describe('lineCacheHits', () => {
     update(hz, makeLayout(NOW, 90, 110), data, smooth, NOW);
 
     const laterLayout = makeLayout(NOW + 4.2, 90, 110);
-    expect(
-      lineCacheHits(
-        hz.slot,
-        laterLayout,
-        0,
-        0,
-        data.length,
-        data[0]!.time,
-        data[data.length - 1]!.time,
-        data[data.length - 1]!.value
-      )
-    ).toBe(true);
+    expect(hits(hz, laterLayout, data)).toBe(true);
   });
 
   it('is false when any key input changes (dataRev, dataSource, range, window, size, len)', () => {
@@ -436,64 +420,37 @@ describe('lineCacheHits', () => {
     const layout = makeLayout(NOW, 90, 110);
     update(hz, layout, data, smooth, NOW);
 
-    const firstT = data[0]!.time;
     const lastT = data[data.length - 1]!.time;
     const lastV = data[data.length - 1]!.value;
 
-    expect(
-      lineCacheHits(hz.slot, layout, 1, 0, data.length, firstT, lastT, lastV)
-    ).toBe(false); // dataRev
-    expect(
-      lineCacheHits(hz.slot, layout, 0, 1, data.length, firstT, lastT, lastV)
-    ).toBe(false); // dataSource
-    expect(
-      lineCacheHits(
-        hz.slot,
-        makeLayout(NOW, 89, 110),
-        0,
-        0,
-        data.length,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // range min
-    expect(
-      lineCacheHits(
-        hz.slot,
-        makeLayout(NOW, 90, 110, 120),
-        0,
-        0,
-        data.length,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // window
-    expect(
-      lineCacheHits(
-        hz.slot,
-        makeLayout(NOW, 90, 110, 60, 500),
-        0,
-        0,
-        data.length,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // canvas size
-    expect(
-      lineCacheHits(
-        hz.slot,
-        layout,
-        0,
-        0,
-        data.length + 1,
-        firstT,
-        lastT,
-        lastV
-      )
-    ).toBe(false); // len
+    expect(hits(hz, layout, data, 1, 0)).toBe(false); // dataRev
+    expect(hits(hz, layout, data, 0, 1)).toBe(false); // dataSource
+    expect(hits(hz, makeLayout(NOW, 89, 110), data)).toBe(false); // range min
+    expect(hits(hz, makeLayout(NOW, 90, 110, 120), data)).toBe(false); // window
+    expect(hits(hz, makeLayout(NOW, 90, 110, 60, 500), data)).toBe(false); // size
+
+    // len, isolated: one extra INTERIOR point, so firstT/lastT/lastV are all
+    // unchanged and only kLen can be doing the invalidating.
+    const oneLonger = [
+      ...data.slice(0, -1),
+      { time: lastT - 0.5, value: lastV },
+      data[data.length - 1]!,
+    ];
+    expect(hits(hz, layout, oneLonger)).toBe(false); // len
+
+    // The three point-derived fields, one at a time.
+    const firstMoved = [
+      { time: data[0]!.time - 1, value: data[0]!.value },
+      ...data.slice(1),
+    ];
+    expect(hits(hz, layout, firstMoved)).toBe(false); // firstT
+    const lastMoved = [...data.slice(0, -1), { time: lastT + 1, value: lastV }];
+    expect(hits(hz, layout, lastMoved)).toBe(false); // lastT
+    const lastRevalued = [
+      ...data.slice(0, -1),
+      { time: lastT, value: lastV + 1 },
+    ];
+    expect(hits(hz, layout, lastRevalued)).toBe(false); // lastV
   });
 
   it('is allocation-free and read-only (no new paths, slot untouched)', () => {
@@ -505,16 +462,7 @@ describe('lineCacheHits', () => {
     const madeAfterBuild = hz.made.length;
     const prefixVerbsBefore = (hz.slot.prefix as FakePath).verbs.length;
 
-    lineCacheHits(
-      hz.slot,
-      layout,
-      0,
-      0,
-      data.length,
-      data[0]!.time,
-      data[data.length - 1]!.time,
-      data[data.length - 1]!.value
-    );
+    hits(hz, layout, data);
 
     expect(hz.made.length).toBe(madeAfterBuild);
     expect((hz.slot.prefix as FakePath).verbs.length).toBe(prefixVerbsBefore);
@@ -549,18 +497,7 @@ describe('assembleLineTail (fast path)', () => {
     // branch does, without ever constructing decimated/pts.
     const fast = makeHarness();
     update(fast, buildLayout, data, smooth, NOW, true);
-    expect(
-      lineCacheHits(
-        fast.slot,
-        laterLayout,
-        0,
-        0,
-        data.length,
-        data[0]!.time,
-        data[data.length - 1]!.time,
-        data[data.length - 1]!.value
-      )
-    ).toBe(true);
+    expect(hits(fast, laterLayout, data)).toBe(true);
 
     const pts = buildPts(data, laterLayout, smooth, later);
     const madeBeforeAssemble = fast.made.length;
@@ -703,18 +640,7 @@ describe('split stroke (prefix / tail)', () => {
     for (let f = 1; f <= 200; f++) {
       const t = NOW + f * 0.0167;
       const layout = makeLayout(t, 90, 110);
-      expect(
-        lineCacheHits(
-          hz.slot,
-          layout,
-          0,
-          0,
-          data.length,
-          data[0]!.time,
-          data[data.length - 1]!.time,
-          data[data.length - 1]!.value
-        )
-      ).toBe(true);
+      expect(hits(hz, layout, data)).toBe(true);
       const pts = buildPts(data, layout, smooth, t);
       assembleLineTail(
         hz.slot,

@@ -27,6 +27,73 @@ const EMPTY_DASH: number[] = [];
 const BULL_RGB = [34, 197, 94] as const;
 const BEAR_RGB = [239, 68, 68] as const;
 
+/**
+ * Everything `drawCandlesticks` needs beyond `ctx` and `layout`.
+ *
+ * **Pooled, not allocated per call** — same contract as `LineDrawArgs` in
+ * draw/line.ts, and for the same reason: this runs on the UI thread every
+ * frame, and it previously took thirteen positional arguments of which eight
+ * were consecutive numbers. One instance lives on `EngineState`
+ * (`createCandleDrawArgs`) and callers overwrite fields in place.
+ */
+export interface CandleDrawArgs {
+  candles: CandlePoint[];
+  /** Candle period in seconds — drives body width and the X of each body. */
+  candleWidthSecs: number;
+  /** `time` of the currently-forming candle, or -1 for none. */
+  liveTime: number;
+  /** `performance.now()` — drives the live candle's pulse. */
+  now_ms: number;
+  /** 0 = playing, 1 = fully paused; gates the live pulse off. */
+  pauseProgress: number;
+  /** Scrub cursor X in px (0 when not scrubbing). */
+  scrubX: number;
+  /** 0 = not scrubbing, 1 = fully scrubbing. Non-zero disables batching. */
+  scrubDim: number;
+  /** Alpha for the live candle only (birth fade-in). */
+  liveAlpha: number;
+  /** Bear→bull blend for the live candle, or -1 to use its own direction. */
+  liveBullBlend: number;
+  /** Accent color to blend candle colors toward during the line-mode morph. */
+  accentColor?: string;
+  /** How much of `accentColor` to mix in (0 = none). */
+  accentBlend: number;
+  /** Cross-frame cache for closed-candle body+wick geometry (see
+   * draw/candleCache.ts). Only consulted along the canBatch fast path —
+   * caller must not set this during scrub-dimming (canBatch is already
+   * false then), candle-width morph, mid line-mode-morph, or the reveal
+   * OHLC-collapse window; see draw/index.ts's drawCandleFrame for where
+   * those bypasses are wired. */
+  cache?: CandleCacheRef;
+  /** Real SkPath factory, supplied by the caller so this Skia-adjacent-but-
+   * import-free module never imports the real `Skia` object itself (this
+   * file is exercised directly by candlestick.test.ts under jest, which
+   * can't parse @shopify/react-native-skia's ESM build — see draw/index.ts,
+   * which owns the runtime import, same as line.ts does for the line cache). */
+  makePath?: () => CachePath;
+}
+
+/** Allocate one pooled `CandleDrawArgs`. Defaults match the old positional
+ * defaults, so callers only write the fields they actually vary. */
+export function createCandleDrawArgs(): CandleDrawArgs {
+  'worklet';
+  return {
+    candles: [],
+    candleWidthSecs: 0,
+    liveTime: -1,
+    now_ms: 0,
+    pauseProgress: 0,
+    scrubX: 0,
+    scrubDim: 0,
+    liveAlpha: 1,
+    liveBullBlend: -1,
+    accentColor: undefined,
+    accentBlend: 0,
+    cache: undefined,
+    makePath: undefined,
+  };
+}
+
 /** Blend bear→bull by t (0=bear, 1=bull), as an RGB tuple — lets a caller
  * (the live candle) combine this with a further accent blend without a
  * lossy SkColor→RGB round-trip. */
@@ -182,34 +249,23 @@ function candleSpatialDim(
 export function drawCandlesticks(
   ctx: Ctx2D,
   layout: ChartLayout,
-  candles: CandlePoint[],
-  candleWidthSecs: number,
-  liveTime: number,
-  now_ms: number,
-  pauseProgress: number,
-  scrubX: number,
-  scrubDim: number,
-  liveAlpha: number = 1,
-  liveBullBlend: number = -1,
-  accentColor?: string,
-  accentBlend: number = 0,
-  /** Cross-frame cache for closed-candle body+wick geometry (see
-   * draw/candleCache.ts). Only consulted along the canBatch fast path —
-   * caller must not pass this during scrub-dimming (canBatch is already
-   * false then), candle-width morph, mid line-mode-morph, or the reveal
-   * OHLC-collapse window; see draw/index.ts's drawCandleFrame for where
-   * those bypasses are wired. */
-  cache?: CandleCacheRef,
-  /** Real SkPath factory, supplied by the caller so this Skia-adjacent-but-
-   * import-free module never imports the real `Skia` object itself (this
-   * file is exercised directly by candlestick.test.ts under jest, which
-   * can't parse @shopify/react-native-skia's ESM build — see draw/index.ts,
-   * which owns the runtime import, same as line.ts does for the line cache). */
-  makePath?: () => CachePath
+  /** Pooled per-frame inputs — see `CandleDrawArgs`. Read synchronously and
+   * never retained, so a caller drawing two candle sets in one frame (the
+   * width-morph cross-fade) may refill and reuse one instance. */
+  a: CandleDrawArgs
 ) {
   'worklet';
+  const candles = a.candles;
   if (candles.length === 0) return;
 
+  const candleWidthSecs = a.candleWidthSecs;
+  const liveTime = a.liveTime;
+  const scrubX = a.scrubX;
+  const scrubDim = a.scrubDim;
+  const liveAlpha = a.liveAlpha;
+  const liveBullBlend = a.liveBullBlend;
+  const accentColor = a.accentColor;
+  const accentBlend = a.accentBlend;
   const { toX, toY } = layout;
   const { bodyW, wickW, radius } = candleDims(layout, candleWidthSecs);
   const halfBody = bodyW / 2;
@@ -220,8 +276,10 @@ export function drawCandlesticks(
   // threshold the dot's pulse ring uses (draw/index.ts) — without this,
   // this Math.sin(now_ms) term never settles, and candle mode could never
   // reach quiescence (see engine/quiescence.ts).
-  const showLivePulse = pauseProgress < 0.5;
-  const livePulse = showLivePulse ? 0.12 + Math.sin(now_ms * 0.004) * 0.08 : 0;
+  const showLivePulse = a.pauseProgress < 0.5;
+  const livePulse = showLivePulse
+    ? 0.12 + Math.sin(a.now_ms * 0.004) * 0.08
+    : 0;
   const baseAlpha = ctx.globalAlpha;
   const hasAccent = !!accentColor && accentBlend > 0.01;
   const canBatch = !(scrubDim > 0.01 && scrubX > 0);
@@ -240,20 +298,20 @@ export function drawCandlesticks(
     ctx.lineCap = 'round';
     ctx.lineWidth = wickW;
 
+    const cache = a.cache;
+    const makePath = a.makePath;
     const cacheReady =
       cache !== undefined &&
       makePath !== undefined &&
       updateCandleCache(
-        cache.slot,
+        cache,
         makePath,
         layout,
         candles,
         candleWidthSecs,
         liveTime,
         bodyW,
-        radius,
-        cache.dataSource,
-        cache.candlesRev
+        radius
       );
 
     if (cacheReady) {

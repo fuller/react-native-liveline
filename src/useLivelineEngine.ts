@@ -638,20 +638,20 @@ export function useLivelineEngine(
     const recorder = Skia.PictureRecorder();
     const canvas = recorder.beginRecording(cullRect.value);
     const ctx = createCanvas2D(canvas, fonts, skiaCache.value);
-    const result = engineStep(
-      ctx,
-      c,
-      s,
-      w,
-      h,
-      hoverX.value,
-      dt,
-      now_ms,
-      fonts,
-      dataBuf.value,
-      candlesBuf.value,
-      multiDataBuf.value
-    );
+    // Pooled per-frame input struct (EngineState.frameInputs) refilled in
+    // place — see `FrameInputs`. Named fields instead of twelve positional
+    // arguments, at no allocation cost.
+    const frameInputs = s.frameInputs;
+    frameInputs.w = w;
+    frameInputs.h = h;
+    frameInputs.hoverPixelX = hoverX.value;
+    frameInputs.dt = dt;
+    frameInputs.now_ms = now_ms;
+    frameInputs.fonts = fonts;
+    frameInputs.data = dataBuf.value;
+    frameInputs.candles = candlesBuf.value;
+    frameInputs.multiData = multiDataBuf.value;
+    const result = engineStep(ctx, c, s, frameInputs);
     screenPicture.value = recorder.finishRecordingAsPicture();
     // Publish this frame's scroll layer. `null` means the layer must not
     // composite at all (see StepOutput.scrollPicture) — the empty 1×1

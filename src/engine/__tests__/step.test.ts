@@ -129,20 +129,17 @@ function run(
   candles: CandlePoint[] = [],
   multiData: Record<string, LivelinePoint[]> = {}
 ) {
-  return engineStep(
-    makeCtx(),
-    cfg,
-    s,
-    W,
-    H,
-    null,
-    16,
-    1000,
-    FONTS,
-    data,
-    candles,
-    multiData
-  );
+  const frame = s.frameInputs;
+  frame.w = W;
+  frame.h = H;
+  frame.hoverPixelX = null;
+  frame.dt = 16;
+  frame.now_ms = 1000;
+  frame.fonts = FONTS;
+  frame.data = data;
+  frame.candles = candles;
+  frame.multiData = multiData;
+  return engineStep(makeCtx(), cfg, s, frame);
 }
 
 /** Points spanning `[now - ageSecs - span, now - ageSecs]`. */

@@ -8,6 +8,7 @@ import type {
   DegenOptions,
   BadgeVariant,
   CandlePoint,
+  LivelineFonts,
 } from '../types';
 
 /**
@@ -128,3 +129,44 @@ export type EngineConfigStep = Omit<
    */
   multiRevs?: Record<string, number>;
 };
+
+/**
+ * The per-frame inputs to `engineStep` that are neither the drawing context,
+ * the config, nor the engine state — the canvas size, this frame's timing and
+ * hover pixel, the fonts, and the three delta-synced data buffers.
+ *
+ * These were nine positional parameters (twelve in total), including two
+ * adjacent `number` pairs — `w, h` and `dt, now_ms` — that a caller could
+ * transpose with no type error and no test failure, only a wrong-looking
+ * chart. As a struct they are named at the call site.
+ *
+ * **Pooled, not allocated per frame**: one instance lives on `EngineState`
+ * (`frameInputs`), which the caller fills in place. `engineStep` destructures
+ * it on entry and never retains it.
+ */
+export interface FrameInputs {
+  /** Canvas width in px. */
+  w: number;
+  /** Canvas height in px. */
+  h: number;
+  /** Hover/scrub pixel X, or null when the finger is off the chart. */
+  hoverPixelX: number | null;
+  /** Delta time in ms since the last drawn frame. */
+  dt: number;
+  /** `performance.now()` for this frame. */
+  now_ms: number;
+  fonts: LivelineFonts;
+  /** Line-mode data points — synced via its own delta-updated shared value. */
+  data: LivelinePoint[];
+  /** Candles — synced via its own delta-updated shared value; empty array
+   * (never undefined) when there is no candle data, matching the `?? []`
+   * fallback this replaced at every read site below. */
+  candles: CandlePoint[];
+  /** Multi-series data points, keyed by series id — synced via its own
+   * delta-updated shared value (one buffer per series), same rationale as
+   * `data`/`candles` above but keyed since series can be added/removed
+   * independently. `cfg.multiSeries` entries carry id/value/palette/label
+   * only; look up a series' points here (or via `multiSeriesData` below,
+   * which also handles the reverse-morph stash case). */
+  multiData: Record<string, LivelinePoint[]>;
+}

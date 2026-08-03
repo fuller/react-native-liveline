@@ -4,7 +4,6 @@ import type {
   Momentum,
   HoverPoint,
   CandlePoint,
-  LivelineFonts,
 } from '../types';
 import { lerp } from '../math/lerp';
 import { computeRange } from '../math/range';
@@ -24,7 +23,7 @@ import {
 import { shouldBuildLineOverlay } from '../draw/lineOverlay';
 import { drawLoading } from '../draw/loading';
 import { drawEmpty } from '../draw/empty';
-import type { EngineConfigStep } from './types';
+import type { EngineConfigStep, FrameInputs } from './types';
 import type { EngineState } from './state';
 import { perSeriesMaps, pruneByIds } from './state';
 import { drawBadge } from './badge';
@@ -180,27 +179,16 @@ export function engineStep(
   ctx: Ctx2D,
   cfg: EngineConfigStep,
   s: EngineState,
-  w: number,
-  h: number,
-  hoverPixelXRaw: number | null,
-  dt: number,
-  now_ms: number,
-  fonts: LivelineFonts,
-  /** Line-mode data points — synced via its own delta-updated shared value. */
-  data: LivelinePoint[],
-  /** Candles — synced via its own delta-updated shared value; empty array
-   * (never undefined) when there is no candle data, matching the `?? []`
-   * fallback this replaces at every read site below. */
-  candles: CandlePoint[],
-  /** Multi-series data points, keyed by series id — synced via its own
-   * delta-updated shared value (one buffer per series), same rationale as
-   * `data`/`candles` above but keyed since series can be added/removed
-   * independently. `cfg.multiSeries` entries carry id/value/palette/label
-   * only; look up a series' points here (or via `multiSeriesData` below,
-   * which also handles the reverse-morph stash case). */
-  multiData: Record<string, LivelinePoint[]>
+  /** This frame's varying inputs — see `FrameInputs`. Pooled on `EngineState`
+   * as `s.frameInputs`; the caller fills it in place and passes it, so the
+   * struct costs no allocation per frame. */
+  frame: FrameInputs
 ): StepOutput {
   'worklet';
+  // Destructured to the names the body below already uses. Local bindings
+  // only — nothing is copied and nothing is allocated.
+  const { w, h, dt, now_ms, fonts, data, candles, multiData } = frame;
+  const hoverPixelXRaw = frame.hoverPixelX;
   const out: StepOutput = {
     valueText: null,
     valueColor: null,
@@ -1121,6 +1109,15 @@ export function engineStep(
       cp.close = s.closeLineSmooth;
       closePriceCandle = cp;
     }
+    // Pooled ref (EngineState.candleCacheRef) refilled in place, rather than
+    // a fresh literal every candle frame.
+    const candleCacheRef = s.candleCacheRef;
+    candleCacheRef.slot = s.candleCache;
+    candleCacheRef.dataSource = dataSourceOf(
+      useStash,
+      s.pausedCandles !== null
+    );
+    candleCacheRef.candlesRev = cfg.candlesRev;
     drawCandleFrame(ctx, layout, cfg.palette, {
       candles: drawCandles,
       displayCandleWidth,
@@ -1161,11 +1158,9 @@ export function engineStep(
       // allowing smooth fade-out during empty→live (loadingAlpha is 0).
       showEmptyOverlay: !(cfg.loading ?? false) && loadingAlpha < 0.01,
       gridLayer: s.gridLayer,
-      candleCache: {
-        slot: s.candleCache,
-        dataSource: dataSourceOf(useStash, s.pausedCandles !== null),
-        candlesRev: cfg.candlesRev,
-      },
+      candleCache: candleCacheRef,
+      lineArgs: s.lineDrawArgs,
+      candleArgs: s.candleDrawArgs,
     });
 
     // Badge in candle mode — only when in line mode (lineModeProg > 0.5)
@@ -1337,10 +1332,7 @@ export function engineStep(
       multiSeriesData(firstSeries, multiData);
     const windowResult = updateWindowTransition(
       cfg,
-      transition,
-      s.displayWindow,
-      s.displayMin,
-      s.displayMax,
+      s,
       noMotion,
       now_ms,
       now,
@@ -1502,15 +1494,10 @@ export function engineStep(
     };
     const adaptiveSpeed = cfg.lerpSpeed + ADAPTIVE_SPEED_BOOST * 0.5;
     const rangeResult = updateRange(
+      s,
       computedRange,
-      s.rangeInited,
-      s.targetMin,
-      s.targetMax,
-      s.displayMin,
-      s.displayMax,
       isWindowTransitioning,
       windowTransProgress,
-      transition,
       adaptiveSpeed,
       chartH,
       pausedDt
@@ -1656,6 +1643,8 @@ export function engineStep(
       lineCaches: s.lineCaches,
       multiDataSource: dataSourceOf(useMultiStash, s.pausedMultiData !== null),
       gridLayer: s.gridLayer,
+      lineArgs: s.lineDrawArgs,
+      lineCacheRef: s.lineCacheRef,
     });
 
     // During reverse morph (chart → loading/empty), overlay the empty text
@@ -1739,10 +1728,7 @@ export function engineStep(
     const now = useStash ? s.frozenNow : Date.now() / 1000 - s.timeDebt;
     const windowResult = updateWindowTransition(
       cfg,
-      transition,
-      s.displayWindow,
-      s.displayMin,
-      s.displayMax,
+      s,
       noMotion,
       now_ms,
       now,
@@ -1809,15 +1795,10 @@ export function engineStep(
     );
     const isWindowTransitioning = transition.startMs > 0;
     const rangeResult = updateRange(
+      s,
       computedRange,
-      s.rangeInited,
-      s.targetMin,
-      s.targetMax,
-      s.displayMin,
-      s.displayMax,
       isWindowTransitioning,
       windowTransProgress,
-      transition,
       adaptiveSpeed,
       chartH,
       pausedDt
@@ -1866,17 +1847,12 @@ export function engineStep(
     // Hover + scrub
     const hoverResult = updateHoverState(
       hoverPixelX,
-      pad,
-      w,
       layout,
       now,
       visible,
       s.scrubAmount,
       s.lastHover,
-      noMotion,
-      leftEdge,
-      rightEdge,
-      chartW
+      noMotion
     );
     s.scrubAmount = hoverResult.scrubAmount;
     s.lastHover = hoverResult.lastHover;
@@ -1929,26 +1905,22 @@ export function engineStep(
     // `splitPrefixStroke`). `s.shakeState.amplitude` is read pre-decay,
     // which is the value `drawFrame`'s own translate will use this frame.
     const dataSource = dataSourceOf(useStash, s.pausedData !== null);
-    const visLastPoint = visible[visible.length - 1]!;
     const canComposite = canCompositeLineScroll(
       chartReveal,
       s.scrubAmount,
       cfg.degenOptions ? s.shakeState.amplitude : 0
     );
+    // Pooled ref (EngineState.lineCacheRef), refilled in place — the same
+    // object is handed to `drawFrame` below as `lineCache`, so the predicate
+    // here and the cache `drawLine` consults are provably the same inputs,
+    // and neither costs an allocation.
+    const lineCacheRef = s.lineCacheRef;
+    lineCacheRef.slot = s.lineCache;
+    lineCacheRef.dataRev = cfg.dataRev;
+    lineCacheRef.dataSource = dataSource;
+    lineCacheRef.splitPrefixStroke = false;
     let splitPrefixStroke = false;
-    if (
-      canComposite &&
-      lineCacheHits(
-        s.lineCache,
-        layout,
-        cfg.dataRev,
-        dataSource,
-        visible.length,
-        visible[0]!.time,
-        visLastPoint.time,
-        visLastPoint.value
-      )
-    ) {
+    if (canComposite && lineCacheHits(lineCacheRef, layout, visible)) {
       updateLineScrollLayer(
         s.lineScroll,
         s.lineCache,
@@ -1962,6 +1934,7 @@ export function engineStep(
       // future consumer that genuinely is alpha-driven.
       splitPrefixStroke = scrollLayerUsable(s.lineScroll, 1);
     }
+    lineCacheRef.splitPrefixStroke = splitPrefixStroke;
     if (splitPrefixStroke) {
       out.scrollPicture = s.lineScroll.picture;
       // Same dx the cached prefix path is offset by — the picture IS that
@@ -2015,13 +1988,9 @@ export function engineStep(
       chartReveal,
       pauseProgress,
       now_ms,
-      lineCache: {
-        slot: s.lineCache,
-        dataRev: cfg.dataRev,
-        dataSource,
-        splitPrefixStroke,
-      },
+      lineCache: lineCacheRef,
       gridLayer: s.gridLayer,
+      lineArgs: s.lineDrawArgs,
     });
 
     // During morph (chart ↔ empty), overlay the gradient gap + text on

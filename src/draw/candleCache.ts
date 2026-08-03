@@ -190,18 +190,23 @@ function roundedRectOnPath(
  * upstream conditions gate that.
  */
 export function updateCandleCache(
-  slot: CandleCacheSlot,
+  /** Slot + this frame's data-identity inputs (revision, backing array).
+   * Taken as the whole ref the caller already holds rather than as three
+   * loose arguments, so the slot can never be paired with another frame's
+   * revision by a mis-ordered call. */
+  ref: CandleCacheRef,
   makePath: () => CachePath,
   layout: ChartLayout,
   candles: CandlePoint[],
   candleWidthSecs: number,
   liveTime: number,
   bodyW: number,
-  radius: number,
-  dataSource: number,
-  candlesRev: number
+  radius: number
 ): boolean {
   'worklet';
+  const slot = ref.slot;
+  const dataSource = ref.dataSource;
+  const candlesRev = ref.candlesRev;
   // Scan closed-candle identity (no allocation): count + first/last time.
   let closedCount = 0;
   let firstClosedTime = 0;

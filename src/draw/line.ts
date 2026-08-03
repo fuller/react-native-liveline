@@ -11,7 +11,6 @@ import {
   updateLinePaths,
   type CachePath,
   type LineCacheRef,
-  type LineCacheSlot,
 } from './lineCache';
 import type { Ctx2D, Style2D } from './canvas2d';
 import {
@@ -30,6 +29,72 @@ import {
 // those tests under Jest, which doesn't transform that package.
 const DASH_4_4: number[] = [4, 4];
 const EMPTY_DASH: number[] = [];
+
+/**
+ * Everything `drawLine` needs beyond the three long-lived objects every draw
+ * module takes (`ctx`, `layout`, `palette`).
+ *
+ * **This is a pooled struct, not a per-call literal.** `drawLine` runs on the
+ * UI thread 60–120×/sec and previously took these twelve values as positional
+ * arguments — six of them consecutive numbers, silently transposable. Bundling
+ * them fixes that, but only if the bundle itself isn't allocated per frame, so
+ * exactly one instance lives on `EngineState` (`createLineDrawArgs`, mirroring
+ * `multiSeriesEntryScratch`) and every call site overwrites the fields it
+ * cares about in place. `drawLine` reads it synchronously and never retains
+ * it, so a single instance is safe even across the multi-series loop, which
+ * refills it once per series.
+ *
+ * New inputs go here as a field. That is the point: the previous shape made a
+ * 16th positional parameter expensive enough that a pooled-scratch change was
+ * reverted rather than pay for it.
+ */
+export interface LineDrawArgs {
+  /** Visible points, oldest → newest. */
+  visible: LivelinePoint[];
+  /** Smoothed live value — drives the last point's Y and the live tip. */
+  smoothValue: number;
+  /** Engine's `Date.now()/1000` for this frame; the live tip's X. */
+  now: number;
+  /** Draw the gradient fill under the line. */
+  showFill: boolean;
+  /** Scrub cursor X in px, or null when not scrubbing. */
+  scrubX: number | null;
+  /** 0 = not scrubbing, 1 = fully scrubbing (lerped). */
+  scrubAmount: number;
+  /** 0 = loading squiggly, 1 = fully revealed data line. */
+  chartReveal: number;
+  /** `performance.now()` — drives the loading breath/scroll during reveal. */
+  now_ms: number;
+  /** Scales the accent-color mix; 0 forces the grey loading color. */
+  colorBlend: number;
+  /** Skip the dashed current-price line (candle mode draws its own). */
+  skipDashLine: boolean;
+  /** Extra multiplier on the fill's alpha (line↔candle morph). */
+  fillScale: number;
+  /** Cross-frame path cache; undefined disables caching for this call. */
+  pathCache?: LineCacheRef;
+}
+
+/** Allocate one pooled `LineDrawArgs` (see the interface). Defaults match the
+ * old positional-parameter defaults, so a caller only has to write the fields
+ * it actually varies. */
+export function createLineDrawArgs(): LineDrawArgs {
+  'worklet';
+  return {
+    visible: [],
+    smoothValue: 0,
+    now: 0,
+    showFill: false,
+    scrubX: null,
+    scrubAmount: 0,
+    chartReveal: 1,
+    now_ms: 0,
+    colorBlend: 1,
+    skipDashLine: false,
+    fillScale: 1,
+    pathCache: undefined,
+  };
+}
 
 /** Parse a CSS color to [r, g, b, a]. Handles hex, rgb(), rgba(). */
 function parseRgba(color: string): [number, number, number, number] {
@@ -150,7 +215,9 @@ function renderCurve(
   layout: ChartLayout,
   palette: LivelinePalette,
   pts: [number, number][],
-  showFill: boolean,
+  /** Already folded together with the alpha test by the caller — see
+   * `drawLine`'s `wantFill`. */
+  wantFill: boolean,
   lineAlpha: number = 1,
   fillAlpha: number = 1,
   strokeColor?: Style2D
@@ -159,7 +226,7 @@ function renderCurve(
   const { h, pad } = layout;
   const baseAlpha = ctx.globalAlpha;
 
-  if (showFill && fillAlpha > 0.01) {
+  if (wantFill && fillAlpha > 0.01) {
     ctx.globalAlpha = baseAlpha * fillAlpha;
     const grad = ctx.createLinearGradient(0, pad.top, 0, h - pad.bottom);
     grad.addColorStop(0, palette.fillTop);
@@ -197,26 +264,28 @@ function paintLineCurve(
   ctx: Ctx2D,
   layout: ChartLayout,
   palette: LivelinePalette,
-  cacheReady: boolean,
-  cacheSlot: LineCacheSlot | undefined,
-  wantFill: boolean,
+  /** The cache path to stroke, or null to rebuild the spline from `pts`.
+   * Resolving "cache hit? which of the slot's three paths?" once in `drawLine`
+   * — instead of re-deriving it from `cacheReady`/`cacheSlot`/`splitStroke` at
+   * each of the three call sites — is what lets this take two paths instead of
+   * four booleans. */
+  stroke: CachePath | null,
+  /** The cache fill path, or null for no fill / no cache. */
+  fill: CachePath | null,
   pts: [number, number][],
-  showFill: boolean,
+  wantFill: boolean,
   lineAlpha: number,
   fillAlpha: number,
-  strokeColor?: Style2D,
-  /** Stroke `tailScratch` instead of the combined `scratch` — the prefix is
-   * being composited from the scroll layer picture. See LineCacheRef. */
-  splitStroke: boolean = false
+  strokeColor?: Style2D
 ) {
   'worklet';
-  if (cacheReady && cacheSlot !== undefined) {
+  if (stroke !== null) {
     renderCurvePaths(
       ctx,
       layout,
       palette,
-      splitStroke ? cacheSlot.tailScratch! : cacheSlot.scratch!,
-      wantFill ? cacheSlot.fillScratch : null,
+      stroke,
+      fill,
       lineAlpha,
       fillAlpha,
       strokeColor
@@ -227,7 +296,7 @@ function paintLineCurve(
       layout,
       palette,
       pts,
-      showFill,
+      wantFill,
       lineAlpha,
       fillAlpha,
       strokeColor
@@ -239,20 +308,19 @@ export function drawLine(
   ctx: Ctx2D,
   layout: ChartLayout,
   palette: LivelinePalette,
-  visible: LivelinePoint[],
-  smoothValue: number,
-  now: number,
-  showFill: boolean,
-  scrubX: number | null,
-  scrubAmount: number = 0,
-  chartReveal: number = 1,
-  now_ms: number = 0,
-  colorBlend: number = 1,
-  skipDashLine: boolean = false,
-  fillScale: number = 1,
-  pathCache?: LineCacheRef
+  /** Pooled per-frame inputs — see `LineDrawArgs`. Read synchronously and
+   * never retained, so the caller may reuse one instance across calls. */
+  a: LineDrawArgs
 ): [number, number][] | undefined {
   'worklet';
+  const visible = a.visible;
+  const smoothValue = a.smoothValue;
+  const now = a.now;
+  const scrubX = a.scrubX;
+  const scrubAmount = a.scrubAmount;
+  const chartReveal = a.chartReveal;
+  const now_ms = a.now_ms;
+  const pathCache = a.pathCache;
   const { h, pad, toX, toY, chartW, chartH } = layout;
   const incomingAlpha = ctx.globalAlpha;
 
@@ -293,20 +361,20 @@ export function drawLine(
   // Computed before the cache check below — wantFill only needs these, not
   // the point arrays — so a cache hit never waits on the point-array work.
   let lineAlpha = 1;
-  let fillAlpha = fillScale;
+  let fillAlpha = a.fillScale;
   if (chartReveal < 1) {
     const breath = loadingBreath(now_ms);
     lineAlpha = breath + (1 - breath) * chartReveal;
-    fillAlpha = chartReveal * fillScale;
+    fillAlpha = chartReveal * a.fillScale;
   }
-  const wantFill = showFill && fillAlpha > 0.01;
+  const wantFill = a.showFill && fillAlpha > 0.01;
 
   // Blend line color: grey at reveal=0, accent by reveal≈0.3.
   // colorBlend scales the accent mix — 0 forces grey (used during reverse morph
   // so the line fades to the loading squiggly color instead of flashing blue).
-  const colorT = Math.min(1, chartReveal * 3) * colorBlend;
+  const colorT = Math.min(1, chartReveal * 3) * a.colorBlend;
   const strokeColor =
-    chartReveal < 1 || colorBlend < 1
+    chartReveal < 1 || a.colorBlend < 1
       ? blendColor(palette.gridLabel, palette.line, colorT)
       : undefined;
 
@@ -339,16 +407,7 @@ export function drawLine(
     pathCache !== undefined &&
     chartReveal >= 1 &&
     visLen > 0 &&
-    lineCacheHits(
-      pathCache.slot,
-      layout,
-      pathCache.dataRev,
-      pathCache.dataSource,
-      visLen,
-      visible[0]!.time,
-      visible[visLen - 1]!.time,
-      visible[visLen - 1]!.value
-    )
+    lineCacheHits(pathCache, layout, visible)
   ) {
     const visLast = visible[visLen - 1]!;
     const lastX = toX(visLast.time);
@@ -413,19 +472,13 @@ export function drawLine(
       pathCache !== undefined &&
       chartReveal >= 1 &&
       updateLinePaths(
-        pathCache.slot,
+        pathCache,
         makeSkPath,
         layout,
         decimated,
         pts,
         wantFill,
-        pathCache.dataRev,
-        pathCache.dataSource,
-        visLen,
-        visible[0]!.time,
-        visible[visLen - 1]!.time,
-        visible[visLen - 1]!.value,
-        wantSplitStroke
+        visible
       );
   }
 
@@ -454,6 +507,16 @@ export function drawLine(
     );
   }
 
+  // Which paths this frame's strokes read, resolved once. All three
+  // paintLineCurve calls below are the same drawing with different clips and
+  // alpha, so the source selection can't differ between them — hoisting it
+  // makes that structural rather than a convention three argument lists have
+  // to keep agreeing on.
+  const slot = cacheReady ? pathCache?.slot : undefined;
+  const strokePath =
+    slot === undefined ? null : splitStroke ? slot.tailScratch! : slot.scratch!;
+  const fillPath = slot === undefined || !wantFill ? null : slot.fillScratch;
+
   // Clip line + fill to chart area — during big value jumps the range
   // lerps smoothly so the line may extend beyond the chart bounds.
   // Clipping keeps it tidy while the range catches up.
@@ -468,15 +531,13 @@ export function drawLine(
       ctx,
       layout,
       palette,
-      cacheReady,
-      pathCache?.slot,
-      wantFill,
+      strokePath,
+      fillPath,
       pts,
-      showFill,
+      wantFill,
       lineAlpha,
       fillAlpha,
-      strokeColor,
-      splitStroke
+      strokeColor
     );
     ctx.restore();
 
@@ -488,15 +549,13 @@ export function drawLine(
       ctx,
       layout,
       palette,
-      cacheReady,
-      pathCache?.slot,
-      wantFill,
+      strokePath,
+      fillPath,
       pts,
-      showFill,
+      wantFill,
       lineAlpha,
       fillAlpha,
-      strokeColor,
-      splitStroke
+      strokeColor
     );
     ctx.restore();
   } else {
@@ -504,15 +563,13 @@ export function drawLine(
       ctx,
       layout,
       palette,
-      cacheReady,
-      pathCache?.slot,
-      wantFill,
+      strokePath,
+      fillPath,
       pts,
-      showFill,
+      wantFill,
       lineAlpha,
       fillAlpha,
-      strokeColor,
-      splitStroke
+      strokeColor
     );
   }
 
@@ -521,7 +578,7 @@ export function drawLine(
 
   // Dashed current-price line — morphs from center during reveal (fades in late,
   // so the center-vs-squiggly difference is imperceptible by the time it's visible)
-  if (!skipDashLine) {
+  if (!a.skipDashLine) {
     const realCurrentY = Math.max(
       pad.top,
       Math.min(h - pad.bottom, toY(smoothValue))

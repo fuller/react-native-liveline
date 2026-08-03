@@ -138,10 +138,12 @@ describe('updateWindowTransition — retargeting', () => {
     const wt = wtState({ to: 20, rangeToMin: -1, rangeToMax: -1 });
     updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      /* displayWindow */ 20,
-      /* displayMin */ 90,
-      /* displayMax */ 110,
+      {
+        windowTransition: wt,
+        displayWindow: 20,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       NOW_MS,
       NOW,
@@ -167,10 +169,12 @@ describe('updateWindowTransition — retargeting', () => {
     const wt = wtState({ to: 20, rangeToMin: -1, rangeToMax: -1 });
     updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      20,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 20,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       NOW_MS,
       NOW,
@@ -192,10 +196,12 @@ describe('updateWindowTransition — retargeting', () => {
     const wt = wtState({ to: 20, rangeToMin: -1, rangeToMax: -1 });
     updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      20,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 20,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       NOW_MS,
       NOW,
@@ -217,10 +223,12 @@ describe('updateWindowTransition — retargeting', () => {
     const wt = wtState({ to: 20, rangeToMin: 42, rangeToMax: 84 });
     updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      20,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 20,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       NOW_MS,
       NOW,
@@ -240,10 +248,12 @@ describe('updateWindowTransition — retargeting', () => {
     ]);
     updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      20,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 20,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       NOW_MS,
       NOW,
@@ -253,10 +263,7 @@ describe('updateWindowTransition — retargeting', () => {
     );
     updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      55,
-      1,
-      2,
+      { windowTransition: wt, displayWindow: 55, displayMin: 1, displayMax: 2 },
       false,
       NOW_MS + 300,
       NOW,
@@ -281,10 +288,12 @@ describe('updateWindowTransition — progress curve', () => {
     const wt = wtState({ to: 20 });
     const r = updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      20,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 20,
+        displayMin: 90,
+        displayMax: 110,
+      },
       true,
       50_000,
       1000,
@@ -300,10 +309,12 @@ describe('updateWindowTransition — progress curve', () => {
     const wt = wtState({ to: 100, startMs: 0 });
     const r = updateWindowTransition(
       cfg({ windowSecs: 100 }),
-      wt,
-      100,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 100,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       50_000,
       1000,
@@ -322,10 +333,12 @@ describe('updateWindowTransition — progress curve', () => {
     const wt = wtState({ to: 10, startMs: 0 });
     updateWindowTransition(
       cfg({ windowSecs: 40 }),
-      wt,
-      10,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 10,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       1000,
       1000,
@@ -335,10 +348,12 @@ describe('updateWindowTransition — progress curve', () => {
     );
     const r = updateWindowTransition(
       cfg({ windowSecs: 40 }),
-      wt,
-      10,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 10,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       1000 + WINDOW_TRANSITION_MS / 2,
       1000,
@@ -355,10 +370,12 @@ describe('updateWindowTransition — progress curve', () => {
     const wt = wtState({ to: 10, startMs: 0 });
     updateWindowTransition(
       cfg({ windowSecs: 40 }),
-      wt,
-      10,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 10,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       1000,
       1000,
@@ -368,10 +385,12 @@ describe('updateWindowTransition — progress curve', () => {
     );
     const r = updateWindowTransition(
       cfg({ windowSecs: 40 }),
-      wt,
-      10,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 10,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       1000 + WINDOW_TRANSITION_MS / 4,
       1000,
@@ -388,10 +407,12 @@ describe('updateWindowTransition — progress curve', () => {
     const wt = wtState({ to: 10, startMs: 0 });
     updateWindowTransition(
       cfg({ windowSecs: 40 }),
-      wt,
-      10,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 10,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       1000,
       1000,
@@ -401,10 +422,12 @@ describe('updateWindowTransition — progress curve', () => {
     );
     const r = updateWindowTransition(
       cfg({ windowSecs: 40 }),
-      wt,
-      10,
-      90,
-      110,
+      {
+        windowTransition: wt,
+        displayWindow: 10,
+        displayMin: 90,
+        displayMax: 110,
+      },
       false,
       1000 + WINDOW_TRANSITION_MS,
       1000,
@@ -428,10 +451,12 @@ describe('updateWindowTransition — progress curve', () => {
     const call = (wt: WindowTransState, now_ms: number) =>
       updateWindowTransition(
         cfg({ windowSecs: 40 }),
-        wt,
-        10,
-        90,
-        110,
+        {
+          windowTransition: wt,
+          displayWindow: 10,
+          displayMin: 90,
+          displayMax: 110,
+        },
         false,
         now_ms,
         1000,
@@ -476,15 +501,17 @@ const RANGE_WT = {
 describe('updateRange — first frame', () => {
   it('adopts the computed range verbatim and marks itself inited', () => {
     const r = updateRange(
+      {
+        windowTransition: wtState(),
+        rangeInited: false,
+        targetMin: -1,
+        targetMax: -1,
+        displayMin: -1,
+        displayMax: -1,
+      },
       { min: 3, max: 7 },
       false,
-      -1,
-      -1,
-      -1,
-      -1,
-      false,
       0,
-      wtState(),
       0.08,
       300,
       16.67
@@ -503,15 +530,17 @@ describe('updateRange — first frame', () => {
 
   it('never reports a zero valRange (it is a divisor for every toY)', () => {
     const r = updateRange(
+      {
+        windowTransition: wtState(),
+        rangeInited: false,
+        targetMin: 0,
+        targetMax: 0,
+        displayMin: 0,
+        displayMax: 0,
+      },
       { min: 5, max: 5 },
       false,
       0,
-      0,
-      0,
-      0,
-      false,
-      0,
-      wtState(),
       0.08,
       300,
       16.67
@@ -523,15 +552,17 @@ describe('updateRange — first frame', () => {
 describe('updateRange — during a window transition', () => {
   it('blends linearly between the captured from/to ranges by progress alone', () => {
     const r = updateRange(
+      {
+        windowTransition: { ...wtState(), ...RANGE_WT },
+        rangeInited: true,
+        targetMin: 0,
+        targetMax: 0,
+        displayMin: /* displayMin */ 1234,
+        displayMax: /* displayMax */ 5678,
+      },
       { min: 999, max: 999 },
       true,
-      0,
-      0,
-      /* displayMin */ 1234,
-      /* displayMax */ 5678,
-      true,
       0.25,
-      { ...wtState(), ...RANGE_WT },
       0.08,
       300,
       16.67
@@ -546,15 +577,17 @@ describe('updateRange — during a window transition', () => {
 
   it('still tracks the computed range as the target for when the transition ends', () => {
     const r = updateRange(
+      {
+        windowTransition: { ...wtState(), ...RANGE_WT },
+        rangeInited: true,
+        targetMin: 0,
+        targetMax: 0,
+        displayMin: 1234,
+        displayMax: 5678,
+      },
       { min: 42, max: 84 },
       true,
-      0,
-      0,
-      1234,
-      5678,
-      true,
       0.25,
-      { ...wtState(), ...RANGE_WT },
       0.08,
       300,
       16.67
@@ -565,15 +598,17 @@ describe('updateRange — during a window transition', () => {
 
   it('reaches the captured target range exactly at full progress', () => {
     const r = updateRange(
+      {
+        windowTransition: { ...wtState(), ...RANGE_WT },
+        rangeInited: true,
+        targetMin: 0,
+        targetMax: 0,
+        displayMin: 0,
+        displayMax: 0,
+      },
       { min: 0, max: 0 },
       true,
-      0,
-      0,
-      0,
-      0,
-      true,
       1,
-      { ...wtState(), ...RANGE_WT },
       0.08,
       300,
       16.67
@@ -590,15 +625,17 @@ describe('updateRange — steady-state lerp', () => {
     let displayMax = 100;
     for (let i = 0; i < frames; i++) {
       const r = updateRange(
+        {
+          windowTransition: wtState(),
+          rangeInited: true,
+          targetMin: 0,
+          targetMax: 0,
+          displayMin: displayMin,
+          displayMax: displayMax,
+        },
         { min: 40, max: 160 },
-        true,
-        0,
-        0,
-        displayMin,
-        displayMax,
         false,
         0,
-        wtState(),
         0.08,
         chartH,
         dt
@@ -637,15 +674,17 @@ describe('updateRange — steady-state lerp', () => {
     let prev = -Infinity;
     for (let i = 0; i < 200; i++) {
       const r = updateRange(
+        {
+          windowTransition: wtState(),
+          rangeInited: true,
+          targetMin: 0,
+          targetMax: 0,
+          displayMin: displayMin,
+          displayMax: 100,
+        },
         { min: 40, max: 160 },
-        true,
-        0,
-        0,
-        displayMin,
-        100,
         false,
         0,
-        wtState(),
         0.08,
         1e9,
         1000 / 60
@@ -682,15 +721,17 @@ describe('updateRange — steady-state lerp', () => {
     let displayMax = 5;
     for (let i = 0; i < 400; i++) {
       const r = updateRange(
+        {
+          windowTransition: wtState(),
+          rangeInited: true,
+          targetMin: 0,
+          targetMax: 0,
+          displayMin: displayMin,
+          displayMax: displayMax,
+        },
         { min: 5, max: 5.0005 },
-        true,
-        0,
-        0,
-        displayMin,
-        displayMax,
         false,
         0,
-        wtState(),
         0.08,
         300,
         1000 / 60
@@ -722,17 +763,12 @@ describe('updateHoverState — hit testing', () => {
   ) =>
     updateHoverState(
       hoverPixelX,
-      PAD,
-      W,
       layout,
       now,
       visible,
       scrubAmount,
       lastHover,
-      false,
-      0,
-      100,
-      CHART_W
+      false
     );
 
   it('maps a pixel inside the plot area to an interpolated time and value', () => {
@@ -764,20 +800,7 @@ describe('updateHoverState — hit testing', () => {
   });
 
   it('reports no hover when there is no data to interpolate', () => {
-    const r = updateHoverState(
-      55,
-      PAD,
-      W,
-      layout,
-      100,
-      [],
-      0,
-      null,
-      false,
-      0,
-      100,
-      CHART_W
-    );
+    const r = updateHoverState(55, layout, 100, [], 0, null, false);
     expect(r.isActiveHover).toBe(false);
     expect(r.hoverValue).toBeNull();
     expect(r.emitPoint).toBeNull();
@@ -815,17 +838,12 @@ describe('updateHoverState — scrub fade', () => {
   ) =>
     updateHoverState(
       hoverPixelX,
-      PAD,
-      W,
       layout,
       100,
       visible,
       scrubAmount,
       lastHover,
-      noMotion,
-      0,
-      100,
-      CHART_W
+      noMotion
     );
 
   it('jumps the scrub amount to exactly 1 / 0 under noMotion', () => {

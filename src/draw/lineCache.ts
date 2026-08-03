@@ -159,26 +159,41 @@ export function createLineCacheSlot(): LineCacheSlot {
  * the expensive per-frame work is needed at all, and `updateLinePaths` below
  * calls the exact same function on its (already-built) inputs, so the two
  * checks can never drift apart.
+ *
+ * The data-identity half of the key is derived here from `ref` (the slot plus
+ * this frame's revision/source) and from `visible` itself, rather than being
+ * passed as six loose arguments — four of which were adjacent numbers a
+ * caller could silently transpose. Deriving them in the one place that
+ * compares them also means a caller cannot compute them differently from the
+ * way `updateLinePaths` writes them.
+ *
+ * Precondition: `visible` is non-empty (every caller already gates on it).
  */
 export function lineCacheHits(
-  slot: LineCacheSlot,
+  ref: LineCacheRef,
   layout: ChartLayout,
-  dataRev: number,
-  dataSource: number,
-  visLen: number,
-  visFirstT: number,
-  visLastT: number,
-  visLastV: number
+  visible: LivelinePoint[]
 ): boolean {
   'worklet';
+  const slot = ref.slot;
+  // Ordered so nothing is dereferenced before the cheap disqualifiers run:
+  // `visible` is only indexed once the slot is known valid and the length
+  // already matches, which rules out the empty array (no valid slot can
+  // have kLen 0 — see MIN_CACHE_POINTS).
+  if (slot.prefix === null) return false;
+  const n = visible.length;
+  if (
+    slot.kLen !== n ||
+    slot.kDataRev !== ref.dataRev ||
+    slot.kDataSource !== ref.dataSource
+  ) {
+    return false;
+  }
+  const last = visible[n - 1]!;
   return (
-    slot.prefix !== null &&
-    slot.kDataRev === dataRev &&
-    slot.kDataSource === dataSource &&
-    slot.kLen === visLen &&
-    slot.kFirstT === visFirstT &&
-    slot.kLastT === visLastT &&
-    slot.kLastV === visLastV &&
+    slot.kFirstT === visible[0]!.time &&
+    slot.kLastT === last.time &&
+    slot.kLastV === last.value &&
     layoutKeyMatches(slot.layoutKey, layout)
   );
 }
@@ -404,35 +419,27 @@ export function assembleLineTailStroke(
  * `assembleLineTail` without ever building `decimated`/`pts`.
  */
 export function updateLinePaths(
-  slot: LineCacheSlot,
+  ref: LineCacheRef,
   makePath: () => CachePath,
   layout: ChartLayout,
   decimated: LivelinePoint[],
   pts: [number, number][],
   wantFill: boolean,
-  dataRev: number,
-  dataSource: number,
-  visLen: number,
-  visFirstT: number,
-  visLastT: number,
-  visLastV: number,
-  /** Forwarded to `assembleLineTail` — see its doc comment. */
-  splitStroke: boolean = false
+  /** The frame's visible points — the data-identity half of the cache key is
+   * derived from this, see `lineCacheHits`. Non-empty by construction here:
+   * `decimated` is a subset of it and already passed the MIN_CACHE_POINTS
+   * check above. */
+  visible: LivelinePoint[]
 ): boolean {
   'worklet';
   const N = decimated.length;
   if (N < MIN_CACHE_POINTS) return false;
 
-  const hit = lineCacheHits(
-    slot,
-    layout,
-    dataRev,
-    dataSource,
-    visLen,
-    visFirstT,
-    visLastT,
-    visLastV
-  );
+  const slot = ref.slot;
+  // Forwarded to `assembleLineTail` — see its doc comment, and
+  // `LineCacheRef.splitPrefixStroke` for why it is advisory.
+  const splitStroke = ref.splitPrefixStroke === true;
+  const hit = lineCacheHits(ref, layout, visible);
 
   if (!hit) {
     slot.prefix = ensured(slot.prefix, makePath);
@@ -449,12 +456,13 @@ export function updateLinePaths(
     slot.cutY = pts[prefixCount - 1]![1];
     slot.tRef = decimated[0]!.time;
     slot.xRefAtBuild = pts[0]![0];
-    slot.kDataRev = dataRev;
-    slot.kDataSource = dataSource;
-    slot.kLen = visLen;
-    slot.kFirstT = visFirstT;
-    slot.kLastT = visLastT;
-    slot.kLastV = visLastV;
+    const visLast = visible[visible.length - 1]!;
+    slot.kDataRev = ref.dataRev;
+    slot.kDataSource = ref.dataSource;
+    slot.kLen = visible.length;
+    slot.kFirstT = visible[0]!.time;
+    slot.kLastT = visLast.time;
+    slot.kLastV = visLast.value;
     writeLayoutKey(slot.layoutKey, layout);
   }
 

@@ -185,20 +185,21 @@ function frame(
   cfg: EngineConfigStep,
   args: FrameArgs = {}
 ): StepOutput {
-  const out = engineStep(
-    makeCtx(),
-    cfg,
-    s,
-    W,
-    H,
-    args.hoverX ?? null,
-    DT,
-    clockMs,
-    FONTS,
-    args.data ?? [],
-    args.candles ?? [],
-    args.multiData ?? {}
-  );
+  // `engineStep` takes a pooled FrameInputs struct rather than 12 positional
+  // args (PLAN_MAINT #4). Fill the engine's own pooled instance in place, the
+  // same way useLivelineEngine's frame callback does, so these tests exercise
+  // the real calling convention and allocate nothing per frame either.
+  const fi = s.frameInputs;
+  fi.w = W;
+  fi.h = H;
+  fi.hoverPixelX = args.hoverX ?? null;
+  fi.dt = DT;
+  fi.now_ms = clockMs;
+  fi.fonts = FONTS;
+  fi.data = args.data ?? [];
+  fi.candles = args.candles ?? [];
+  fi.multiData = args.multiData ?? {};
+  const out = engineStep(makeCtx(), cfg, s, fi);
   clockMs += DT;
   return out;
 }
