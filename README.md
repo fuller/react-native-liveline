@@ -34,16 +34,21 @@ npm install @shopify/react-native-skia react-native-reanimated react-native-work
 | `@shopify/react-native-skia` | `>=2.0.0` |
 | `react-native-reanimated` | `>=4.0.0` |
 | `react-native-worklets` | `>=0.3.0` |
-| `react-native-gesture-handler` | `>=3.0.0` |
+| `react-native-gesture-handler` | `>=2.30.0` |
 
 Reanimated 4 split its worklets runtime out into the separate
 `react-native-worklets` package (Reanimated itself declares this as its own
 peer dependency as of 4.0.0), so it's required alongside Reanimated here too.
-This library hasn't been tested against Reanimated 3.x. It's also not tested
-against gesture-handler 2.x anymore — this library still uses the classic
-`Gesture.Pan()` builder API (unchanged since v2), which gesture-handler 3.x
-keeps working but marks deprecated in favor of a new hook-based API; a
-migration to the new API is deferred to a future release.
+This library hasn't been tested against Reanimated 3.x.
+
+**gesture-handler 2.30 and 3.x are both supported.** The scrub gesture uses
+the classic `Gesture.Pan()` builder API, which exists unchanged in both majors
+— 3.x keeps it working but marks it deprecated in favour of a new hook-based
+API, and migrating is deferred to a future release. The `>=2.30.0` floor
+matters for Expo: SDK 55 pins `~2.30.0`, so a narrower range would put every
+SDK 55 app into a peer conflict and an `expo-doctor` failure. Compatibility is
+verified by installing 2.30.0 and running the typecheck against it, not by
+inspection.
 
 ### Reanimated Babel plugin
 
